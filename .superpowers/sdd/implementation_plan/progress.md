@@ -17,3 +17,4 @@
 ## Progress
 Task 1: complete (commit c3c8ec2..85626a9, review skipped — first scaffold, trivial)
 Task 2: complete (commit 2f29e53, tests 3/3 passing)
+Task 3: complete (commit c8696d2, aria2 integration)
