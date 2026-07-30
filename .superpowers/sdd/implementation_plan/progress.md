@@ -15,3 +15,4 @@
 - Task 12: Build & Distribution
 
 ## Progress
+Task 1: complete (commit c3c8ec2, review skipped — first scaffold, trivial)
