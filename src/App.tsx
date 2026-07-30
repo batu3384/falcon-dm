@@ -5,8 +5,10 @@ import Sidebar from "./components/Sidebar";
 import Toolbar from "./components/Toolbar";
 import DownloadList from "./components/DownloadList";
 import NewDownloadModal from "./components/NewDownloadModal";
+import { OnboardingWizard } from "./components/OnboardingWizard";
 
 function App() {
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [prefilledUrl, setPrefilledUrl] = useState("");
   
@@ -14,6 +16,12 @@ function App() {
   const [activeCategory, setActiveCategory] = useState("All Downloads");
 
   useEffect(() => {
+    // Check if onboarding is complete
+    const onboardingComplete = localStorage.getItem('onboarding_complete');
+    if (!onboardingComplete) {
+      setShowOnboarding(true);
+    }
+
     const unlisten = listen<{ url: string }>("intercepted-media", (event) => {
       setPrefilledUrl(event.payload.url);
       setIsModalOpen(true);
@@ -25,7 +33,11 @@ function App() {
   }, []);
 
   return (
-    <div className="app-container">
+    <div className="app-container relative">
+      {showOnboarding && (
+        <OnboardingWizard onComplete={() => setShowOnboarding(false)} />
+      )}
+      
       <Sidebar activeCategory={activeCategory} onSelectCategory={setActiveCategory} />
       
       <div className="main-content">

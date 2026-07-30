@@ -9,9 +9,24 @@
   Falcon DM combines a Rust (Tauri v2) backend with a React/TypeScript frontend to provide native OS integration, rigorous process isolation, and maximum network throughput.
 </p>
 
-<p align="center">
-  <img src="assets/mascot.jpg" width="280" alt="Falcon DM Mascot" style="border-radius: 16px;" />
-</p>
+<br>
+
+<table align="center" border="0" cellpadding="0" cellspacing="0">
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <img src="assets/mascot.jpg" width="250" alt="Falcon DM Mascot" style="border-radius: 16px;" />
+    </td>
+    <td width="50%" valign="middle" style="padding-left: 20px;">
+      <h3>Meet Falco (The Sniffer)</h3>
+      <p>The official mascot of Falcon DM embodies the engineering pillars of the project:</p>
+      <ul>
+        <li><strong>Speed:</strong> Multi-threaded chunking via <code>aria2c</code>.</li>
+        <li><strong>Precision:</strong> Byte-perfect HLS assembly via <code>ffmpeg</code>.</li>
+        <li><strong>Stealth:</strong> Silent browser interception via PNA CORS.</li>
+      </ul>
+    </td>
+  </tr>
+</table>
 
 ---
 
