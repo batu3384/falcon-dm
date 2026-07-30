@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { SchedulerModal } from './SchedulerModal';
+import { SettingsModal } from './SettingsModal';
 
 interface ToolbarProps {
   onAddClick: () => void;
@@ -7,6 +8,7 @@ interface ToolbarProps {
 
 export default function Toolbar({ onAddClick }: ToolbarProps) {
   const [schedulerOpen, setSchedulerOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
     <>
@@ -24,11 +26,12 @@ export default function Toolbar({ onAddClick }: ToolbarProps) {
           🕒 Scheduler
         </button>
         <div style={{ flex: 1 }}></div>
-        <button className="toolbar-btn">
+        <button className="toolbar-btn" onClick={() => setSettingsOpen(true)}>
           ⚙️ Settings
         </button>
       </div>
       <SchedulerModal isOpen={schedulerOpen} onClose={() => setSchedulerOpen(false)} />
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
     </>
   );
 }

@@ -1,5 +1,6 @@
 pub mod storage;
 pub mod download;
+pub mod settings;
 
 use download::engine::{Aria2Engine, Aria2Options};
 use storage::models::{Download, DownloadFilter, DownloadStatus, DownloadCategory};
@@ -14,6 +15,7 @@ use download::queue::{QueueManager, ScheduleOptions};
 use serde::Deserialize;
 use axum::{routing::post, Router, extract::State as AxumState, Json};
 use tauri::AppHandle;
+use settings::Settings;
 
 #[derive(Clone, Serialize)]
 struct ProgressPayload {
@@ -150,6 +152,25 @@ async fn change_priority(id: i64, increase: bool, state: State<'_, AppState>) ->
     Ok(())
 }
 
+#[tauri::command]
+fn get_settings(app: AppHandle) -> Result<Settings, String> {
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(Settings::load(&app_data_dir))
+}
+
+#[tauri::command]
+async fn save_settings(settings: Settings, app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    settings.save(&app_data_dir)?;
+    
+    // Apply settings dynamically
+    state.queue.set_concurrent_downloads(settings.max_concurrent_downloads as usize);
+    // Aria2 network limits might require restart, but we can try to update options if engine supports it.
+    // For now we just update queue manager.
+    
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct AddDownloadRequest {
     url: String,
@@ -206,8 +227,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
+            
+            let app_data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let settings = Settings::load(&app_data_dir);
+            let state = app_handle.state::<AppState>();
+            state.queue.set_concurrent_downloads(settings.max_concurrent_downloads as usize);
             
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show Falcon DM", true, None::<&str>)?;
@@ -389,7 +416,9 @@ pub fn run() {
             get_downloads,
             get_download_status,
             set_schedule,
-            change_priority
+            change_priority,
+            get_settings,
+            save_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

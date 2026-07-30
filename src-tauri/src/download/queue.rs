@@ -11,9 +11,11 @@ pub struct ScheduleOptions {
     pub active: bool,
 }
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 pub struct QueueManager {
     pub schedule: Arc<Mutex<ScheduleOptions>>,
-    pub max_concurrent: usize,
+    pub max_concurrent: Arc<AtomicUsize>,
 }
 
 impl QueueManager {
@@ -24,7 +26,7 @@ impl QueueManager {
                 stop_time: None,
                 active: false,
             })),
-            max_concurrent: 3,
+            max_concurrent: Arc::new(AtomicUsize::new(3)),
         }
     }
 
@@ -35,6 +37,10 @@ impl QueueManager {
 
     pub fn get_schedule(&self) -> ScheduleOptions {
         self.schedule.lock().unwrap().clone()
+    }
+
+    pub fn set_concurrent_downloads(&self, limit: usize) {
+        self.max_concurrent.store(limit, Ordering::SeqCst);
     }
 
     pub async fn tick(&self, db: &Database, engine: &Aria2Engine) -> Result<(), String> {
@@ -75,12 +81,13 @@ impl QueueManager {
         let mut active_count = downloading.len();
 
         // Enforce max concurrent downloads by pausing extras
-        if active_count > self.max_concurrent {
+        let max_concurrent_val = self.max_concurrent.load(Ordering::SeqCst);
+        if active_count > max_concurrent_val {
             let mut sorted = downloading.clone();
             // Sort by priority descending, then created_at
             sorted.sort_by(|a, b| b.priority.cmp(&a.priority));
             
-            for mut dl in sorted.into_iter().skip(self.max_concurrent) {
+            for mut dl in sorted.into_iter().skip(max_concurrent_val) {
                 if let Some(gid) = &dl.aria2_gid {
                     let _ = engine.pause(gid).await;
                 }
@@ -90,14 +97,14 @@ impl QueueManager {
             }
         }
 
-        if active_count < self.max_concurrent {
+        if active_count < max_concurrent_val {
             if let Ok(mut queued) = db.get_downloads(&DownloadFilter {
                 status: Some(DownloadStatus::Queued),
                 ..Default::default()
             }) {
                 queued.sort_by(|a, b| b.priority.cmp(&a.priority));
 
-                for mut dl in queued.into_iter().take(self.max_concurrent - active_count) {
+                for mut dl in queued.into_iter().take(max_concurrent_val - active_count) {
                     if dl.url.contains(".m3u8") {
                         // Handle HLS
                         let dl_id = dl.id.unwrap();
@@ -159,7 +166,7 @@ mod tests {
     #[test]
     fn test_queue_manager_new() {
         let qm = QueueManager::new();
-        assert_eq!(qm.max_concurrent, 3);
+        assert_eq!(qm.max_concurrent.load(Ordering::SeqCst), 3);
         assert_eq!(qm.get_schedule().active, false);
     }
 }
