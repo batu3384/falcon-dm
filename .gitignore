@@ -43,3 +43,4 @@ Thumbs.db
 
 # Falcon DM Temp Files
 *.falcondm-temp
+.superpowers/
