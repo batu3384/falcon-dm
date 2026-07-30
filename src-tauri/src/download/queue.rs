@@ -90,7 +90,6 @@ impl QueueManager {
             }
         }
 
-        // If we have room, start queued downloads
         if active_count < self.max_concurrent {
             if let Ok(mut queued) = db.get_downloads(&DownloadFilter {
                 status: Some(DownloadStatus::Queued),
@@ -99,8 +98,34 @@ impl QueueManager {
                 queued.sort_by(|a, b| b.priority.cmp(&a.priority));
 
                 for mut dl in queued.into_iter().take(self.max_concurrent - active_count) {
-                    if let Some(gid) = &dl.aria2_gid {
+                    if dl.url.contains(".m3u8") {
+                        // Handle HLS
+                        let dl_id = dl.id.unwrap();
+                        let url = dl.url.clone();
+                        let save_path = dl.save_path.clone();
+                        let mut final_path = std::path::PathBuf::from(&save_path);
+                        final_path.push(&dl.filename);
+                        let save_path_str = final_path.to_string_lossy().to_string();
+                        
+                        let db_clone = db.clone();
+                        tokio::spawn(async move {
+                            // Update status to Merging for simplicity during process (or Downloading)
+                            let _ = db_clone.update_download_progress(dl_id, 0, 0.0, &DownloadStatus::Downloading);
+                            
+                            match crate::download::hls::process_hls_stream(&url, &save_path_str).await {
+                                Ok(_) => {
+                                    let _ = db_clone.update_download_progress(dl_id, 100, 0.0, &DownloadStatus::Completed);
+                                }
+                                Err(e) => {
+                                    println!("HLS Error: {}", e);
+                                    let _ = db_clone.update_download_progress(dl_id, 0, 0.0, &DownloadStatus::Failed);
+                                }
+                            }
+                        });
+                        dl.status = DownloadStatus::Downloading;
+                    } else if let Some(gid) = &dl.aria2_gid {
                         let _ = engine.resume(gid).await;
+                        dl.status = DownloadStatus::Downloading;
                     } else {
                         // Needs to be added to aria2
                         let aria_opts = Aria2Options {
@@ -115,12 +140,13 @@ impl QueueManager {
                         if let Ok(gid) = engine.add_download(&dl.url, aria_opts).await {
                             dl.aria2_gid = Some(gid);
                         }
+                        dl.status = DownloadStatus::Downloading;
                     }
-                    dl.status = DownloadStatus::Downloading;
                     let _ = db.update_download(dl.id.unwrap(), &dl);
                 }
             }
         }
+
 
         Ok(())
     }

@@ -3,7 +3,7 @@ use rusqlite::{params, Connection, Row};
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub enum DatabaseError {
@@ -40,8 +40,9 @@ impl From<std::io::Error> for DatabaseError {
 
 pub type Result<T> = std::result::Result<T, DatabaseError>;
 
+#[derive(Clone)]
 pub struct Database {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl Database {
@@ -59,7 +60,7 @@ impl Database {
         let conn = Connection::open(&db_path)?;
 
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.run_migrations()?;
         Ok(db)
@@ -68,7 +69,7 @@ impl Database {
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.run_migrations()?;
         Ok(db)
