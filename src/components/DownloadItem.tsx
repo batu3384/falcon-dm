@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { DownloadModel } from "./DownloadList";
 import SpeedGraph from "./SpeedGraph";
 
@@ -22,6 +23,14 @@ export default function DownloadItem({ item }: DownloadItemProps) {
   
   const isDownloading = item.status === "Downloading";
 
+  const handlePriority = async (increase: boolean) => {
+    try {
+      await invoke("change_priority", { id: item.id, increase });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   return (
     <div className="download-item">
       <div className="item-filename" title={item.filename}>
@@ -43,7 +52,15 @@ export default function DownloadItem({ item }: DownloadItemProps) {
       <div className="item-size">
         {formatBytes(item.total_size)}
       </div>
-      <div className="item-status">{item.status}</div>
+      <div className="item-status" style={{ display: 'flex', alignItems: 'center' }}>
+        {item.status}
+        {item.status === "Queued" && (
+          <div style={{ display: 'flex', gap: '4px', marginLeft: '8px', cursor: 'pointer' }}>
+            <span onClick={() => handlePriority(true)} title="Increase Priority">🔼</span>
+            <span onClick={() => handlePriority(false)} title="Decrease Priority">🔽</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

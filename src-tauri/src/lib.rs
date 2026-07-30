@@ -8,6 +8,8 @@ use tauri::{Manager, Emitter, State};
 use chrono::Utc;
 use serde::Serialize;
 
+use download::queue::{QueueManager, ScheduleOptions};
+
 #[derive(Clone, Serialize)]
 struct ProgressPayload {
     id: i64,
@@ -21,6 +23,7 @@ struct ProgressPayload {
 pub struct AppState {
     pub db: Database,
     pub engine: Aria2Engine,
+    pub queue: QueueManager,
 }
 
 #[tauri::command]
@@ -42,7 +45,7 @@ async fn add_download(
         save_path: save_path.clone(),
         total_size: 104857600, // Dummy total size to allow mocking progress smoothly
         downloaded_size: 0,
-        status: DownloadStatus::Downloading, // Start as downloading directly for mock
+        status: DownloadStatus::Queued, // Start as queued
         category: DownloadCategory::from_filename(&filename),
         speed: 0.0,
         segments: 16,
@@ -58,21 +61,6 @@ async fn add_download(
 
     let id = state.db.insert_download(&dl).map_err(|e| e.to_string())?;
     dl.id = Some(id);
-
-    let opts = Aria2Options {
-        dir: save_path.clone(),
-        filename: filename.clone(),
-        split: 16,
-        max_connections: 16,
-        headers: vec![],
-        referrer: None,
-        user_agent: None,
-    };
-
-    if let Ok(gid) = state.engine.add_download(&url, opts).await {
-        dl.aria2_gid = Some(gid);
-        let _ = state.db.update_download(id, &dl);
-    }
 
     Ok(dl)
 }
@@ -130,6 +118,33 @@ async fn get_download_status(
     }
 }
 
+#[tauri::command]
+fn set_schedule(
+    start_time: Option<String>,
+    stop_time: Option<String>,
+    active: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.queue.set_schedule(ScheduleOptions {
+        start_time,
+        stop_time,
+        active,
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn change_priority(id: i64, increase: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let mut dl = state.db.get_download(id).map_err(|e| e.to_string())?;
+    if increase {
+        dl.priority += 1;
+    } else if dl.priority > 0 {
+        dl.priority -= 1;
+    }
+    state.db.update_download(id, &dl).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_data_dir = std::path::Path::new(":memory:");
@@ -139,7 +154,7 @@ pub fn run() {
     // Try to start aria2c, gracefully handle if not found
     let _ = engine.start("aria2c");
 
-    let app_state = AppState { db, engine };
+    let app_state = AppState { db, engine, queue: QueueManager::new() };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -150,6 +165,7 @@ pub fn run() {
                 loop {
                     interval.tick().await;
                     let state = app_handle.state::<AppState>();
+                    let _ = state.queue.tick(&state.db, &state.engine).await;
                     
                     if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
                         status: Some(DownloadStatus::Downloading),
@@ -233,7 +249,9 @@ pub fn run() {
             resume_download,
             remove_download,
             get_downloads,
-            get_download_status
+            get_download_status,
+            set_schedule,
+            change_priority
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
