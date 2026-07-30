@@ -1,0 +1,439 @@
+use crate::storage::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
+use rusqlite::{params, Connection, Row};
+use std::fmt;
+use std::fs;
+use std::path::Path;
+use std::sync::Mutex;
+
+#[derive(Debug)]
+pub enum DatabaseError {
+    Sqlite(rusqlite::Error),
+    Io(std::io::Error),
+    LockError,
+    NotFound(i64),
+}
+
+impl fmt::Display for DatabaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DatabaseError::Sqlite(err) => write!(f, "SQLite error: {}", err),
+            DatabaseError::Io(err) => write!(f, "IO error: {}", err),
+            DatabaseError::LockError => write!(f, "Failed to acquire database lock"),
+            DatabaseError::NotFound(id) => write!(f, "Download with id {} not found", id),
+        }
+    }
+}
+
+impl std::error::Error for DatabaseError {}
+
+impl From<rusqlite::Error> for DatabaseError {
+    fn from(err: rusqlite::Error) -> Self {
+        DatabaseError::Sqlite(err)
+    }
+}
+
+impl From<std::io::Error> for DatabaseError {
+    fn from(err: std::io::Error) -> Self {
+        DatabaseError::Io(err)
+    }
+}
+
+pub type Result<T> = std::result::Result<T, DatabaseError>;
+
+pub struct Database {
+    conn: Mutex<Connection>,
+}
+
+impl Database {
+    pub fn init(app_data_dir: &Path) -> Result<Self> {
+        if app_data_dir != Path::new(":memory:") {
+            fs::create_dir_all(app_data_dir)?;
+        }
+
+        let db_path = if app_data_dir == Path::new(":memory:") {
+            app_data_dir.to_path_buf()
+        } else {
+            app_data_dir.join("falcon_dm.db")
+        };
+
+        let conn = Connection::open(&db_path)?;
+
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
+        db.run_migrations()?;
+        Ok(db)
+    }
+
+    pub fn in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
+        db.run_migrations()?;
+        Ok(db)
+    }
+
+    fn run_migrations(&self) -> Result<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE IF NOT EXISTS downloads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                save_path TEXT NOT NULL,
+                total_size INTEGER DEFAULT 0,
+                downloaded_size INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'Queued',
+                category TEXT DEFAULT 'Other',
+                speed REAL DEFAULT 0.0,
+                segments INTEGER DEFAULT 8,
+                priority INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                error_message TEXT,
+                referrer TEXT,
+                user_agent TEXT,
+                cookies TEXT,
+                aria2_gid TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status);
+            CREATE INDEX IF NOT EXISTS idx_downloads_category ON downloads(category);",
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_download(&self, download: &Download) -> Result<i64> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        conn.execute(
+            "INSERT INTO downloads (
+                url, filename, save_path, total_size, downloaded_size, status, category,
+                speed, segments, priority, created_at, completed_at, error_message,
+                referrer, user_agent, cookies, aria2_gid
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                download.url,
+                download.filename,
+                download.save_path,
+                download.total_size as i64,
+                download.downloaded_size as i64,
+                download.status.as_str(),
+                download.category.as_str(),
+                download.speed,
+                download.segments as i64,
+                download.priority as i64,
+                download.created_at,
+                download.completed_at,
+                download.error_message,
+                download.referrer,
+                download.user_agent,
+                download.cookies,
+                download.aria2_gid,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn update_download(&self, id: i64, download: &Download) -> Result<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let rows = conn.execute(
+            "UPDATE downloads SET
+                url = ?1,
+                filename = ?2,
+                save_path = ?3,
+                total_size = ?4,
+                downloaded_size = ?5,
+                status = ?6,
+                category = ?7,
+                speed = ?8,
+                segments = ?9,
+                priority = ?10,
+                created_at = ?11,
+                completed_at = ?12,
+                error_message = ?13,
+                referrer = ?14,
+                user_agent = ?15,
+                cookies = ?16,
+                aria2_gid = ?17
+            WHERE id = ?18",
+            params![
+                download.url,
+                download.filename,
+                download.save_path,
+                download.total_size as i64,
+                download.downloaded_size as i64,
+                download.status.as_str(),
+                download.category.as_str(),
+                download.speed,
+                download.segments as i64,
+                download.priority as i64,
+                download.created_at,
+                download.completed_at,
+                download.error_message,
+                download.referrer,
+                download.user_agent,
+                download.cookies,
+                download.aria2_gid,
+                id,
+            ],
+        )?;
+        if rows == 0 {
+            return Err(DatabaseError::NotFound(id));
+        }
+        Ok(())
+    }
+
+    pub fn update_download_progress(
+        &self,
+        id: i64,
+        downloaded_size: u64,
+        speed: f64,
+        status: &DownloadStatus,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let rows = conn.execute(
+            "UPDATE downloads SET downloaded_size = ?1, speed = ?2, status = ?3 WHERE id = ?4",
+            params![downloaded_size as i64, speed, status.as_str(), id],
+        )?;
+        if rows == 0 {
+            return Err(DatabaseError::NotFound(id));
+        }
+        Ok(())
+    }
+
+    pub fn get_downloads(&self, filter: &DownloadFilter) -> Result<Vec<Download>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let mut sql = String::from(
+            "SELECT id, url, filename, save_path, total_size, downloaded_size, status, \
+             category, speed, segments, priority, created_at, completed_at, error_message, \
+             referrer, user_agent, cookies, aria2_gid FROM downloads WHERE 1=1",
+        );
+
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(ref status) = filter.status {
+            sql.push_str(" AND status = ?");
+            params.push(Box::new(status.as_str().to_string()));
+        }
+
+        if let Some(ref category) = filter.category {
+            sql.push_str(" AND category = ?");
+            params.push(Box::new(category.as_str().to_string()));
+        }
+
+        if let Some(ref search) = filter.search {
+            if !search.trim().is_empty() {
+                sql.push_str(" AND (filename LIKE ? OR url LIKE ?)");
+                let pattern = format!("%{}%", search.trim());
+                params.push(Box::new(pattern.clone()));
+                params.push(Box::new(pattern));
+            }
+        }
+
+        sql.push_str(" ORDER BY id DESC");
+
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let download_iter = stmt.query_map(params_ref.as_slice(), row_to_download)?;
+
+        let mut downloads = Vec::new();
+        for download in download_iter {
+            downloads.push(download?);
+        }
+
+        Ok(downloads)
+    }
+
+    pub fn get_download(&self, id: i64) -> Result<Download> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, url, filename, save_path, total_size, downloaded_size, status, \
+             category, speed, segments, priority, created_at, completed_at, error_message, \
+             referrer, user_agent, cookies, aria2_gid FROM downloads WHERE id = ?1",
+        )?;
+
+        stmt.query_row(params![id], row_to_download)
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound(id),
+                other => DatabaseError::Sqlite(other),
+            })
+    }
+
+    pub fn delete_download(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let rows = conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])?;
+        if rows == 0 {
+            return Err(DatabaseError::NotFound(id));
+        }
+        Ok(())
+    }
+}
+
+fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
+    let id: i64 = row.get(0)?;
+    let url: String = row.get(1)?;
+    let filename: String = row.get(2)?;
+    let save_path: String = row.get(3)?;
+    let total_size: i64 = row.get(4)?;
+    let downloaded_size: i64 = row.get(5)?;
+    let status_str: String = row.get(6)?;
+    let category_str: String = row.get(7)?;
+    let speed: f64 = row.get(8)?;
+    let segments: i64 = row.get(9)?;
+    let priority: i64 = row.get(10)?;
+    let created_at: String = row.get(11)?;
+    let completed_at: Option<String> = row.get(12)?;
+    let error_message: Option<String> = row.get(13)?;
+    let referrer: Option<String> = row.get(14)?;
+    let user_agent: Option<String> = row.get(15)?;
+    let cookies: Option<String> = row.get(16)?;
+    let aria2_gid: Option<String> = row.get(17)?;
+
+    Ok(Download {
+        id: Some(id),
+        url,
+        filename,
+        save_path,
+        total_size: total_size as u64,
+        downloaded_size: downloaded_size as u64,
+        status: status_str.parse().unwrap_or(DownloadStatus::Queued),
+        category: category_str.parse().unwrap_or(DownloadCategory::Other),
+        speed,
+        segments: segments as u32,
+        priority: priority as u32,
+        created_at,
+        completed_at,
+        error_message,
+        referrer,
+        user_agent,
+        cookies,
+        aria2_gid,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_download(name: &str) -> Download {
+        Download {
+            id: None,
+            url: format!("https://example.com/{}", name),
+            filename: name.to_string(),
+            save_path: format!("/downloads/{}", name),
+            total_size: 1024 * 1024,
+            downloaded_size: 0,
+            status: DownloadStatus::Queued,
+            category: DownloadCategory::from_filename(name),
+            speed: 0.0,
+            segments: 8,
+            priority: 1,
+            created_at: "2026-07-30T13:00:00Z".to_string(),
+            completed_at: None,
+            error_message: None,
+            referrer: Some("https://example.com".to_string()),
+            user_agent: Some("FalconDM/1.0".to_string()),
+            cookies: None,
+            aria2_gid: None,
+        }
+    }
+
+    #[test]
+    fn test_database_init_and_crud() {
+        let db = Database::in_memory().expect("Failed to create in-memory database");
+
+        // Insert
+        let download = create_test_download("sample.mp4");
+        let id = db.insert_download(&download).expect("Insert failed");
+        assert!(id > 0);
+
+        // Get single
+        let fetched = db.get_download(id).expect("Get single failed");
+        assert_eq!(fetched.id, Some(id));
+        assert_eq!(fetched.filename, "sample.mp4");
+        assert_eq!(fetched.category, DownloadCategory::Video);
+        assert_eq!(fetched.status, DownloadStatus::Queued);
+
+        // Update progress
+        db.update_download_progress(id, 512 * 1024, 1024.5, &DownloadStatus::Downloading)
+            .expect("Update progress failed");
+        let updated_progress = db.get_download(id).expect("Get after progress update failed");
+        assert_eq!(updated_progress.downloaded_size, 512 * 1024);
+        assert_eq!(updated_progress.speed, 1024.5);
+        assert_eq!(updated_progress.status, DownloadStatus::Downloading);
+
+        // Full Update
+        let mut to_update = updated_progress.clone();
+        to_update.status = DownloadStatus::Completed;
+        to_update.completed_at = Some("2026-07-30T13:05:00Z".to_string());
+        db.update_download(id, &to_update).expect("Full update failed");
+
+        let updated_full = db.get_download(id).expect("Get after full update failed");
+        assert_eq!(updated_full.status, DownloadStatus::Completed);
+        assert_eq!(updated_full.completed_at, Some("2026-07-30T13:05:00Z".to_string()));
+
+        // Delete
+        db.delete_download(id).expect("Delete failed");
+        assert!(db.get_download(id).is_err());
+    }
+
+    #[test]
+    fn test_filtering() {
+        let db = Database::in_memory().expect("Failed to create in-memory db");
+
+        let d1 = create_test_download("video1.mp4");
+        let d2 = create_test_download("song1.mp3");
+        let d3 = create_test_download("doc1.pdf");
+
+        let id1 = db.insert_download(&d1).unwrap();
+        let id2 = db.insert_download(&d2).unwrap();
+        let _id3 = db.insert_download(&d3).unwrap();
+
+        db.update_download_progress(id1, 100, 50.0, &DownloadStatus::Downloading).unwrap();
+        db.update_download_progress(id2, 100, 0.0, &DownloadStatus::Paused).unwrap();
+
+        // Filter by category
+        let video_filter = DownloadFilter {
+            category: Some(DownloadCategory::Video),
+            ..Default::default()
+        };
+        let videos = db.get_downloads(&video_filter).unwrap();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].filename, "video1.mp4");
+
+        // Filter by status
+        let paused_filter = DownloadFilter {
+            status: Some(DownloadStatus::Paused),
+            ..Default::default()
+        };
+        let paused = db.get_downloads(&paused_filter).unwrap();
+        assert_eq!(paused.len(), 1);
+        assert_eq!(paused[0].filename, "song1.mp3");
+
+        // Filter by search term
+        let search_filter = DownloadFilter {
+            search: Some("doc1".to_string()),
+            ..Default::default()
+        };
+        let search_results = db.get_downloads(&search_filter).unwrap();
+        assert_eq!(search_results.len(), 1);
+        assert_eq!(search_results[0].filename, "doc1.pdf");
+    }
+
+    #[test]
+    fn test_init_with_file_path() {
+        let temp_dir = std::env::temp_dir().join(format!("falcon_test_{}", uuid::Uuid::new_v4()));
+        let db = Database::init(&temp_dir).expect("Failed to init db with file path");
+
+        let download = create_test_download("archive.zip");
+        let id = db.insert_download(&download).expect("Insert failed");
+        assert!(id > 0);
+
+        let fetched = db.get_download(id).unwrap();
+        assert_eq!(fetched.filename, "archive.zip");
+        assert_eq!(fetched.category, DownloadCategory::Archive);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}
