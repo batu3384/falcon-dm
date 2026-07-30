@@ -40,7 +40,8 @@
 }
 
 body, html {
-  font-family: var(--font-family);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro", "Inter", sans-serif;
+  -webkit-font-smoothing: antialiased;
   background-color: var(--app-bg);
   color: var(--text-color);
   height: 100vh;
@@ -86,6 +87,7 @@ body, html {
   cursor: default;
   margin-bottom: 2px;
   font-size: 13px;
+  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 .sidebar-item:hover {
@@ -116,14 +118,14 @@ body, html {
 
 /* Toolbar */
 .toolbar {
-  height: 52px;
+  height: 82px;
   background-color: var(--toolbar-bg);
   border-bottom: 1px solid var(--border-color);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   display: flex;
   align-items: center;
-  padding: 0 16px;
+  padding: 30px 16px 0 16px;
   gap: 12px;
 }
 
@@ -139,6 +141,7 @@ body, html {
   align-items: center;
   gap: 6px;
   background-color: var(--item-bg);
+  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 .toolbar-btn:hover {
@@ -147,6 +150,7 @@ body, html {
 
 .toolbar-btn:active {
   background-color: var(--border-color);
+  transform: scale(0.97);
 }
 
 .toolbar-btn.primary {
@@ -193,6 +197,7 @@ body, html {
   border: 1px solid var(--item-border);
   border-radius: 8px;
   font-size: 13px;
+  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 .download-item:hover {
@@ -251,6 +256,11 @@ body, html {
   z-index: 100;
 }
 
+@keyframes modalPop {
+  0% { opacity: 0; transform: scale(0.95); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
 .modal-content {
   width: 400px;
   background-color: var(--modal-bg);
@@ -260,6 +270,7 @@ body, html {
   padding: 24px;
   display: flex;
   flex-direction: column;
+  animation: modalPop 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 .modal-title {
@@ -299,6 +310,11 @@ body, html {
   border: 1px solid var(--border-color);
   background-color: var(--item-bg);
   color: var(--text-color);
+  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+.modal-btn:active {
+  transform: scale(0.97);
 }
 
 .modal-btn:hover {
@@ -313,4 +329,20 @@ body, html {
 
 .modal-btn.primary:hover {
   opacity: 0.9;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0);
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+*:hover::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.5);
 }

@@ -12,7 +12,7 @@ export default function Toolbar({ onAddClick }: ToolbarProps) {
 
   return (
     <>
-      <div className="toolbar">
+      <div className="toolbar" data-tauri-drag-region>
         <button className="toolbar-btn primary" onClick={onAddClick}>
           ➕ Add URL
         </button>
