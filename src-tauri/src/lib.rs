@@ -2,7 +2,7 @@ pub mod storage;
 pub mod download;
 pub mod settings;
 
-use download::engine::{Aria2Engine, Aria2Options};
+use download::engine::Aria2Engine;
 use storage::models::{Download, DownloadFilter, DownloadStatus, DownloadCategory};
 use storage::Database;
 use tauri::{Manager, Emitter, State, menu::{Menu, MenuItem}, tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}};
@@ -190,8 +190,7 @@ async fn handle_api_add(
         id: None,
         url: payload.url,
         filename: payload.filename.clone(),
-        save_path: "~/Downloads".to_string(), // Simplified default
-        total_size: 104857600,
+        save_path: dirs::download_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "~/Downloads".to_string()),        total_size: 104857600,
         downloaded_size: 0,
         status: DownloadStatus::Queued, // Handled by QueueManager tick
         category: DownloadCategory::from_filename(&payload.filename),
@@ -224,7 +223,7 @@ pub fn run() {
 
     let app_state = AppState { db, engine, queue: QueueManager::new() };
 
-    tauri::Builder::default()
+    let mut app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -310,11 +309,18 @@ pub fn run() {
                     .route("/api/add", post(handle_api_add))
                     .with_state(axum_app_handle);
                 
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:14201").await.unwrap();
-                println!("Axum HTTP server listening on {}", listener.local_addr().unwrap());
-                axum::serve(listener, app).await.unwrap();
+                match tokio::net::TcpListener::bind("127.0.0.1:14201").await {
+                    Ok(listener) => {
+                        println!("Axum HTTP server listening on {}", listener.local_addr().unwrap());
+                        if let Err(e) = axum::serve(listener, app).await {
+                            log::error!("Axum server error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to bind Axum server on port 14201: {}. Is another instance running?", e);
+                    }
+                }
             });
-
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
                 loop {
@@ -352,25 +358,25 @@ pub fn run() {
                                         } else if s == "paused" {
                                             dl.status = DownloadStatus::Paused;
                                             status_str = "Paused".to_string();
+                                        } else if s == "error" {
+                                            dl.status = DownloadStatus::Failed;
+                                            dl.error_message = status.get("errorMessage").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                            status_str = "Failed".to_string();
                                         }
                                     }
                                 } else {
-                                    // mock progress if aria2c is not running or failed
-                                    dl.downloaded_size += 512000;
-                                    if dl.downloaded_size >= dl.total_size && dl.total_size > 0 {
-                                        dl.downloaded_size = dl.total_size;
-                                    }
-                                    speed = 512000.0;
+                                    dl.status = DownloadStatus::Failed;
+                                    dl.error_message = Some("aria2 is unreachable or GID is invalid".to_string());
+                                    status_str = "Failed".to_string();
+                                    speed = 0.0;
                                 }
                             } else {
-                                // mock progress
-                                dl.downloaded_size += 512000;
-                                if dl.downloaded_size >= dl.total_size && dl.total_size > 0 {
-                                    dl.downloaded_size = dl.total_size;
-                                }
-                                speed = 512000.0;
-                            }
-                            
+                                // Missing GID but in downloading state? Transition to error.
+                                dl.status = DownloadStatus::Failed;
+                                dl.error_message = Some("Download missing aria2 GID".to_string());
+                                status_str = "Failed".to_string();
+                                speed = 0.0;
+                            }                            
                             dl.speed = speed;
                             
                             if dl.downloaded_size >= dl.total_size && dl.total_size > 0 {
@@ -420,6 +426,15 @@ pub fn run() {
             get_settings,
             save_settings
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| match event {
+        tauri::RunEvent::ExitRequested { .. } => {
+            let state = app_handle.state::<AppState>();
+            let _ = state.engine.stop();
+            log::info!("Shutting down Falcon DM, stopped aria2 engine.");
+        }
+        _ => {}
+    });
 }

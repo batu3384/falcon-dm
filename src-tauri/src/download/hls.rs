@@ -57,7 +57,7 @@ pub async fn process_hls_stream(url: &str, save_path: &str) -> Result<(), String
     // 3. Create temp dir
     let out_path = Path::new(save_path);
     let parent = out_path.parent().unwrap_or_else(|| Path::new("."));
-    let temp_dir = parent.join(format!("{}.falcondm-temp", out_path.file_name().unwrap_or_default().to_string_lossy()));
+    let temp_dir = parent.join(format!("{}-{}.falcondm-temp", out_path.file_name().unwrap_or_default().to_string_lossy(), uuid::Uuid::new_v4()));
     
     if !temp_dir.exists() {
         fs::create_dir_all(&temp_dir).await.map_err(|e| e.to_string())?;
