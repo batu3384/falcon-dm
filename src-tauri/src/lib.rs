@@ -10,6 +10,10 @@ use serde::Serialize;
 
 use download::queue::{QueueManager, ScheduleOptions};
 
+use serde::Deserialize;
+use axum::{routing::post, Router, extract::State as AxumState, Json};
+use tauri::AppHandle;
+
 #[derive(Clone, Serialize)]
 struct ProgressPayload {
     id: i64,
@@ -145,6 +149,48 @@ async fn change_priority(id: i64, increase: bool, state: State<'_, AppState>) ->
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct AddDownloadRequest {
+    url: String,
+    filename: String,
+    referrer: Option<String>,
+    user_agent: Option<String>,
+    cookies: Option<String>,
+}
+
+async fn handle_api_add(
+    AxumState(app): AxumState<AppHandle>,
+    Json(payload): Json<AddDownloadRequest>,
+) -> Json<serde_json::Value> {
+    let state = app.state::<AppState>();
+    
+    let dl = Download {
+        id: None,
+        url: payload.url,
+        filename: payload.filename.clone(),
+        save_path: "~/Downloads".to_string(), // Simplified default
+        total_size: 104857600,
+        downloaded_size: 0,
+        status: DownloadStatus::Queued, // Handled by QueueManager tick
+        category: DownloadCategory::from_filename(&payload.filename),
+        speed: 0.0,
+        segments: 16,
+        priority: 1,
+        created_at: Utc::now().to_rfc3339(),
+        completed_at: None,
+        error_message: None,
+        referrer: payload.referrer,
+        user_agent: payload.user_agent,
+        cookies: payload.cookies,
+        aria2_gid: None,
+    };
+    
+    match state.db.insert_download(&dl) {
+        Ok(id) => Json(serde_json::json!({ "success": true, "id": id })),
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_data_dir = std::path::Path::new(":memory:");
@@ -160,6 +206,19 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
+            
+            // Spawn Axum HTTP server
+            let axum_app_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let app = Router::new()
+                    .route("/api/add", post(handle_api_add))
+                    .with_state(axum_app_handle);
+                
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:14201").await.unwrap();
+                println!("Axum HTTP server listening on {}", listener.local_addr().unwrap());
+                axum::serve(listener, app).await.unwrap();
+            });
+
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
                 loop {
