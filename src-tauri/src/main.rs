@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    temp_scaffold_lib::run()
+    falcon_dm_lib::run()
 }
