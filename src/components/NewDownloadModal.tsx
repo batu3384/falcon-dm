@@ -1,26 +1,29 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { downloadDir } from "@tauri-apps/api/path";
 
 interface NewDownloadModalProps {
   onClose: () => void;
+  onSuccess?: () => void;
+  initialUrl?: string;
 }
 
-export default function NewDownloadModal({ onClose }: NewDownloadModalProps) {
-  const [url, setUrl] = useState("");
+export default function NewDownloadModal({ onClose, onSuccess, initialUrl }: NewDownloadModalProps) {
+  const [url, setUrl] = useState(initialUrl || "");
 
   const handleDownload = async () => {
     if (url.trim()) {
       try {
+        const defaultPath = await downloadDir();
         await invoke("add_download", {
           url: url.trim(),
           filename: url.split("/").pop() || "download.bin",
-          savePath: "/tmp",
+          savePath: defaultPath,
         });
-        // Force refresh somehow? Real app might use an event, but here we can just close
+        // We don't need window.location.reload() since DownloadList listens to events.
+        // We might just need a small delay or tell the frontend to refetch.
         onClose();
-        // Since we don't have global state yet, a dirty reload works for demo,
-        // or just let the user re-select the category to fetch
-        window.location.reload();
+        if (onSuccess) onSuccess();
       } catch (error) {
         console.error("Failed to add download", error);
       }

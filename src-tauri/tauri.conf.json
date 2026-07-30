@@ -28,6 +28,10 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": [
+      "binaries/aria2c",
+      "binaries/ffmpeg"
+    ],
     "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",

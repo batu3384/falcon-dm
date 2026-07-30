@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { Play, Pause, ChevronUp, ChevronDown, File, Film, Music, Package } from "lucide-react";
 import { DownloadModel } from "./DownloadList";
 import SpeedGraph from "./SpeedGraph";
 
@@ -31,15 +32,26 @@ export default function DownloadItem({ item }: DownloadItemProps) {
     }
   };
 
+  const getFileIcon = (filename: string) => {
+    const lower = filename.toLowerCase();
+    if (lower.match(/\.(mp4|mkv|mov|avi|webm)$/)) return <Film size={14} />;
+    if (lower.match(/\.(mp3|wav|ogg|flac)$/)) return <Music size={14} />;
+    if (lower.match(/\.(zip|rar|7z|tar|gz)$/)) return <Package size={14} />;
+    return <File size={14} />;
+  };
+
   return (
     <div className="download-item">
       <div className="item-filename" title={item.filename}>
+        <div className="item-icon-circle">
+          {getFileIcon(item.filename)}
+        </div>
         {item.filename}
       </div>
       <div className="item-progress-col">
         <div className="progress-bar-bg">
           <div
-            className="progress-bar-fill"
+            className={`progress-bar-fill ${isDownloading ? "active" : ""}`}
             style={{ width: `${progressPercent}%` }}
           />
         </div>
@@ -52,13 +64,25 @@ export default function DownloadItem({ item }: DownloadItemProps) {
       <div className="item-size">
         {formatBytes(item.total_size)}
       </div>
-      <div className="item-status" style={{ display: 'flex', alignItems: 'center' }}>
-        {item.status}
+      <div className="item-actions">
+        {item.status === "Downloading" ? (
+          <button className="icon-btn" title="Pause">
+            <Pause size={16} />
+          </button>
+        ) : (
+          <button className="icon-btn" title="Resume">
+            <Play size={16} />
+          </button>
+        )}
         {item.status === "Queued" && (
-          <div style={{ display: 'flex', gap: '4px', marginLeft: '8px', cursor: 'pointer' }}>
-            <span onClick={() => handlePriority(true)} title="Increase Priority">🔼</span>
-            <span onClick={() => handlePriority(false)} title="Decrease Priority">🔽</span>
-          </div>
+          <>
+            <button className="icon-btn" onClick={() => handlePriority(true)} title="Increase Priority">
+              <ChevronUp size={16} />
+            </button>
+            <button className="icon-btn" onClick={() => handlePriority(false)} title="Decrease Priority">
+              <ChevronDown size={16} />
+            </button>
+          </>
         )}
       </div>
     </div>

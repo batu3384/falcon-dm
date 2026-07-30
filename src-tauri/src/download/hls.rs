@@ -1,13 +1,25 @@
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 use m3u8_rs::Playlist;
 use url::Url;
 use reqwest::Client;
 use futures::stream::{self, StreamExt};
+use tauri_plugin_shell::ShellExt;
 
-pub async fn process_hls_stream(url: &str, save_path: &str) -> Result<(), String> {
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+pub async fn process_hls_stream(app_handle: &tauri::AppHandle, url: &str, save_path: &str, rx: tokio::sync::watch::Receiver<bool>) -> Result<(), String> {
     let client = Client::new();
     let base_url = Url::parse(url).map_err(|e| e.to_string())?;
 
@@ -62,6 +74,8 @@ pub async fn process_hls_stream(url: &str, save_path: &str) -> Result<(), String
     if !temp_dir.exists() {
         fs::create_dir_all(&temp_dir).await.map_err(|e| e.to_string())?;
     }
+    
+    let _guard = TempDirGuard { path: temp_dir.clone() };
 
     // 4. Download segments concurrently
     let concurrency_limit = 10;
@@ -70,10 +84,20 @@ pub async fn process_hls_stream(url: &str, save_path: &str) -> Result<(), String
         .map(|(idx, seg_url)| {
             let client = client.clone();
             let temp_dir = temp_dir.clone();
+            let rx_clone = rx.clone();
             async move {
+                if *rx_clone.borrow() {
+                    return Err("Cancelled".to_string());
+                }
+                
                 let seg_path = temp_dir.join(format!("seg_{:05}.ts", idx));
                 let res = client.get(seg_url).send().await.map_err(|e| e.to_string())?;
                 let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+                
+                if *rx_clone.borrow() {
+                    return Err("Cancelled".to_string());
+                }
+                
                 let mut file = fs::File::create(&seg_path).await.map_err(|e| e.to_string())?;
                 file.write_all(&bytes).await.map_err(|e| e.to_string())?;
                 Ok::<PathBuf, String>(seg_path)
@@ -89,32 +113,37 @@ pub async fn process_hls_stream(url: &str, save_path: &str) -> Result<(), String
     let mut segment_paths = segment_paths;
     segment_paths.sort();
 
-    // 5. Merge with FFmpeg
-    let segments_txt_path = temp_dir.join("segments.txt");
-    let mut txt_file = fs::File::create(&segments_txt_path).await.map_err(|e| e.to_string())?;
+    // 5. Merge with FFmpeg Sidecar
+    let list_path = temp_dir.join("list.txt");
+    let mut list_file = fs::File::create(&list_path).await.map_err(|e| e.to_string())?;
     for p in &segment_paths {
-        let line = format!("file '{}'\n", p.file_name().unwrap().to_string_lossy());
-        txt_file.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+        list_file.write_all(format!("file '{}'\n", p.file_name().unwrap().to_string_lossy()).as_bytes()).await.map_err(|e| e.to_string())?;
     }
-    
-    let output = Command::new("ffmpeg")
-        .current_dir(&temp_dir)
-        .arg("-y")
-        .arg("-f").arg("concat")
-        .arg("-safe").arg("0")
-        .arg("-i").arg("segments.txt")
-        .arg("-c").arg("copy")
-        .arg(save_path)
+
+    let output = app_handle.shell().sidecar("ffmpeg")
+        .map_err(|e| format!("Failed to find ffmpeg sidecar: {}", e))?
+        .args([
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            list_path.to_str().unwrap(),
+            "-c",
+            "copy",
+            "-bsf:a",
+            "aac_adtstoasc",
+            save_path,
+        ])
         .output()
         .await
-        .map_err(|e| format!("FFmpeg failed to start: {}", e))?;
+        .map_err(|e| format!("Failed to execute FFmpeg: {}", e))?;
 
     if !output.status.success() {
         return Err(format!("FFmpeg failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    // 6. Cleanup temp dir
-    let _ = fs::remove_dir_all(temp_dir).await;
+    // We just drop it naturally at the end of the function.
 
     Ok(())
 }

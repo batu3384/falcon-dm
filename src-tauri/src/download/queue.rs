@@ -12,10 +12,32 @@ pub struct ScheduleOptions {
 }
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
+
+async fn determine_connection_limits(url: &str) -> (u32, u32) {
+    if url.starts_with("magnet:") || url.ends_with(".torrent") {
+        return (16, 16); // Torrents can use max connections
+    }
+    
+    let client = reqwest::Client::new();
+    if let Ok(res) = client.head(url).send().await {
+        if let Some(len) = res.content_length() {
+            if len < 10 * 1024 * 1024 {
+                return (2, 2);
+            }
+            if len < 100 * 1024 * 1024 {
+                return (8, 8);
+            }
+            return (16, 16);
+        }
+    }
+    (4, 4) // Default fallback
+}
 
 pub struct QueueManager {
     pub schedule: Arc<Mutex<ScheduleOptions>>,
     pub max_concurrent: Arc<AtomicUsize>,
+    pub active_hls_tasks: Arc<Mutex<HashMap<i64, tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl QueueManager {
@@ -27,6 +49,7 @@ impl QueueManager {
                 active: false,
             })),
             max_concurrent: Arc::new(AtomicUsize::new(3)),
+            active_hls_tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -43,7 +66,7 @@ impl QueueManager {
         self.max_concurrent.store(limit, Ordering::SeqCst);
     }
 
-    pub async fn tick(&self, db: &Database, engine: &Aria2Engine) -> Result<(), String> {
+    pub async fn tick(&self, db: &Database, engine: &Aria2Engine, app_handle: tauri::AppHandle) -> Result<(), String> {
         let opts = self.get_schedule();
         let mut is_scheduled_paused = false;
 
@@ -90,6 +113,11 @@ impl QueueManager {
             for mut dl in sorted.into_iter().skip(max_concurrent_val) {
                 if let Some(gid) = &dl.aria2_gid {
                     let _ = engine.pause(gid).await;
+                } else if dl.url.contains(".m3u8") {
+                    // Send cancellation signal to HLS task
+                    if let Some(tx) = self.active_hls_tasks.lock().unwrap().remove(&dl.id.unwrap()) {
+                        let _ = tx.send(true);
+                    }
                 }
                 dl.status = DownloadStatus::Queued;
                 let _ = db.update_download(dl.id.unwrap(), &dl);
@@ -115,19 +143,31 @@ impl QueueManager {
                         let save_path_str = final_path.to_string_lossy().to_string();
                         
                         let db_clone = db.clone();
+                        let (tx, rx) = tokio::sync::watch::channel(false);
+                        self.active_hls_tasks.lock().unwrap().insert(dl_id, tx);
+                        
+                        let hls_tasks_clone = self.active_hls_tasks.clone();
+                        let app_handle_clone = app_handle.clone();
+                        
                         tokio::spawn(async move {
                             // Update status to Merging for simplicity during process (or Downloading)
                             let _ = db_clone.update_download_progress(dl_id, 0, 0.0, &DownloadStatus::Downloading);
                             
-                            match crate::download::hls::process_hls_stream(&url, &save_path_str).await {
+                            match crate::download::hls::process_hls_stream(&app_handle_clone, &url, &save_path_str, rx).await {
                                 Ok(_) => {
                                     let _ = db_clone.update_download_progress(dl_id, 100, 0.0, &DownloadStatus::Completed);
                                 }
                                 Err(e) => {
-                                    println!("HLS Error: {}", e);
-                                    let _ = db_clone.update_download_progress(dl_id, 0, 0.0, &DownloadStatus::Failed);
+                                    if e == "Cancelled" {
+                                        let _ = db_clone.update_download_progress(dl_id, 0, 0.0, &DownloadStatus::Paused);
+                                    } else {
+                                        println!("HLS Error: {}", e);
+                                        let _ = db_clone.update_download_progress(dl_id, 0, 0.0, &DownloadStatus::Failed);
+                                    }
                                 }
                             }
+                            // Cleanup task tracking
+                            hls_tasks_clone.lock().unwrap().remove(&dl_id);
                         });
                         dl.status = DownloadStatus::Downloading;
                     } else if let Some(gid) = &dl.aria2_gid {
@@ -135,11 +175,12 @@ impl QueueManager {
                         dl.status = DownloadStatus::Downloading;
                     } else {
                         // Needs to be added to aria2
+                        let (split, max_connections) = determine_connection_limits(&dl.url).await;
                         let aria_opts = Aria2Options {
                             dir: dl.save_path.clone(),
                             filename: dl.filename.clone(),
-                            split: 16,
-                            max_connections: 16,
+                            split,
+                            max_connections,
                             headers: vec![],
                             referrer: None,
                             user_agent: None,

@@ -82,7 +82,7 @@ export default function DownloadList({ category }: DownloadListProps) {
         <div>Progress</div>
         <div>Speed</div>
         <div>Size</div>
-        <div>Status</div>
+        <div></div>
       </div>
       <div className="download-list">
         {filteredDownloads.map((dl) => (

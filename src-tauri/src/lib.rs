@@ -86,10 +86,14 @@ async fn pause_download(id: i64, state: State<'_, AppState>) -> Result<(), Strin
 #[tauri::command]
 async fn resume_download(id: i64, state: State<'_, AppState>) -> Result<(), String> {
     let mut dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-    if let Some(gid) = &dl.aria2_gid {
-        let _ = state.engine.resume(gid).await;
-    }
-    dl.status = DownloadStatus::Downloading;
+    
+    // Instead of forcing the engine to resume (which bypasses queue limits),
+    // we set it to Queued. The QueueManager will start it when there is capacity.
+    dl.status = DownloadStatus::Queued;
+    
+    // Optionally bump priority so it starts sooner
+    dl.priority += 1;
+    
     state.db.update_download(id, &dl).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -212,18 +216,35 @@ async fn handle_api_add(
     }
 }
 
+#[derive(Deserialize, Clone, Serialize)]
+pub struct InterceptRequest {
+    pub url: String,
+    pub page_url: Option<String>,
+    pub media_type: Option<String>,
+}
+
+async fn handle_intercept(
+    AxumState(app): AxumState<AppHandle>,
+    Json(payload): Json<InterceptRequest>,
+) -> Json<serde_json::Value> {
+    // Emit event to frontend so it can open the Add URL modal with this link prefilled
+    match app.emit("intercepted-media", payload) {
+        Ok(_) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_data_dir = std::path::Path::new(":memory:");
     let db = Database::init(app_data_dir).expect("Failed to init DB");
     
     let engine = Aria2Engine::new();
-    // Try to start aria2c, gracefully handle if not found
-    let _ = engine.start("aria2c");
 
     let app_state = AppState { db, engine, queue: QueueManager::new() };
 
     let mut app = tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -234,6 +255,9 @@ pub fn run() {
             let settings = Settings::load(&app_data_dir);
             let state = app_handle.state::<AppState>();
             state.queue.set_concurrent_downloads(settings.max_concurrent_downloads as usize);
+            
+            // Start aria2c using Tauri sidecar API
+            let _ = state.engine.start(&app_handle);
             
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show Falcon DM", true, None::<&str>)?;
@@ -305,8 +329,18 @@ pub fn run() {
             // Spawn Axum HTTP server
             let axum_app_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
+                use tower_http::cors::{CorsLayer, Any};
+                
+                let cors = CorsLayer::new()
+                    .allow_origin(Any) // Extensions have unique origins
+                    .allow_methods(Any)
+                    .allow_headers(Any)
+                    .allow_private_network(true);
+
                 let app = Router::new()
                     .route("/api/add", post(handle_api_add))
+                    .route("/api/intercept", post(handle_intercept))
+                    .layer(cors)
                     .with_state(axum_app_handle);
                 
                 match tokio::net::TcpListener::bind("127.0.0.1:14201").await {
@@ -326,7 +360,7 @@ pub fn run() {
                 loop {
                     interval.tick().await;
                     let state = app_handle.state::<AppState>();
-                    let _ = state.queue.tick(&state.db, &state.engine).await;
+                    let _ = state.queue.tick(&state.db, &state.engine, app_handle.clone()).await;
                     
                     if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
                         status: Some(DownloadStatus::Downloading),

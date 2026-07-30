@@ -1,24 +1,45 @@
-# Logs
-logs
-*.log
+# Node.js
+node_modules/
+dist/
+dist-ssr/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+# Rust / Tauri
+src-tauri/target/
+# Cargo.lock shouldn't be ignored for a binary app, so we keep it.
+
+# Exclude dynamically linked binaries from repo (users should provide static binaries)
+src-tauri/binaries/*
+
+# Logs and databases
+*.log
+*.sqlite
+*.sqlite-journal
+*.db
 *.local
 
-# Editor directories and files
+# OS / Editor
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 .idea
-.DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+.env
+.env.local
+
+# Falcon DM Temp Files
+*.falcondm-temp

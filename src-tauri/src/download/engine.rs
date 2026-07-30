@@ -1,14 +1,16 @@
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::process::{Child, Command};
 use std::sync::Mutex;
 use uuid::Uuid;
+use tauri_plugin_shell::process::CommandChild;
+use tauri_plugin_shell::ShellExt;
 
 #[derive(Debug)]
 pub enum EngineError {
     RpcError(String),
     NetworkError(reqwest::Error),
     IoError(std::io::Error),
+    TauriError(tauri::Error),
 }
 
 impl From<reqwest::Error> for EngineError {
@@ -20,6 +22,12 @@ impl From<reqwest::Error> for EngineError {
 impl From<std::io::Error> for EngineError {
     fn from(err: std::io::Error) -> Self {
         EngineError::IoError(err)
+    }
+}
+
+impl From<tauri::Error> for EngineError {
+    fn from(err: tauri::Error) -> Self {
+        EngineError::TauriError(err)
     }
 }
 
@@ -39,7 +47,7 @@ pub struct Aria2Engine {
     client: Client,
     rpc_url: String,
     secret: String,
-    process: Mutex<Option<Child>>,
+    process: Mutex<Option<CommandChild>>,
 }
 
 impl Aria2Engine {
@@ -52,30 +60,33 @@ impl Aria2Engine {
         }
     }
 
-    pub fn start(&self, aria2_path: &str) -> Result<()> {
-        let mut cmd = Command::new(aria2_path);
-        cmd.arg("--enable-rpc=true")
-            .arg("--rpc-listen-port=6800")
-            .arg(format!("--rpc-secret={}", self.secret))
-            .arg("--max-concurrent-downloads=10")
-            .arg("--max-connection-per-server=16")
-            .arg("--split=16")
-            .arg("--min-split-size=1M")
-            .arg("--continue=true")
-            .arg("--auto-file-renaming=false")
-            .arg("--allow-overwrite=true")
-            .arg("--quiet=true")
-            .arg("--daemon=false");
+    pub fn start(&self, app_handle: &tauri::AppHandle) -> Result<()> {
+        let mut cmd = app_handle.shell().sidecar("aria2c").map_err(|e| EngineError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+        
+        cmd = cmd.args([
+            "--enable-rpc=true",
+            "--rpc-listen-port=6800",
+            &format!("--rpc-secret={}", self.secret),
+            "--max-concurrent-downloads=10",
+            "--max-connection-per-server=16",
+            "--split=16",
+            "--min-split-size=1M",
+            "--continue=true",
+            "--auto-file-renaming=false",
+            "--allow-overwrite=true",
+            "--quiet=true",
+            "--daemon=false",
+        ]);
 
         match cmd.spawn() {
-            Ok(child) => {
+            Ok((_rx, child)) => {
                 let mut p = self.process.lock().unwrap();
                 *p = Some(child);
                 log::info!("Started aria2c daemon successfully.");
                 Ok(())
             }
             Err(e) => {
-                log::warn!("Failed to start aria2c (path: {}): {}", aria2_path, e);
+                log::warn!("Failed to start aria2c: {}", e);
                 // Return gracefully without crashing, as required by brief
                 Ok(())
             }
@@ -86,7 +97,6 @@ impl Aria2Engine {
         let mut p = self.process.lock().unwrap();
         if let Some(mut child) = p.take() {
             let _ = child.kill();
-            let _ = child.wait();
         }
         Ok(())
     }

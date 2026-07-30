@@ -1,3 +1,5 @@
+import { Download, Activity, CheckCircle2, Film, Music, FileText } from "lucide-react";
+
 interface SidebarProps {
   activeCategory: string;
   onSelectCategory: (category: string) => void;
@@ -23,13 +25,12 @@ export default function Sidebar({ activeCategory, onSelectCategory }: SidebarPro
           onClick={() => onSelectCategory(cat)}
         >
           <span className="sidebar-item-icon">
-            {/* Simple dot or generic icon placeholder */}
-            {cat === "All Downloads" && "📥"}
-            {cat === "Downloading" && "⏳"}
-            {cat === "Completed" && "✅"}
-            {cat === "Video" && "🎬"}
-            {cat === "Music" && "🎵"}
-            {cat === "Documents" && "📄"}
+            {cat === "All Downloads" && <Download size={16} />}
+            {cat === "Downloading" && <Activity size={16} />}
+            {cat === "Completed" && <CheckCircle2 size={16} />}
+            {cat === "Video" && <Film size={16} />}
+            {cat === "Music" && <Music size={16} />}
+            {cat === "Documents" && <FileText size={16} />}
           </span>
           {cat}
         </div>

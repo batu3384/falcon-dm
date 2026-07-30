@@ -36,3 +36,5 @@ m3u8-rs = "6.0.0"
 url = "2.5.8"
 futures = "0.3.33"
 tauri-plugin-notification = "2.3.3"
+tower-http = { version = "0.7.0", features = ["cors"] }
+tauri-plugin-shell = "2.3.5"

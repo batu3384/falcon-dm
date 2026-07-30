@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Plus, Play, Pause, Clock, Settings } from 'lucide-react';
 import { SchedulerModal } from './SchedulerModal';
 import { SettingsModal } from './SettingsModal';
 
@@ -14,20 +15,20 @@ export default function Toolbar({ onAddClick }: ToolbarProps) {
     <>
       <div className="toolbar" data-tauri-drag-region>
         <button className="toolbar-btn primary" onClick={onAddClick}>
-          ➕ Add URL
+          <Plus size={16} /> Add URL
         </button>
         <button className="toolbar-btn">
-          ▶️ Start All
+          <Play size={16} /> Start All
         </button>
         <button className="toolbar-btn">
-          ⏸ Pause All
+          <Pause size={16} /> Pause All
         </button>
         <button className="toolbar-btn" onClick={() => setSchedulerOpen(true)}>
-          🕒 Scheduler
+          <Clock size={16} /> Scheduler
         </button>
         <div style={{ flex: 1 }}></div>
         <button className="toolbar-btn" onClick={() => setSettingsOpen(true)}>
-          ⚙️ Settings
+          <Settings size={16} /> Settings
         </button>
       </div>
       <SchedulerModal isOpen={schedulerOpen} onClose={() => setSchedulerOpen(false)} />
