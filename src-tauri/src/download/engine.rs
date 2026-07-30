@@ -1,9 +1,9 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::sync::Mutex;
-use uuid::Uuid;
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub enum EngineError {
@@ -50,6 +50,12 @@ pub struct Aria2Engine {
     process: Mutex<Option<CommandChild>>,
 }
 
+impl Default for Aria2Engine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Aria2Engine {
     pub fn new() -> Self {
         Self {
@@ -61,8 +67,11 @@ impl Aria2Engine {
     }
 
     pub fn start(&self, app_handle: &tauri::AppHandle) -> Result<()> {
-        let mut cmd = app_handle.shell().sidecar("aria2c").map_err(|e| EngineError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
-        
+        let mut cmd = app_handle
+            .shell()
+            .sidecar("aria2c")
+            .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+
         cmd = cmd.args([
             "--enable-rpc=true",
             "--rpc-listen-port=6800",
@@ -95,7 +104,7 @@ impl Aria2Engine {
 
     pub fn stop(&self) -> Result<()> {
         let mut p = self.process.lock().unwrap();
-        if let Some(mut child) = p.take() {
+        if let Some(child) = p.take() {
             let _ = child.kill();
         }
         Ok(())
@@ -112,9 +121,15 @@ impl Aria2Engine {
             "params": final_params
         });
 
-        let res = self.client.post(&self.rpc_url).json(&payload).send().await?;
+        let res = self
+            .client
+            .post(&self.rpc_url)
+            .json(&payload)
+            .send()
+            .await?;
         let text = res.text().await?;
-        let parsed: Value = serde_json::from_str(&text).map_err(|e| EngineError::RpcError(e.to_string()))?;
+        let parsed: Value =
+            serde_json::from_str(&text).map_err(|e| EngineError::RpcError(e.to_string()))?;
 
         if let Some(err) = parsed.get("error") {
             return Err(EngineError::RpcError(err.to_string()));
@@ -128,7 +143,10 @@ impl Aria2Engine {
         aria_opts.insert("dir".to_string(), json!(options.dir));
         aria_opts.insert("out".to_string(), json!(options.filename));
         aria_opts.insert("split".to_string(), json!(options.split.to_string()));
-        aria_opts.insert("max-connection-per-server".to_string(), json!(options.max_connections.to_string()));
+        aria_opts.insert(
+            "max-connection-per-server".to_string(),
+            json!(options.max_connections.to_string()),
+        );
 
         if !options.headers.is_empty() {
             aria_opts.insert("header".to_string(), json!(options.headers));

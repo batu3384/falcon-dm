@@ -70,28 +70,18 @@ impl DownloadCategory {
     }
 
     pub fn from_filename(filename: &str) -> Self {
-        let ext = filename
-            .rsplit('.')
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
+        let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
 
         match ext.as_str() {
             "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" => {
                 DownloadCategory::Video
             }
-            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" => {
-                DownloadCategory::Music
-            }
+            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" => DownloadCategory::Music,
             "pdf" | "doc" | "docx" | "txt" | "epub" | "xls" | "xlsx" | "ppt" | "pptx" => {
                 DownloadCategory::Document
             }
-            "zip" | "tar" | "gz" | "7z" | "rar" | "bz2" | "xz" | "tgz" => {
-                DownloadCategory::Archive
-            }
-            "dmg" | "pkg" | "exe" | "msi" | "app" | "deb" | "rpm" => {
-                DownloadCategory::Program
-            }
+            "zip" | "tar" | "gz" | "7z" | "rar" | "bz2" | "xz" | "tgz" => DownloadCategory::Archive,
+            "dmg" | "pkg" | "exe" | "msi" | "app" | "deb" | "rpm" => DownloadCategory::Program,
             _ => DownloadCategory::Other,
         }
     }

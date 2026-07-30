@@ -359,7 +359,9 @@ mod tests {
         // Update progress
         db.update_download_progress(id, 512 * 1024, 1024.5, &DownloadStatus::Downloading)
             .expect("Update progress failed");
-        let updated_progress = db.get_download(id).expect("Get after progress update failed");
+        let updated_progress = db
+            .get_download(id)
+            .expect("Get after progress update failed");
         assert_eq!(updated_progress.downloaded_size, 512 * 1024);
         assert_eq!(updated_progress.speed, 1024.5);
         assert_eq!(updated_progress.status, DownloadStatus::Downloading);
@@ -368,11 +370,15 @@ mod tests {
         let mut to_update = updated_progress.clone();
         to_update.status = DownloadStatus::Completed;
         to_update.completed_at = Some("2026-07-30T13:05:00Z".to_string());
-        db.update_download(id, &to_update).expect("Full update failed");
+        db.update_download(id, &to_update)
+            .expect("Full update failed");
 
         let updated_full = db.get_download(id).expect("Get after full update failed");
         assert_eq!(updated_full.status, DownloadStatus::Completed);
-        assert_eq!(updated_full.completed_at, Some("2026-07-30T13:05:00Z".to_string()));
+        assert_eq!(
+            updated_full.completed_at,
+            Some("2026-07-30T13:05:00Z".to_string())
+        );
 
         // Delete
         db.delete_download(id).expect("Delete failed");
@@ -391,8 +397,10 @@ mod tests {
         let id2 = db.insert_download(&d2).unwrap();
         let _id3 = db.insert_download(&d3).unwrap();
 
-        db.update_download_progress(id1, 100, 50.0, &DownloadStatus::Downloading).unwrap();
-        db.update_download_progress(id2, 100, 0.0, &DownloadStatus::Paused).unwrap();
+        db.update_download_progress(id1, 100, 50.0, &DownloadStatus::Downloading)
+            .unwrap();
+        db.update_download_progress(id2, 100, 0.0, &DownloadStatus::Paused)
+            .unwrap();
 
         // Filter by category
         let video_filter = DownloadFilter {

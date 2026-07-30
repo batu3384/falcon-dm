@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -38,7 +37,7 @@ impl Settings {
 
     pub fn save(&self, app_data_dir: &std::path::Path) -> Result<(), String> {
         let settings_path = app_data_dir.join("settings.json");
-        
+
         // Ensure the directory exists
         if let Some(parent) = settings_path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
