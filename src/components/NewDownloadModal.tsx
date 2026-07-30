@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 interface NewDownloadModalProps {
   onClose: () => void;
@@ -7,11 +8,22 @@ interface NewDownloadModalProps {
 export default function NewDownloadModal({ onClose }: NewDownloadModalProps) {
   const [url, setUrl] = useState("");
 
-  const handleDownload = () => {
-    // Basic validation or invoke rust backend
+  const handleDownload = async () => {
     if (url.trim()) {
-      console.log("Add download URL:", url);
-      onClose();
+      try {
+        await invoke("add_download", {
+          url: url.trim(),
+          filename: url.split("/").pop() || "download.bin",
+          savePath: "/tmp",
+        });
+        // Force refresh somehow? Real app might use an event, but here we can just close
+        onClose();
+        // Since we don't have global state yet, a dirty reload works for demo,
+        // or just let the user re-select the category to fetch
+        window.location.reload();
+      } catch (error) {
+        console.error("Failed to add download", error);
+      }
     }
   };
 

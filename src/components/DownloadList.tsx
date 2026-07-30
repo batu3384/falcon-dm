@@ -1,25 +1,77 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import DownloadItem from "./DownloadItem";
 
 interface DownloadListProps {
   category: string;
 }
 
-// Dummy data
-const MOCK_DOWNLOADS = [
-  { id: 1, filename: "ubuntu-22.04.3-desktop-amd64.iso", progress: 45, speed: "12.5 MB/s", size: "4.7 GB", status: "downloading" },
-  { id: 2, filename: "react-developer-tools.zip", progress: 100, speed: "0 B/s", size: "1.2 MB", status: "completed" },
-  { id: 3, filename: "vacation-video.mp4", progress: 12, speed: "2.1 MB/s", size: "1.5 GB", status: "downloading" },
-  { id: 4, filename: "financial-report-2023.pdf", progress: 0, speed: "0 B/s", size: "450 KB", status: "paused" },
-];
+export interface DownloadModel {
+  id: number;
+  filename: string;
+  total_size: number;
+  downloaded_size: number;
+  speed: number;
+  status: string;
+  category: string;
+}
+
+interface ProgressPayload {
+  id: number;
+  downloaded_size: number;
+  total_size: number;
+  speed: number;
+  status: string;
+  connections: number;
+}
 
 export default function DownloadList({ category }: DownloadListProps) {
-  // Simple filter for dummy data
-  const filteredDownloads = MOCK_DOWNLOADS.filter(d => {
+  const [downloads, setDownloads] = useState<DownloadModel[]>([]);
+
+  useEffect(() => {
+    // Initial fetch
+    const fetchDownloads = async () => {
+      try {
+        const data = await invoke<DownloadModel[]>("get_downloads", {
+          filter: {},
+        });
+        setDownloads(data);
+      } catch (error) {
+        console.error("Failed to fetch downloads", error);
+      }
+    };
+    fetchDownloads();
+
+    // Listen for progress events
+    const unlisten = listen<ProgressPayload>("download-progress", (event) => {
+      const payload = event.payload;
+      setDownloads((prev) =>
+        prev.map((d) =>
+          d.id === payload.id
+            ? {
+                ...d,
+                downloaded_size: payload.downloaded_size,
+                total_size: payload.total_size,
+                speed: payload.speed,
+                status: payload.status,
+              }
+            : d
+        )
+      );
+    });
+
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+
+  const filteredDownloads = downloads.filter((d) => {
     if (category === "All Downloads") return true;
-    if (category === "Downloading") return d.status === "downloading";
-    if (category === "Completed") return d.status === "completed";
-    if (category === "Video") return d.filename.endsWith(".mp4");
-    if (category === "Documents") return d.filename.endsWith(".pdf");
+    if (category === "Downloading") return d.status === "Downloading";
+    if (category === "Completed") return d.status === "Completed";
+    if (category === "Video") return d.category === "Video";
+    if (category === "Documents") return d.category === "Document";
     return true;
   });
 
