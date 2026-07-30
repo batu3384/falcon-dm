@@ -1,6 +1,19 @@
-# Falcon DM
+<p align="center">
+  <img src="assets/icon.png" width="128" alt="Falcon DM Icon" />
+</p>
 
-Falcon DM is a high-performance macOS download manager. It combines a Rust (Tauri v2) backend with a React/TypeScript frontend to provide native OS integration, rigorous process isolation, and maximum network throughput.
+<h1 align="center">Falcon DM</h1>
+
+<p align="center">
+  <strong>A high-performance macOS download manager engineered for speed and precision.</strong><br>
+  Falcon DM combines a Rust (Tauri v2) backend with a React/TypeScript frontend to provide native OS integration, rigorous process isolation, and maximum network throughput.
+</p>
+
+<p align="center">
+  <img src="assets/mascot.jpg" width="280" alt="Falcon DM Mascot" style="border-radius: 16px;" />
+</p>
+
+---
 
 ## Core Architecture
 
