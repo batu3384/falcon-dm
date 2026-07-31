@@ -82,11 +82,18 @@ npm run tauri dev
 npm run tauri build
 ```
 
+### 3. Browser extension + wake
+
+1. Load unpacked `extension/` in Chrome (`chrome://extensions` → Developer mode).
+2. Open Falcon DM → **Settings → Approve extension** when the pair request appears (no silent first-wins).
+3. YouTube downloads require system `yt-dlp` (`brew install yt-dlp`). aria2/ffmpeg are bundled sidecars; yt-dlp is not.
+4. **Deep link wake:** `falcondm://wake` only (production `.app`). Download enqueue via deep-link query is disabled — secrets must not appear in URLs; extension uses wake → HTTP API. `tauri dev` often does not register the scheme.
+
 ## Security Posture
 
-- **Network Boundary:** The Axum IPC server validates preflight `OPTIONS` requests and enforces `Access-Control-Allow-Private-Network`, mitigating cross-origin threats.
-- **Process Isolation:** The application executes within Tauri's security sandbox. Shell execution is explicitly bounded to the defined sidecars (`aria2c`, `ffmpeg`); arbitrary command execution is disabled by design.
-- **Data Governance:** No telemetry. No external analytics. All state and network operations remain strictly local.
+- **Network Boundary:** The Axum IPC server validates preflight `OPTIONS` requests and enforces `Access-Control-Allow-Private-Network`, mitigating cross-origin threats. Extension pairing requires explicit user approval; private/loopback download URLs are blocked.
+- **Process Isolation:** The application executes within Tauri's security sandbox. Shell execution is explicitly bounded to the defined sidecars (`aria2c`, `ffmpeg`); arbitrary command execution is disabled by design. aria2 port reclaim only kills Falcon's own PID file.
+- **Data Governance:** No telemetry. No external analytics. All state and network operations remain strictly local. Completed-download cookies are wiped on startup.
 
 ## License
 

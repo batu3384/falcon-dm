@@ -1,187 +1,241 @@
-import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
-
-interface Settings {
-  theme: string;
-  default_download_path: string;
-  max_concurrent_downloads: number;
-  max_connections_per_server: number;
-  proxy: string | null;
-}
+import { invoke } from "@tauri-apps/api/core";
+import { useState, useEffect, useRef } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useTranslation } from "react-i18next";
+import { X } from "lucide-react";
+import type { SettingsModel } from "../types";
+import { applyTheme } from "../types";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 interface SettingsModalProps {
   onClose: () => void;
+  showToast?: (kind: "success" | "error" | "info", msg: string) => void;
 }
 
-export const SettingsModal = ({ onClose }: SettingsModalProps) => {
-  const [activeTab, setActiveTab] = useState<'general' | 'network'>('general');
-  const [settings, setSettings] = useState<Settings>({
-    theme: 'system',
-    default_download_path: '~/Downloads',
+export const SettingsModal = ({ onClose, showToast }: SettingsModalProps) => {
+  const { t } = useTranslation();
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
+  const [activeTab, setActiveTab] = useState<"general" | "network">("general");
+  const [settings, setSettings] = useState<SettingsModel>({
+    theme: "system",
+    default_download_path: "~/Downloads",
     max_concurrent_downloads: 3,
     max_connections_per_server: 16,
     proxy: null,
+    api_token: "",
+    speed_limit_kbps: 0,
+    category_paths: {},
+    allowed_extension_ids: [],
+    ytdlp_path: "",
   });
+  const [saveError, setSaveError] = useState("");
+  const [pendingPair, setPendingPair] = useState<string | null>(null);
 
   useEffect(() => {
-    invoke<Settings>('get_settings')
-      .then((s) => {
-        setSettings(s);
-      })
-      .catch((e) => console.error('Failed to load settings:', e));
+    invoke<SettingsModel>("get_settings")
+      .then(setSettings)
+      .catch((e) => console.error("Failed to load settings:", e));
+    invoke<string | null>("get_pending_pair")
+      .then(setPendingPair)
+      .catch(() => {});
   }, []);
 
-  const handleChange = (field: keyof Settings, value: any) => {
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      listen<{ extension_id: string }>("pair-request", (e) => {
+        setPendingPair(e.payload.extension_id);
+      }).then((fn) => {
+        unlisten = fn;
+      });
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  const handleChange = (field: keyof SettingsModel, value: string | number | null) => {
     setSettings((prev) => ({ ...prev, [field]: value }));
   };
 
   const handleBrowse = async () => {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-    });
-    if (selected) {
-      handleChange('default_download_path', selected as string);
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (selected && typeof selected === "string") handleChange("default_download_path", selected);
+    } catch (e) {
+      console.error("Browse error:", e);
+    }
+  };
+
+  const handleRelinkExtension = async () => {
+    try {
+      await invoke("reset_extension_pin");
+      setPendingPair(null);
+      showToast?.("success", t("settings.extension_reset"));
+    } catch (e) {
+      console.error(e);
+      showToast?.("error", t("settings.save_failed"));
+    }
+  };
+
+  const handleApprovePair = async () => {
+    if (!pendingPair) return;
+    try {
+      await invoke("approve_extension_pair", { extensionId: pendingPair });
+      setPendingPair(null);
+      const s = await invoke<SettingsModel>("get_settings");
+      setSettings(s);
+      showToast?.("success", t("settings.pair_approved"));
+    } catch (e) {
+      console.error(e);
+      showToast?.("error", t("settings.save_failed"));
     }
   };
 
   const handleSave = async () => {
+    setSaveError("");
     try {
-      await invoke('save_settings', { settings });
-      // Apply theme
-      if (settings.theme === 'dark') {
-        document.documentElement.classList.add('dark');
-      } else if (settings.theme === 'light') {
-        document.documentElement.classList.remove('dark');
-      } else {
-        // system
-        if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-          document.documentElement.classList.add('dark');
-        } else {
-          document.documentElement.classList.remove('dark');
-        }
-      }
+      await invoke("save_settings", { settings });
+      applyTheme(settings.theme);
+      showToast?.("success", t("settings.saved"));
       onClose();
     } catch (e) {
-      console.error('Failed to save settings:', e);
+      console.error("Failed to save settings:", e);
+      setSaveError(t("settings.save_failed"));
+      showToast?.("error", t("settings.save_failed"));
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 text-foreground">
-      <div className="bg-background w-full max-w-md rounded-lg shadow-xl overflow-hidden border border-border flex flex-col max-h-[90vh]">
-        <div className="p-4 border-b border-border flex justify-between items-center">
-          <h2 className="text-xl font-semibold">Settings</h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
-            &times;
-          </button>
-        </div>
-        
-        <div className="flex border-b border-border">
-          <button
-            className={`flex-1 py-2 text-center font-medium ${activeTab === 'general' ? 'border-b-2 border-primary text-primary' : 'text-gray-500 hover:bg-muted'}`}
-            onClick={() => setActiveTab('general')}
-          >
-            General
-          </button>
-          <button
-            className={`flex-1 py-2 text-center font-medium ${activeTab === 'network' ? 'border-b-2 border-primary text-primary' : 'text-gray-500 hover:bg-muted'}`}
-            onClick={() => setActiveTab('network')}
-          >
-            Network
-          </button>
+    <div className="modal-overlay" onClick={onClose} role="presentation">
+      <div ref={panelRef} className="modal-panel" style={{ width: 500 }} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div className="modal-head">
+          <h2 id="settings-title" className="modal-title">{t("settings.title")}</h2>
+          <button type="button" onClick={onClose} className="icon-btn" aria-label={t("settings.cancel")}><X size={18} /></button>
         </div>
 
-        <div className="p-6 overflow-y-auto flex-1">
-          {activeTab === 'general' && (
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium mb-1">Theme</label>
-                <select
-                  value={settings.theme}
-                  onChange={(e) => handleChange('theme', e.target.value)}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                >
-                  <option value="system">System</option>
-                  <option value="light">Light</option>
-                  <option value="dark">Dark</option>
+        <div className="modal-body">
+          <div className="tabs" role="tablist">
+            <button type="button" role="tab" aria-selected={activeTab === "general"} className={`tab ${activeTab === "general" ? "active" : ""}`} onClick={() => setActiveTab("general")}>
+              {t("settings.general")}
+            </button>
+            <button type="button" role="tab" aria-selected={activeTab === "network"} className={`tab ${activeTab === "network" ? "active" : ""}`} onClick={() => setActiveTab("network")}>
+              {t("settings.network")}
+            </button>
+          </div>
+
+          {activeTab === "general" && (
+            <>
+              <div className="field">
+                <label className="field-label" htmlFor="set-theme">{t("settings.theme")}</label>
+                <select id="set-theme" className="field-input field-select" value={settings.theme} onChange={(e) => handleChange("theme", e.target.value)}>
+                  <option value="system">{t("settings.theme_system")}</option>
+                  <option value="light">{t("settings.theme_light")}</option>
+                  <option value="dark">{t("settings.theme_dark")}</option>
                 </select>
               </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-1">Default Download Path</label>
-                <div className="flex space-x-2">
-                  <input
-                    type="text"
-                    value={settings.default_download_path}
-                    onChange={(e) => handleChange('default_download_path', e.target.value)}
-                    className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
-                  />
-                  <button
-                    onClick={handleBrowse}
-                    className="px-4 py-2 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80 text-sm font-medium"
-                  >
-                    Browse
-                  </button>
+              <div className="field">
+                <label className="field-label" htmlFor="set-path">{t("settings.download_path")}</label>
+                <div className="input-action">
+                  <input id="set-path" className="field-input" type="text" value={settings.default_download_path} onChange={(e) => handleChange("default_download_path", e.target.value)} />
+                  <button type="button" className="btn-secondary" onClick={handleBrowse}>{t("settings.browse")}</button>
                 </div>
               </div>
-            </div>
-          )}
-
-          {activeTab === 'network' && (
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium mb-1">Max Concurrent Downloads ({settings.max_concurrent_downloads})</label>
+              <div className="field">
+                <label className="field-label" htmlFor="set-ytdlp">{t("settings.ytdlp_path")}</label>
                 <input
-                  type="range"
-                  min="1"
-                  max="10"
-                  value={settings.max_concurrent_downloads}
-                  onChange={(e) => handleChange('max_concurrent_downloads', parseInt(e.target.value))}
-                  className="w-full"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-1">Max Connections Per Server</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="32"
-                  value={settings.max_connections_per_server}
-                  onChange={(e) => handleChange('max_connections_per_server', parseInt(e.target.value))}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-1">Proxy</label>
-                <input
+                  id="set-ytdlp"
+                  className="field-input"
                   type="text"
-                  placeholder="e.g. http://127.0.0.1:8080"
-                  value={settings.proxy || ''}
-                  onChange={(e) => handleChange('proxy', e.target.value || null)}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={settings.ytdlp_path || ""}
+                  onChange={(e) => handleChange("ytdlp_path", e.target.value)}
+                  placeholder="/opt/homebrew/bin/yt-dlp"
+                />
+                <p className="field-hint">{t("settings.ytdlp_path_hint")}</p>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="set-token">{t("settings.api_token")}</label>
+                <input id="set-token" className="field-input" type="text" value={settings.api_token || ""} onChange={(e) => handleChange("api_token", e.target.value)} />
+              </div>
+              <div className="field">
+                <label className="field-label">{t("settings.extension")}</label>
+                <p className="field-hint">{t("settings.extension_hint")}</p>
+                {pendingPair ? (
+                  <div className="input-action" style={{ marginBottom: 8 }}>
+                    <code className="field-hint" style={{ flex: 1 }}>{pendingPair}</code>
+                    <button type="button" className="btn-primary" onClick={handleApprovePair}>
+                      {t("settings.pair_approve")}
+                    </button>
+                  </div>
+                ) : (
+                  <p className="field-hint">{t("settings.pair_none")}</p>
+                )}
+                <button type="button" className="btn-secondary" onClick={handleRelinkExtension}>
+                  {t("settings.relink_extension")}
+                </button>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cat-video">{t("settings.cat_video")}</label>
+                <input
+                  id="cat-video"
+                  className="field-input"
+                  type="text"
+                  value={settings.category_paths?.Video || ""}
+                  onChange={(e) =>
+                    setSettings((prev) => ({
+                      ...prev,
+                      category_paths: { ...(prev.category_paths || {}), Video: e.target.value },
+                    }))
+                  }
+                  placeholder="~/Movies"
                 />
               </div>
-            </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cat-music">{t("settings.cat_music")}</label>
+                <input
+                  id="cat-music"
+                  className="field-input"
+                  type="text"
+                  value={settings.category_paths?.Music || ""}
+                  onChange={(e) =>
+                    setSettings((prev) => ({
+                      ...prev,
+                      category_paths: { ...(prev.category_paths || {}), Music: e.target.value },
+                    }))
+                  }
+                  placeholder="~/Music"
+                />
+              </div>
+            </>
           )}
+
+          {activeTab === "network" && (
+            <>
+              <div className="field">
+                <label className="field-label" htmlFor="set-concurrent">{t("settings.max_concurrent")} ({settings.max_concurrent_downloads})</label>
+                <input id="set-concurrent" type="range" min="1" max="10" value={settings.max_concurrent_downloads} onChange={(e) => handleChange("max_concurrent_downloads", parseInt(e.target.value))} className="field-range" />
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="set-conn">{t("settings.max_connections")}</label>
+                <input id="set-conn" type="number" min="1" max="16" value={settings.max_connections_per_server} onChange={(e) => handleChange("max_connections_per_server", parseInt(e.target.value))} className="field-input" />
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="set-speed">{t("settings.speed_limit")}</label>
+                <input id="set-speed" type="number" min="0" value={settings.speed_limit_kbps || 0} onChange={(e) => handleChange("speed_limit_kbps", parseInt(e.target.value) || 0)} className="field-input" />
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="set-proxy">{t("settings.proxy")}</label>
+                <input id="set-proxy" type="text" placeholder={t("settings.proxy_placeholder")} value={settings.proxy || ""} onChange={(e) => handleChange("proxy", e.target.value || null)} className="field-input" />
+              </div>
+            </>
+          )}
+          {saveError && <p className="field-error">{saveError}</p>}
         </div>
 
-        <div className="p-4 border-t border-border flex justify-end space-x-2 bg-muted/50">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-md hover:bg-muted text-sm font-medium"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 text-sm font-medium"
-          >
-            Save
-          </button>
+        <div className="modal-foot">
+          <button type="button" className="btn-secondary" onClick={onClose}>{t("settings.cancel")}</button>
+          <button type="button" className="btn-primary" onClick={handleSave}>{t("settings.save")}</button>
         </div>
       </div>
     </div>

@@ -1,6 +1,9 @@
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 use uuid::Uuid;
@@ -11,6 +14,19 @@ pub enum EngineError {
     NetworkError(reqwest::Error),
     IoError(std::io::Error),
     TauriError(tauri::Error),
+    NotRunning(String),
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineError::RpcError(s) => write!(f, "RPC error: {s}"),
+            EngineError::NetworkError(e) => write!(f, "Network error: {e}"),
+            EngineError::IoError(e) => write!(f, "IO error: {e}"),
+            EngineError::TauriError(e) => write!(f, "Tauri error: {e}"),
+            EngineError::NotRunning(s) => write!(f, "{s}"),
+        }
+    }
 }
 
 impl From<reqwest::Error> for EngineError {
@@ -43,11 +59,16 @@ pub struct Aria2Options {
     pub user_agent: Option<String>,
 }
 
+const RPC_PORT: u16 = 6800;
+
 pub struct Aria2Engine {
     client: Client,
     rpc_url: String,
     secret: String,
+    secret_file: Mutex<Option<PathBuf>>,
+    pid_file: Mutex<Option<PathBuf>>,
     process: Mutex<Option<CommandChild>>,
+    running: Mutex<bool>,
 }
 
 impl Default for Aria2Engine {
@@ -59,23 +80,86 @@ impl Default for Aria2Engine {
 impl Aria2Engine {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
-            rpc_url: "http://127.0.0.1:6800/jsonrpc".to_string(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+            rpc_url: format!("http://127.0.0.1:{RPC_PORT}/jsonrpc"),
             secret: Uuid::new_v4().to_string(),
+            secret_file: Mutex::new(None),
+            pid_file: Mutex::new(None),
             process: Mutex::new(None),
+            running: Mutex::new(false),
         }
     }
 
-    pub fn start(&self, app_handle: &tauri::AppHandle) -> Result<()> {
+    pub fn is_running(&self) -> bool {
+        *self.running.lock().unwrap()
+    }
+
+    pub fn mark_not_running(&self) {
+        *self.running.lock().unwrap() = false;
+    }
+
+    /// Kill only our previously tracked aria2 PID — never blanket-kill port 6800.
+    /// Verifies cmdline contains aria2 before kill (PID reuse guard).
+    fn reclaim_own_pid(app_data_dir: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            let pid_path = app_data_dir.join("aria2.pid");
+            if let Ok(s) = std::fs::read_to_string(&pid_path) {
+                if let Ok(pid) = s.trim().parse::<i32>() {
+                    let looks_aria2 = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+                        .ok()
+                        .map(|c| c.contains("aria2"))
+                        .unwrap_or_else(|| {
+                            // macOS: no /proc — use ps
+                            Command::new("ps")
+                                .args(["-p", &pid.to_string(), "-o", "comm="])
+                                .output()
+                                .ok()
+                                .and_then(|o| String::from_utf8(o.stdout).ok())
+                                .map(|c| c.contains("aria2"))
+                                .unwrap_or(false)
+                        });
+                    if looks_aria2 {
+                        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+                        log::warn!("Reclaimed own aria2 pid {pid}");
+                    } else {
+                        log::warn!("Stale aria2.pid {pid} is not aria2 — not killing");
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&pid_path);
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = app_data_dir;
+        }
+    }
+
+    /// Write RPC secret and start sidecar. Marks running only after caller confirms ready.
+    pub fn start(&self, app_handle: &tauri::AppHandle, app_data_dir: &std::path::Path) -> Result<()> {
+        let _ = self.stop();
+        Self::reclaim_own_pid(app_data_dir);
+
+        std::fs::create_dir_all(app_data_dir)?;
+        let secret_path = app_data_dir.join("aria2_rpc_secret");
+        std::fs::write(&secret_path, &self.secret)?;
+        *self.secret_file.lock().unwrap() = Some(secret_path);
+
         let mut cmd = app_handle
             .shell()
             .sidecar("aria2c")
             .map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
 
+        let secret_arg = format!("--rpc-secret={}", self.secret);
+        // ponytail: CLI still exposes secret in ps; upgrade path = aria2 --rpc-secret-file when available.
         cmd = cmd.args([
             "--enable-rpc=true",
-            "--rpc-listen-port=6800",
-            &format!("--rpc-secret={}", self.secret),
+            &format!("--rpc-listen-port={RPC_PORT}"),
+            &secret_arg,
             "--max-concurrent-downloads=10",
             "--max-connection-per-server=16",
             "--split=16",
@@ -89,17 +173,83 @@ impl Aria2Engine {
 
         match cmd.spawn() {
             Ok((_rx, child)) => {
+                let pid = child.pid();
+                let pid_path = app_data_dir.join("aria2.pid");
+                let _ = std::fs::write(&pid_path, pid.to_string());
+                *self.pid_file.lock().unwrap() = Some(pid_path);
                 let mut p = self.process.lock().unwrap();
                 *p = Some(child);
-                log::info!("Started aria2c daemon successfully.");
+                // Do NOT mark running yet — wait_ready / mark_ready owns that.
+                *self.running.lock().unwrap() = false;
+                log::info!("Spawned aria2c sidecar; waiting for RPC...");
                 Ok(())
             }
             Err(e) => {
-                log::warn!("Failed to start aria2c: {}", e);
-                // Return gracefully without crashing, as required by brief
-                Ok(())
+                *self.running.lock().unwrap() = false;
+                log::error!("Failed to start aria2c: {}", e);
+                Err(EngineError::NotRunning(format!(
+                    "Failed to start aria2c sidecar: {e}"
+                )))
             }
         }
+    }
+
+    pub fn mark_ready(&self) {
+        *self.running.lock().unwrap() = true;
+    }
+
+    pub async fn wait_ready(&self, attempts: u32) -> Result<()> {
+        // Temporarily allow RPC during probe
+        *self.running.lock().unwrap() = true;
+        for i in 0..attempts {
+            match self.get_global_stat().await {
+                Ok(_) => {
+                    log::info!("aria2 RPC ready after {} attempts", i + 1);
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::debug!("aria2 not ready yet: {}", e);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        *self.running.lock().unwrap() = false;
+        Err(EngineError::NotRunning(
+            "aria2 RPC did not become ready".into(),
+        ))
+    }
+
+    /// Ensure engine is up; restart once if needed.
+    pub async fn ensure_running(
+        &self,
+        app_handle: &tauri::AppHandle,
+        app_data_dir: &std::path::Path,
+    ) -> Result<()> {
+        if self.is_running() && self.get_global_stat().await.is_ok() {
+            return Ok(());
+        }
+        log::warn!("aria2 not healthy — restarting");
+        self.start(app_handle, app_data_dir)?;
+        self.wait_ready(30).await?;
+        Ok(())
+    }
+
+    pub async fn apply_speed_limit(&self, kbps: u32) -> Result<()> {
+        let limit = if kbps == 0 {
+            "0".to_string()
+        } else {
+            format!("{}K", kbps)
+        };
+        let opts = json!({ "max-overall-download-limit": limit });
+        self.call_rpc("aria2.changeGlobalOption", vec![opts]).await?;
+        Ok(())
+    }
+
+    pub async fn apply_proxy(&self, proxy: Option<&str>) -> Result<()> {
+        let all_proxy = proxy.unwrap_or("");
+        let opts = json!({ "all-proxy": all_proxy });
+        self.call_rpc("aria2.changeGlobalOption", vec![opts]).await?;
+        Ok(())
     }
 
     pub fn stop(&self) -> Result<()> {
@@ -107,10 +257,27 @@ impl Aria2Engine {
         if let Some(child) = p.take() {
             let _ = child.kill();
         }
+        *self.running.lock().unwrap() = false;
+        if let Some(path) = self.secret_file.lock().unwrap().take() {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Some(path) = self.pid_file.lock().unwrap().take() {
+            #[cfg(unix)]
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                if let Ok(pid) = s.trim().parse::<i32>() {
+                    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+                }
+            }
+            let _ = std::fs::remove_file(path);
+        }
         Ok(())
     }
 
     async fn call_rpc(&self, method: &str, mut params: Vec<Value>) -> Result<Value> {
+        if !*self.running.lock().unwrap() {
+            return Err(EngineError::NotRunning("aria2 is not running".into()));
+        }
+
         let mut final_params = vec![json!(format!("token:{}", self.secret))];
         final_params.append(&mut params);
 
@@ -141,7 +308,9 @@ impl Aria2Engine {
     pub async fn add_download(&self, url: &str, options: Aria2Options) -> Result<String> {
         let mut aria_opts = serde_json::Map::new();
         aria_opts.insert("dir".to_string(), json!(options.dir));
-        aria_opts.insert("out".to_string(), json!(options.filename));
+        if !options.filename.trim().is_empty() {
+            aria_opts.insert("out".to_string(), json!(options.filename));
+        }
         aria_opts.insert("split".to_string(), json!(options.split.to_string()));
         aria_opts.insert(
             "max-connection-per-server".to_string(),
@@ -183,6 +352,7 @@ impl Aria2Engine {
     }
 
     pub async fn get_global_stat(&self) -> Result<Value> {
-        self.call_rpc("aria2.getGlobalStat", vec![]).await
+        self.call_rpc("aria2.getGlobalStat", vec![])
+            .await
     }
 }

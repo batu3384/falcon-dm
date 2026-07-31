@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
@@ -38,3 +38,5 @@ futures = "0.3.33"
 tauri-plugin-notification = "2.3.3"
 tower-http = { version = "0.7.0", features = ["cors"] }
 tauri-plugin-shell = "2.3.5"
+tauri-plugin-deep-link = "2"
+window-vibrancy = "0.8.0"

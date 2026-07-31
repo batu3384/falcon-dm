@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Falcon DM Sniffer",
-  "version": "1.0",
-  "description": "Intercepts media downloads and sends them to Falcon DM desktop app.",
+  "version": "1.5.1",
+  "default_locale": "en",
+  "description": "__MSG_appDesc__",
+  "name": "__MSG_appName__",
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",
@@ -11,12 +12,37 @@
   "permissions": [
     "webRequest",
     "activeTab",
-    "notifications"
+    "notifications",
+    "downloads",
+    "cookies",
+    "tabs",
+    "contextMenus",
+    "storage",
+    "scripting"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "http://127.0.0.1:14201/*"
   ],
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "action": {
+    "default_title": "__MSG_appName__",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["media-utils.js", "content.js"],
+      "run_at": "document_end"
+    }
+  ]
 }
