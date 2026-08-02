@@ -52,7 +52,7 @@ jobs:
       # signing and still produce a usable dev build.
       - name: Build + sign + notarize (Tauri)
         if: ${{ env.APPLE_SIGNING_IDENTITY != '' }}
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
