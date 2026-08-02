@@ -20,7 +20,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Node 22 LTS — GH runners default to Node 24 which breaks jsdom/vitest (undici).
+          node-version: "22"
           cache: "npm"
       - run: npm ci
       - name: Format check
@@ -39,9 +40,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ponytail: build/test on both Apple Silicon and Intel runners so the
-        # sidecar binaries (aarch64 + x86_64) are both exercised.
-        runner: [macos-14, macos-13]
+        include:
+          - runner: macos-14
+            arch: aarch64
+          - runner: macos-13
+            arch: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +54,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
+      - name: Install sidecar deps (Homebrew)
+        run: brew install aria2 ffmpeg
+      - name: Provision sidecars (${{ matrix.arch }})
+        run: ./scripts/provision-sidecars.sh
+        env:
+          ARCH: ${{ matrix.arch }}
       - name: Format check
         working-directory: src-tauri
         run: cargo fmt --check
@@ -74,4 +83,4 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses bans sources
-          arguments: --manifest-path src-tauri/Cargo.toml
+          manifest-path: src-tauri/Cargo.toml
