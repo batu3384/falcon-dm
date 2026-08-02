@@ -2,10 +2,10 @@
 # Run locally: `cargo deny check`. CI runs it on every push/PR.
 
 [advisories]
-# Deny security advisories; unmaintained = warn (gtk3-rs via Tauri Linux target).
+# Deny security advisories. unmaintained=workspace — gtk3-rs Linux transitive via Tauri, not our direct dep.
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-unmaintained = "warn"
+unmaintained = "workspace"
 ignore = []
 
 [licenses]
