@@ -1,5 +1,6 @@
 # ponytail: continuous integration — runs on every push/PR. Guards formatting,
-# lints, tests, the build, and supply-chain audits on both macOS architectures.
+# lints, tests, the build, and supply-chain audits on macOS arm64 (Intel covered
+# in release.yml matrix).
 name: CI
 
 on:
@@ -36,16 +37,8 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   rust:
-    name: Rust (${{ matrix.runner }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            arch: aarch64
-          - runner: macos-13
-            arch: x86_64
-    runs-on: ${{ matrix.runner }}
+    name: Rust (macos-14)
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -56,10 +49,10 @@ jobs:
           workspaces: "src-tauri -> target"
       - name: Install sidecar deps (Homebrew)
         run: brew install aria2 ffmpeg
-      - name: Provision sidecars (${{ matrix.arch }})
+      - name: Provision sidecars (aarch64)
         run: ./scripts/provision-sidecars.sh
         env:
-          ARCH: ${{ matrix.arch }}
+          ARCH: aarch64
       - name: Format check
         working-directory: src-tauri
         run: cargo fmt --check
