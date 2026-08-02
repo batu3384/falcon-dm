@@ -1,0 +1,36 @@
+# ponytail: cargo-deny config — supply-chain hygiene for the Rust backend.
+# Run locally: `cargo deny check`. CI runs it on every push/PR.
+
+[advisories]
+# Deny any advisory (RUSTSEC). unmaintained crates are warnings, not failures.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Allow permissive licenses only. Copyleft (GPL) is denied.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "Zlib",
+  "CC0-1.0",
+  "MPL-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Warn on duplicate crate versions (common with transitive deps).
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# Only allow crates from crates.io + our own git deps (none currently).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

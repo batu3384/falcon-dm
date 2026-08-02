@@ -23,8 +23,30 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+# ponytail: trim tokio feature set — "full" bloats binary/build time. We need
+# rt-multi-thread+macros (runtime), time (intervals), sync (watch/mutex helpers),
+# net (tcp listener), fs (hls writes), process (ytdlp/aria reclaim), io-util.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "sync",
+    "net",
+    "fs",
+    "process",
+    "io-util",
+] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+# r2d2 + r2d2_sqlite: connection pool replacing the single-connection Mutex so
+# progress polling, queue ticks and HTTP enqueue no longer serialize on one lock.
+r2d2 = "0.8"
+r2d2_sqlite = "0.24"
+# subtle: constant-time comparison for API token checks (timing-attack hardening).
+subtle = "2"
+# rusqlite_migration: versioned schema migrations (PRAGMA user_version), replacing
+# the version-less CREATE TABLE IF NOT EXISTS approach so future schema changes
+# apply to existing user databases.
+rusqlite_migration = "1"
 reqwest = { version = "0.12", features = ["stream", "json"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
@@ -40,3 +62,10 @@ tower-http = { version = "0.7.0", features = ["cors"] }
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-deep-link = "2"
 window-vibrancy = "0.8.0"
+
+[profile.release]
+# ponytail: shrink release binary — LTO across crates, single codegen unit, strip debug symbols.
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

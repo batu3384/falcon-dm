@@ -129,6 +129,10 @@ pub struct Download {
     pub user_agent: Option<String>,
     pub cookies: Option<String>,
     pub aria2_gid: Option<String>,
+    /// ponytail: archived flag — completed downloads can be hidden from the
+    /// active list without deletion. Defaults to false (visible).
+    #[serde(default)]
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -136,4 +140,15 @@ pub struct DownloadFilter {
     pub status: Option<DownloadStatus>,
     pub category: Option<DownloadCategory>,
     pub search: Option<String>,
+    /// Page size cap applied at the DB boundary (None = no limit).
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Page offset applied at the DB boundary.
+    #[serde(default)]
+    pub offset: Option<i64>,
+    /// ponytail: archived filter. None = exclude archived (default, hides them
+    /// from the active list); Some(true) = only archived; Some(false) =
+    /// explicit non-archived (same as None but future-proof).
+    #[serde(default)]
+    pub archived: Option<bool>,
 }

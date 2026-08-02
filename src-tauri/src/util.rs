@@ -16,30 +16,68 @@ pub fn is_hls_url(url: &str) -> bool {
 
 /// Strip CR/LF from header values to prevent header injection.
 pub fn sanitize_header_value(s: &str) -> String {
-    s.chars()
-        .filter(|c| *c != '\r' && *c != '\n')
-        .collect()
+    s.chars().filter(|c| *c != '\r' && *c != '\n').collect()
 }
 
-fn is_blocked_download_host(host: &str) -> bool {
-    let h = host.trim().trim_matches('[').trim_matches(']').to_lowercase();
-    if h == "localhost" || h == "0.0.0.0" || h == "::1" {
-        return true;
-    }
-    if h.starts_with("127.") || h.starts_with("10.") || h.starts_with("192.168.") {
-        return true;
-    }
-    if let Some(rest) = h.strip_prefix("172.") {
-        if let Some(second) = rest.split('.').next().and_then(|s| s.parse::<u8>().ok()) {
-            if (16..=31).contains(&second) {
-                return true;
+/// Recover from a poisoned std::sync::Mutex instead of panicking — one panic must not freeze download management.
+pub fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// True if a resolved IP lands in a non-routable/private range (SSRF target).
+/// Covers loopback, RFC1918, link-local, unspecified, CGNAT (100.64.0.0/10),
+/// IPv6 ULA/link-local, and IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1).
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || {
+                // CGNAT 100.64.0.0/10 (RFC 6598)
+                let o = v4.octets();
+                o[0] == 100 && (64..=127).contains(&o[1])
             }
         }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || {
+                    let s = v6.segments();
+                    // unique local fc00::/7 and link-local fe80::/10
+                    (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
+                }
+                || v6.to_ipv4().map(|v4| is_blocked_ip(std::net::IpAddr::V4(v4))).unwrap_or(false)
+        }
     }
-    if h.starts_with("169.254.") || h.starts_with("fc") || h.starts_with("fd") || h.starts_with("fe80:") {
+}
+
+/// Literal host check: blocks "localhost" and any IP literal in a private range.
+fn is_blocked_download_host(host: &str) -> bool {
+    let h = host.trim().trim_matches('[').trim_matches(']').to_lowercase();
+    if h == "localhost" {
         return true;
     }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return is_blocked_ip(ip);
+    }
     false
+}
+
+/// DNS-rebinding guard: resolve `host` and reject if any address is private/loopback.
+/// Fail-safe: resolution failure or zero answers → blocked (reject).
+fn host_resolves_to_blocked(host: &str, port: u16) -> bool {
+    use std::net::ToSocketAddrs;
+    match (host, port).to_socket_addrs() {
+        Ok(addrs) => {
+            let mut any = false;
+            for a in addrs {
+                if is_blocked_ip(a.ip()) {
+                    return true;
+                }
+                any = true;
+            }
+            !any
+        }
+        Err(_) => true,
+    }
 }
 
 /// Allow only http(s) and magnet URLs. Block loopback/private hosts (SSRF).
@@ -57,6 +95,12 @@ pub fn validate_download_url(url: &str) -> Result<(), String> {
             if let Some(host) = parsed.host_str() {
                 if is_blocked_download_host(host) {
                     return Err("Private/loopback hosts are not allowed".into());
+                }
+                // ponytail: blocking system DNS here is acceptable for validation cadence;
+                // a TOCTOU race remains (re-resolved at fetch), but this blocks obvious rebinding cases.
+                let port = parsed.port_or_known_default().unwrap_or(80);
+                if host_resolves_to_blocked(host, port) {
+                    return Err("Host resolves to a blocked address (DNS-rebinding)".into());
                 }
             }
             Ok(())
@@ -86,15 +130,9 @@ pub fn sanitize_filename(name: &str) -> String {
 /// Resolve save_path under allowed root; reject escape attempts.
 pub fn resolve_save_dir(requested: &str, allowed_root: &Path) -> Result<PathBuf, String> {
     let expanded = expand_tilde(requested);
-    let root = allowed_root
-        .canonicalize()
-        .unwrap_or_else(|_| allowed_root.to_path_buf());
+    let root = allowed_root.canonicalize().unwrap_or_else(|_| allowed_root.to_path_buf());
 
-    let candidate = if expanded.is_absolute() {
-        expanded
-    } else {
-        root.join(&expanded)
-    };
+    let candidate = if expanded.is_absolute() { expanded } else { root.join(&expanded) };
 
     // Ensure no `..` components remain after normalize
     let mut clean = PathBuf::new();
@@ -155,17 +193,12 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 }
 
 pub fn default_download_dir() -> PathBuf {
-    dirs::download_dir().unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Downloads")
-    })
+    dirs::download_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Downloads"))
 }
 
 pub fn app_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("com.falcondm.app")
+    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("com.falcondm.app")
 }
 
 pub fn full_file_path(save_path: &str, filename: &str) -> PathBuf {
@@ -196,9 +229,7 @@ pub fn validate_completed_file(path: &Path) -> Result<u64, String> {
                 || head.starts_with(b"HTTP")
                 || head.starts_with(b"<!DOC");
             if is_text {
-                return Err(
-                    "Server returned an error page instead of a file".into(),
-                );
+                return Err("Server returned an error page instead of a file".into());
             }
             // YouTube DASH/sabr error blobs
             if head.windows(4).any(|w| w == b"sabr") {
@@ -241,16 +272,9 @@ fn regex_lite_remove(input: &str, pattern: &str) -> Result<String, ()> {
         return Ok(input.to_string());
     }
     let mut s = input.to_string();
-    loop {
-        let Some(pos) = s.find(&format!("&{key}=")).or_else(|| s.find(&format!("?{key}=")))
-        else {
-            break;
-        };
+    while let Some(pos) = s.find(&format!("&{key}=")).or_else(|| s.find(&format!("?{key}="))) {
         let value_start = s[pos..].find('=').map(|i| pos + i + 1).unwrap_or(s.len());
-        let value_end = s[value_start..]
-            .find('&')
-            .map(|i| value_start + i)
-            .unwrap_or(s.len());
+        let value_end = s[value_start..].find('&').map(|i| value_start + i).unwrap_or(s.len());
         if s.as_bytes().get(pos) == Some(&b'?') {
             // ?key=value&rest → ?rest  OR ?key=value → (no query)
             if value_end < s.len() {
@@ -284,14 +308,18 @@ pub fn is_youtube_watch_url(url: &str) -> bool {
         return false;
     };
     let host = u.host_str().unwrap_or("");
-    if !(host.ends_with("youtube.com") || host == "youtu.be" || host.ends_with("youtube-nocookie.com"))
+    if !(host.ends_with("youtube.com")
+        || host == "youtu.be"
+        || host.ends_with("youtube-nocookie.com"))
     {
         return false;
     }
     if host == "youtu.be" {
         return u.path_segments().and_then(|mut s| s.next()).is_some();
     }
-    u.path().starts_with("/watch") || u.path().starts_with("/shorts/") || u.path().starts_with("/live/")
+    u.path().starts_with("/watch")
+        || u.path().starts_with("/shorts/")
+        || u.path().starts_with("/live/")
 }
 
 pub fn is_googlevideo_url(url: &str) -> bool {
@@ -318,11 +346,7 @@ pub fn split_falcon_format(url: &str) -> (String, Option<String>) {
 /// Attach or replace yt-dlp format selector. `format` wins over existing fragment.
 pub fn attach_falcon_format(url: &str, format: Option<&str>) -> String {
     let (base, existing) = split_falcon_format(url);
-    let fmt = format
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .or(existing);
+    let fmt = format.map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_string()).or(existing);
     match fmt {
         Some(f) => {
             let enc: String = url::form_urlencoded::byte_serialize(f.as_bytes()).collect();
@@ -370,14 +394,7 @@ pub fn infer_filename_from_url(url: &str) -> Option<String> {
             }
         }
     }
-    let segment = parsed
-        .path()
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("");
+    let segment = parsed.path().rsplit('/').next().unwrap_or("").split('?').next().unwrap_or("");
     if !segment.is_empty() && segment != "/" && segment.contains('.') {
         return Some(segment.to_string());
     }
@@ -407,8 +424,8 @@ pub fn guess_extension_from_url(url: &str) -> Option<String> {
         return Some(ext.into());
     }
     for ext in [
-        "mp4", "webm", "mkv", "avi", "mov", "m4a", "mp3", "flac", "ogg", "wav", "zip", "rar",
-        "7z", "pdf", "exe", "dmg", "pkg", "iso", "torrent", "png", "jpg", "jpeg", "gif",
+        "mp4", "webm", "mkv", "avi", "mov", "m4a", "mp3", "flac", "ogg", "wav", "zip", "rar", "7z",
+        "pdf", "exe", "dmg", "pkg", "iso", "torrent", "png", "jpg", "jpeg", "gif",
     ] {
         if lower.contains(&format!(".{ext}")) {
             return Some(ext.into());
@@ -505,8 +522,34 @@ mod tests {
     }
 
     #[test]
+    fn test_cgnat_range_blocked() {
+        assert!(is_blocked_download_host("100.64.0.1"));
+        assert!(is_blocked_download_host("100.127.255.255"));
+        assert!(!is_blocked_download_host("100.63.255.255"));
+        assert!(!is_blocked_download_host("100.128.0.0"));
+        assert!(!is_blocked_download_host("8.8.8.8"));
+    }
+
+    #[test]
+    fn test_ipv4_mapped_loopback_blocked() {
+        assert!(is_blocked_download_host("::ffff:127.0.0.1"));
+        assert!(is_blocked_download_host("::ffff:192.168.1.1"));
+        assert!(!is_blocked_download_host("::ffff:8.8.8.8"));
+        assert!(is_blocked_download_host("::1"));
+        assert!(is_blocked_download_host("0.0.0.0"));
+    }
+
+    #[test]
+    fn test_dns_rebinding_fail_safe() {
+        // .invalid is reserved (RFC 6761) to never resolve → fail-safe reject,
+        // deterministically whether DNS is up or fully offline.
+        assert!(host_resolves_to_blocked("nonexistent-falcon-12345.invalid", 80));
+    }
+
+    #[test]
     fn test_youtube_page_url_from_googlevideo_id() {
-        let cdn = "https://rr1---sn-abc.googlevideo.com/videoplayback?id=5-u7nkMiwtQ&mime=video%2Fmp4";
+        let cdn =
+            "https://rr1---sn-abc.googlevideo.com/videoplayback?id=5-u7nkMiwtQ&mime=video%2Fmp4";
         let watch = youtube_page_url_for_download(cdn, None).unwrap();
         assert!(watch.contains("watch?v=5-u7nkMiwtQ"));
     }
@@ -522,7 +565,8 @@ mod tests {
 
     #[test]
     fn test_attach_falcon_format() {
-        let u = attach_falcon_format("https://www.youtube.com/watch?v=abc", Some("best[height<=720]"));
+        let u =
+            attach_falcon_format("https://www.youtube.com/watch?v=abc", Some("best[height<=720]"));
         let (base, fmt) = split_falcon_format(&u);
         assert_eq!(base, "https://www.youtube.com/watch?v=abc");
         assert_eq!(fmt.as_deref(), Some("best[height<=720]"));
@@ -552,9 +596,7 @@ mod tests {
 
     #[test]
     fn test_junk_and_normalize_media_url() {
-        assert!(is_junk_media_url(
-            "https://www.youtube.com/s/search/audio/no_input.mp3"
-        ));
+        assert!(is_junk_media_url("https://www.youtube.com/s/search/audio/no_input.mp3"));
         let n = normalize_media_url(
             "https://rr1.googlevideo.com/videoplayback?itag=18&range=0-100&sq=1",
         );

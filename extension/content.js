@@ -53,99 +53,6 @@
     });
   }
 
-  /**
-   * Content scripts run in isolated world — cannot read page `window.yt*`.
-   * Bridge: inject page-world script → postMessage player_response URLs.
-   */
-  function extractUrlsFromPlayerResponse(pr) {
-    const out = [];
-    if (!pr || !pr.streamingData) return out;
-    for (const fmt of pr.streamingData.formats || []) {
-      if (fmt.url) out.push(fmt.url);
-    }
-    for (const fmt of pr.streamingData.adaptiveFormats || []) {
-      if (fmt.url) out.push(fmt.url);
-      // Some streams only expose cipher — skip (no url)
-    }
-    return out;
-  }
-
-  function scrapePlayerResponseFromDom() {
-    const out = [];
-    const scripts = document.querySelectorAll("script");
-    for (const s of scripts) {
-      const t = s.textContent || "";
-      if (!t.includes("ytInitialPlayerResponse") && !t.includes("streamingData")) continue;
-      const m = t.match(/ytInitialPlayerResponse\s*=\s*(\{[\s\S]*?\});\s*(?:var|const|let|window|if|<\/)/);
-      if (!m) continue;
-      try {
-        const pr = JSON.parse(m[1]);
-        out.push(...extractUrlsFromPlayerResponse(pr));
-        if (out.length) break;
-      } catch (_) {}
-    }
-    return out;
-  }
-
-  function extractYouTubeUrlsFromPageWorld(timeoutMs) {
-    return new Promise((resolve) => {
-      const requestId = "falcon-yt-" + Math.random().toString(36).slice(2);
-      let done = false;
-      const finish = (urls) => {
-        if (done) return;
-        done = true;
-        window.removeEventListener("message", onMsg);
-        resolve(urls || []);
-      };
-      const onMsg = (ev) => {
-        if (ev.source !== window) return;
-        const d = ev.data;
-        if (!d || d.source !== "falcon-dm-page" || d.id !== requestId) return;
-        finish(Array.isArray(d.urls) ? d.urls : []);
-      };
-      window.addEventListener("message", onMsg);
-      const script = document.createElement("script");
-      script.textContent = `(() => {
-        try {
-          const id = ${JSON.stringify(requestId)};
-          const out = [];
-          const pushPr = (pr) => {
-            if (!pr || !pr.streamingData) return;
-            for (const f of (pr.streamingData.formats || [])) if (f.url) out.push(f.url);
-            for (const f of (pr.streamingData.adaptiveFormats || [])) if (f.url) out.push(f.url);
-          };
-          pushPr(window.ytInitialPlayerResponse);
-          try {
-            const cfg = window.ytplayer && window.ytplayer.config && window.ytplayer.config.args;
-            if (cfg) {
-              let raw = cfg.player_response || cfg.raw_player_response;
-              if (typeof raw === "string") raw = JSON.parse(raw);
-              pushPr(raw);
-            }
-          } catch (e) {}
-          try {
-            const p = document.querySelector("ytd-player, #movie_player");
-            const player = p && (p.getPlayer ? p.getPlayer() : (window.yt && window.yt.player && window.yt.player.getPlayerByElement && window.yt.player.getPlayerByElement(p)));
-            if (player && player.getPlayerResponse) pushPr(player.getPlayerResponse());
-          } catch (e) {}
-          window.postMessage({ source: "falcon-dm-page", id, urls: out }, "*");
-        } catch (e) {
-          window.postMessage({ source: "falcon-dm-page", id: ${JSON.stringify(requestId)}, urls: [] }, "*");
-        }
-      })();`;
-      (document.documentElement || document.head).appendChild(script);
-      script.remove();
-      setTimeout(() => finish([]), timeoutMs || 800);
-    });
-  }
-
-  async function extractYouTubeUrls() {
-    const fromDom = scrapePlayerResponseFromDom();
-    if (fromDom.length) return [...new Set(fromDom)];
-    const fromPage = await extractYouTubeUrlsFromPageWorld(900);
-    return [...new Set(fromPage)];
-  }
-
   function injectStyles(shadow) {
     const style = document.createElement("style");
     style.textContent = `
@@ -382,23 +289,24 @@
       return;
     }
 
-    const metaMap = (resp && resp.metaMap) || {};
-    let urls = [...((resp && resp.urls) || [])];
+    let sources = FM.groupSources(
+      [...((resp && resp.urls) || [])],
+      (resp && resp.metaMap) || {}
+    );
 
-    if (location.hostname.includes("youtube.com") || location.hostname.includes("youtu.be")) {
-      const ytUrls = await extractYouTubeUrls();
-      urls = [...new Set([...urls, ...ytUrls])];
-    }
-
-    let sources = FM.groupSources(urls, metaMap);
-
-    if (!sources.length && (location.hostname.includes("youtube.com") || location.hostname.includes("youtu.be"))) {
+    // YouTube: background already scrapes player_response in the MAIN world.
+    // If nothing arrived yet (SPA race), wait and re-query once.
+    if (
+      !sources.length &&
+      /youtube\.com|youtu\.be/i.test(location.href)
+    ) {
       await new Promise((r) => setTimeout(r, 1500));
       try {
         resp = await sendBg({ action: "get_real_media_url", page_url: location.href });
-        const ytUrls = await extractYouTubeUrls();
-        urls = [...new Set([...((resp && resp.urls) || []), ...ytUrls])];
-        sources = FM.groupSources(urls, (resp && resp.metaMap) || {});
+        sources = FM.groupSources(
+          [...((resp && resp.urls) || [])],
+          (resp && resp.metaMap) || {}
+        );
       } catch (_) {}
     }
 
@@ -557,18 +465,42 @@
   }
 
   document.querySelectorAll("video").forEach(attachToVideo);
+
+  // ponytail: debounce video-scan so heavy SPAs don't thrash on every DOM mutation.
+  let pendingVideos = [];
+  let flushScheduled = false;
+  const scheduleFlush = self.requestIdleCallback
+    ? (fn) => self.requestIdleCallback(fn, { timeout: 300 })
+    : (fn) => setTimeout(fn, 300);
+  function flushVideos() {
+    flushScheduled = false;
+    const batch = pendingVideos;
+    pendingVideos = [];
+    batch.forEach(attachToVideo);
+  }
   new MutationObserver((mutations) => {
-    mutations.forEach((m) => {
-      m.addedNodes.forEach((node) => {
-        if (node.nodeName === "VIDEO") attachToVideo(node);
-        else if (node.querySelectorAll) node.querySelectorAll("video").forEach(attachToVideo);
-      });
-    });
+    for (const m of mutations) {
+      for (const node of m.addedNodes) {
+        if (node.nodeName === "VIDEO") pendingVideos.push(node);
+        else if (node.querySelectorAll) {
+          node.querySelectorAll("video").forEach((v) => pendingVideos.push(v));
+        }
+      }
+    }
+    if (pendingVideos.length && !flushScheduled) {
+      flushScheduled = true;
+      scheduleFlush(flushVideos);
+    }
   }).observe(document.documentElement, { childList: true, subtree: true });
 
   chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
     if (req.action === "open_grabber") {
       openGrabber();
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (req.action === "open_download_modal") {
+      openDownloadModal().catch(() => {});
       sendResponse({ ok: true });
       return true;
     }

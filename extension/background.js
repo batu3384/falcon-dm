@@ -10,6 +10,85 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Connection / UI state shared with popup + toolbar badge.
+// ponytail: MV3 service workers are killed after ~30s of inactivity and these
+// in-memory values reset on restart — most importantly `interceptPaused`, which
+// is a durable user preference. We mirror it (and connectionState) into
+// chrome.storage.session so a SW restart restores the user's choice instead of
+// silently re-enabling download hijacking.
+let connectionState = "offline"; // "connected" | "pending" | "offline"
+let interceptPaused = false; // when true, automatic hijack is off (browser downloads natively)
+const RECENT = []; // recent sends shown in the popup queue preview
+const INJECTED = new Set(); // tab ids that already have the on-demand content script
+
+// On SW startup, hydrate the durable preference from session storage.
+(async () => {
+  try {
+    const { falconInterceptPaused, falconConnectionState } =
+      await chrome.storage.session.get({
+        falconInterceptPaused: false,
+        falconConnectionState: "offline",
+      });
+    interceptPaused = !!falconInterceptPaused;
+    connectionState = falconConnectionState || "offline";
+    refreshBadge();
+  } catch (_) {}
+})();
+
+function setState(s) {
+  if (connectionState === s) return;
+  connectionState = s;
+  refreshBadge();
+  // Best-effort persist (non-blocking); SW restart will restore the badge.
+  chrome.storage.session
+    .set({ falconConnectionState: connectionState })
+    .catch(() => {});
+}
+
+/** Reflect connection state on the toolbar icon badge. */
+function refreshBadge() {
+  const map = {
+    connected: { text: "✓", color: "#22c55e" },
+    pending: { text: "•", color: "#D97706" },
+    offline: { text: "", color: "#dc2626" },
+  };
+  const b = map[connectionState] || map.offline;
+  try {
+    chrome.action.setBadgeBackgroundColor({ color: b.color });
+    chrome.action.setBadgeText({ text: b.text });
+  } catch (_) {}
+}
+
+function trackDownload(filename, url, kind) {
+  let host = "";
+  try {
+    host = new URL(url).hostname.replace(/^www\./, "");
+  } catch (_) {}
+  RECENT.unshift({
+    filename: (filename || "download").slice(0, 80),
+    host,
+    ts: Date.now(),
+    kind,
+  });
+  if (RECENT.length > 8) RECENT.length = 8;
+}
+
+/** Inject the on-demand content script once per tab. Idempotent. */
+async function ensureContentScript(tabId) {
+  if (!tabId || tabId < 0 || INJECTED.has(tabId)) return true;
+  INJECTED.add(tabId);
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["media-utils.js", "content.js"],
+    });
+    return true;
+  } catch (_) {
+    INJECTED.delete(tabId); // allow retry (e.g. chrome:// pages reject injection)
+    return false;
+  }
+}
+
 async function getToken() {
   const { apiToken } = await chrome.storage.local.get({ apiToken: "" });
   return (apiToken || "").trim();
@@ -38,11 +117,6 @@ function wakeFalcon() {
       }, 600);
     });
   });
-}
-
-/** @deprecated Deep-link enqueue removed (token-in-URL leak). Kept as no-op for safety. */
-function deepLinkDownload(_payload) {
-  return wakeFalcon();
 }
 
 async function waitForHealthy(timeoutMs = 25000) {
@@ -77,7 +151,10 @@ async function ensurePaired(force = false) {
               },
               body: "{}",
             });
-            if (r.ok) return existing;
+            if (r.ok) {
+              setState("connected");
+              return existing;
+            }
           } catch (_) {}
         }
       }
@@ -107,6 +184,8 @@ async function ensurePaired(force = false) {
 
       const finishPair = async (resp) => {
         if (resp.status === 202) return { pending: true };
+        // 503: app is up but token not provisioned yet (cold-start race). Caller retries.
+        if (resp.status === 503) return { retry: true };
         if (!resp.ok) return { error: true };
         const data = await resp.json().catch(() => null);
         if (data && data.pending) return { pending: true };
@@ -118,12 +197,34 @@ async function ensurePaired(force = false) {
       };
 
       let first = await finishPair(r);
-      if (first.token) return first.token;
+      // Cold-start 503 race: short backoff + retry before giving up.
+      for (let i = 0; first.retry && i < 5; i++) {
+        await sleep(500);
+        const rr = await fetch(`${FALCON_API}/api/pair`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        if (rr.status === 403) {
+          throw new Error(
+            msg(
+              "errorExtensionBlocked",
+              "Extension blocked — open Falcon DM Settings → Reconnect extension"
+            )
+          );
+        }
+        first = await finishPair(rr);
+      }
+      if (first.token) {
+        setState("connected");
+        return first.token;
+      }
       if (first.error) {
         throw new Error(msg("errorAppOffline", "Could not pair with Falcon DM"));
       }
 
       // Pending approval — poll until Settings approve (or timeout)
+      setState("pending");
       notify(
         msg("appName", "Falcon DM"),
         msg(
@@ -152,7 +253,10 @@ async function ensurePaired(force = false) {
           );
         }
         const again = await finishPair(r2);
-        if (again.token) return again.token;
+        if (again.token) {
+          setState("connected");
+          return again.token;
+        }
       }
       throw new Error(
         msg(
@@ -160,6 +264,9 @@ async function ensurePaired(force = false) {
           "Approve this extension in Falcon DM Settings, then try again"
         )
       );
+    } catch (e) {
+      setState("offline");
+      throw e;
     } finally {
       pairInFlight = null;
     }
@@ -194,6 +301,7 @@ async function postFalcon(path, body) {
       body: JSON.stringify(body),
     });
   } catch {
+    setState("offline");
     throw new Error(msg("errorAppOffline", "Falcon DM is not running — open the desktop app"));
   }
 
@@ -209,6 +317,7 @@ async function postFalcon(path, body) {
         body: JSON.stringify(body),
       });
     } catch {
+      setState("offline");
       throw new Error(msg("errorAppOffline", "Falcon DM is not running — open the desktop app"));
     }
   }
@@ -228,6 +337,11 @@ async function postFalcon(path, body) {
     if (err === "invalid url") throw new Error(msg("errorInvalidUrl", "No valid URL"));
     throw new Error(err);
   }
+  try {
+    if (body && body.url) {
+      trackDownload(body.filename || "", body.url, path === "/api/intercept" ? "media" : "file");
+    }
+  } catch (_) {}
   return data;
 }
 
@@ -242,6 +356,7 @@ async function sendToFalcon(path, body) {
     return postFalcon(path, body);
   }
 
+  setState("offline");
   throw new Error(msg("errorWaking", "Falcon DM başlatılamadı"));
 }
 
@@ -271,18 +386,28 @@ function setupMenus() {
 
 chrome.runtime.onInstalled.addListener(() => {
   setupMenus();
-  ensurePaired(true).catch(() => {});
+  refreshBadge();
+  ensurePaired(true).catch(() => {
+    setState("offline");
+    notify(
+      msg("appName", "Falcon DM"),
+      msg("popupOnboard", "Open Falcon DM and approve this extension in Settings")
+    );
+  });
 });
 
 chrome.runtime.onStartup.addListener(() => {
+  refreshBadge();
   ensurePaired(false).catch(() => {});
 });
 
+refreshBadge();
 ensurePaired(false).catch(() => {});
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   MEDIA_URLS.delete(tabId);
   MEDIA_META.delete(tabId);
+  INJECTED.delete(tabId);
 });
 
 function headerValue(headers, name) {
@@ -315,6 +440,9 @@ chrome.webRequest.onHeadersReceived.addListener(
         ts: Date.now(),
       });
       MEDIA_META.set(details.tabId, metaMap);
+
+      // Inject the on-demand overlay so the user sees the Falcon button on this media.
+      ensureContentScript(details.tabId);
     }
   },
   { urls: ["<all_urls>"] },
@@ -322,6 +450,11 @@ chrome.webRequest.onHeadersReceived.addListener(
 );
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  if (interceptPaused) {
+    // Paused: let the browser handle the download natively.
+    suggest({ cancel: false });
+    return;
+  }
   (async () => {
     try {
       let cookiesHeader = "";
@@ -379,11 +512,108 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 
   if (info.menuItemId === "grab_page_links" && tab?.id) {
-    chrome.tabs.sendMessage(tab.id, { action: "open_grabber" });
+    ensureContentScript(tab.id).then(() => {
+      chrome.tabs.sendMessage(tab.id, { action: "open_grabber" });
+    });
   }
 });
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // --- popup: live status + queue preview ---
+  if (request.action === "check_status") {
+    (async () => {
+      const healthy = await appHealthy();
+      if (healthy) {
+        const token = await getToken();
+        setState(token ? "connected" : "pending");
+      } else {
+        setState("offline");
+      }
+      sendResponse({
+        state: connectionState,
+        paused: interceptPaused,
+        recent: RECENT.slice(0, 3),
+      });
+    })();
+    return true;
+  }
+
+  if (request.action === "get_status") {
+    sendResponse({
+      state: connectionState,
+      paused: interceptPaused,
+      recent: RECENT.slice(0, 3),
+    });
+    return true;
+  }
+
+  if (request.action === "set_paused") {
+    const next = !!request.paused;
+    // Respond immediately, then durably persist so an MV3 SW restart keeps the
+    // user's hijack preference (previously a SW restart would reset to false).
+    interceptPaused = next;
+    chrome.storage.session.set({ falconInterceptPaused: next }).catch(() => {});
+    sendResponse({ ok: true, paused: interceptPaused });
+    return true;
+  }
+
+  // --- popup: download current tab's media (inject overlay + open picker) ---
+  if (request.action === "grab_tab_media") {
+    (async () => {
+      try {
+        const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!active || !active.id) {
+          sendResponse({ ok: false, error: msg("errorInvalidUrl", "No active tab") });
+          return;
+        }
+        const injected = await ensureContentScript(active.id);
+        if (!injected) {
+          sendResponse({ ok: false, error: msg("errorMediaUtils", "Cannot run on this page") });
+          return;
+        }
+        chrome.tabs.sendMessage(active.id, { action: "open_download_modal" }, () => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+          } else {
+            sendResponse({ ok: true });
+          }
+        });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  // --- popup: download an arbitrary URL via /api/add ---
+  if (request.action === "add_url") {
+    const rawUrl = (request.url || "").trim();
+    if (!rawUrl || !/^https?:/i.test(rawUrl)) {
+      sendResponse({ success: false, error: msg("errorInvalidUrl", "No valid URL") });
+      return true;
+    }
+    (async () => {
+      let cookies = "";
+      try {
+        const list = await chrome.cookies.getAll({ url: rawUrl });
+        cookies = (list || []).map((c) => `${c.name}=${c.value}`).join("; ");
+      } catch (_) {}
+      try {
+        await sendToFalcon("/api/add", {
+          url: rawUrl,
+          filename: rawUrl.split("/").pop().split("?")[0] || "download",
+          referrer: rawUrl,
+          user_agent: navigator.userAgent,
+          cookies,
+        });
+        sendResponse({ success: true });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+
   if (request.action === "get_real_media_url") {
     const tabId = sender.tab ? sender.tab.id : -1;
     const set = MEDIA_URLS.get(tabId);

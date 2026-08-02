@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from "react";
+import { useEffect, type RefObject } from 'react';
 
 const FOCUSABLE =
   'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
@@ -7,7 +7,7 @@ const FOCUSABLE =
 export function useModalA11y(
   containerRef: RefObject<HTMLElement | null>,
   onClose: () => void,
-  enabled = true
+  enabled = true,
 ) {
   useEffect(() => {
     if (!enabled) return;
@@ -16,7 +16,7 @@ export function useModalA11y(
 
     const list = () =>
       Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-        (el) => !el.hasAttribute("disabled") && el.offsetParent !== null
+        (el) => !el.hasAttribute('disabled') && el.offsetParent !== null,
       );
 
     const prev = document.activeElement as HTMLElement | null;
@@ -24,12 +24,12 @@ export function useModalA11y(
     first?.focus();
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (e.key === 'Escape') {
         e.stopPropagation();
         onClose();
         return;
       }
-      if (e.key !== "Tab") return;
+      if (e.key !== 'Tab') return;
       const items = list();
       if (!items.length) return;
       const head = items[0];
@@ -43,9 +43,9 @@ export function useModalA11y(
       }
     };
 
-    root.addEventListener("keydown", onKey);
+    root.addEventListener('keydown', onKey);
     return () => {
-      root.removeEventListener("keydown", onKey);
+      root.removeEventListener('keydown', onKey);
       prev?.focus?.();
     };
   }, [containerRef, onClose, enabled]);

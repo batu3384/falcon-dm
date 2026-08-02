@@ -1,15 +1,19 @@
 use crate::storage::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
-use rusqlite::{params, Connection, Row};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::{params, Row};
+use rusqlite_migration::{Migrations, M};
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum DatabaseError {
     Sqlite(rusqlite::Error),
     Io(std::io::Error),
     LockError,
+    PoolError(String),
     NotFound(i64),
 }
 
@@ -19,6 +23,7 @@ impl fmt::Display for DatabaseError {
             DatabaseError::Sqlite(err) => write!(f, "SQLite error: {}", err),
             DatabaseError::Io(err) => write!(f, "IO error: {}", err),
             DatabaseError::LockError => write!(f, "Failed to acquire database lock"),
+            DatabaseError::PoolError(err) => write!(f, "DB pool error: {}", err),
             DatabaseError::NotFound(id) => write!(f, "Download with id {} not found", id),
         }
     }
@@ -42,7 +47,12 @@ pub type Result<T> = std::result::Result<T, DatabaseError>;
 
 #[derive(Clone)]
 pub struct Database {
-    conn: Arc<Mutex<Connection>>,
+    // ponytail: connection pool (default 8 conns) replaces the single shared
+    // Connection+Mutex. The progress-poll loop, queue tick and HTTP enqueue all
+    // contend(ed) on that one lock; with a pool they run in parallel (WAL allows
+    // multiple readers + one writer). Each `self.conn.get()` borrows a connection
+    // for the duration of a single query.
+    conn: Arc<Pool<SqliteConnectionManager>>,
 }
 
 impl Database {
@@ -57,29 +67,53 @@ impl Database {
             app_data_dir.join("falcon_dm.db")
         };
 
-        let conn = Connection::open(&db_path)?;
+        let manager = SqliteConnectionManager::file(&db_path).with_init(|c| {
+            c.execute_batch(
+                // PRAGMAs applied to every pooled connection on creation.
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA busy_timeout=5000;
+                 PRAGMA foreign_keys = ON;",
+            )
+        });
+        let pool = Pool::builder()
+            .max_size(8)
+            .build(manager)
+            .map_err(|e| DatabaseError::PoolError(e.to_string()))?;
 
-        let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
-        };
+        let db = Self { conn: Arc::new(pool) };
         db.run_migrations()?;
         Ok(db)
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
-        };
+        let manager = SqliteConnectionManager::memory().with_init(|c| {
+            c.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA busy_timeout=5000;
+                 PRAGMA foreign_keys = ON;",
+            )
+        });
+        let pool = Pool::builder()
+            .max_size(4)
+            .build(manager)
+            .map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+
+        let db = Self { conn: Arc::new(pool) };
         db.run_migrations()?;
         Ok(db)
     }
 
     fn run_migrations(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
-        conn.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS downloads (
+        let mut conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        // ponytail: versioned migrations. Previously the schema was created with
+        // bare `CREATE TABLE IF NOT EXISTS` and no `PRAGMA user_version`, so any
+        // future ALTER/ADD-COLUMN could not be applied to existing user databases.
+        // `rusqlite_migration` tracks the current version via user_version and runs
+        // only the pending migrations. Existing v0 databases (no user_version) are
+        // handled by the v1 baseline: it re-runs the idempotent CREATE statements.
+        let migrations = Migrations::new(vec![
+            M::up(
+                "CREATE TABLE IF NOT EXISTS downloads (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 url TEXT NOT NULL,
                 filename TEXT NOT NULL,
@@ -101,18 +135,29 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status);
             CREATE INDEX IF NOT EXISTS idx_downloads_category ON downloads(category);",
-        )?;
+            ),
+            // ponytail: v2 — add archived flag so completed downloads can be
+            // archived (hidden from the active list) without being deleted.
+            // Existing rows default to archived=0 (visible).
+            M::up(
+                "ALTER TABLE downloads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+                 CREATE INDEX IF NOT EXISTS idx_downloads_archived ON downloads(archived);",
+            ),
+        ]);
+        migrations.to_latest(&mut conn).map_err(|e| {
+            DatabaseError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        })?;
         Ok(())
     }
 
     pub fn insert_download(&self, download: &Download) -> Result<i64> {
-        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         conn.execute(
             "INSERT INTO downloads (
                 url, filename, save_path, total_size, downloaded_size, status, category,
                 speed, segments, priority, created_at, completed_at, error_message,
-                referrer, user_agent, cookies, aria2_gid
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                referrer, user_agent, cookies, aria2_gid, archived
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 download.url,
                 download.filename,
@@ -131,13 +176,14 @@ impl Database {
                 download.user_agent,
                 download.cookies,
                 download.aria2_gid,
+                download.archived as i64,
             ],
         )?;
         Ok(conn.last_insert_rowid())
     }
 
     pub fn update_download(&self, id: i64, download: &Download) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let rows = conn.execute(
             "UPDATE downloads SET
                 url = ?1,
@@ -156,8 +202,9 @@ impl Database {
                 referrer = ?14,
                 user_agent = ?15,
                 cookies = ?16,
-                aria2_gid = ?17
-            WHERE id = ?18",
+                aria2_gid = ?17,
+                archived = ?18
+            WHERE id = ?19",
             params![
                 download.url,
                 download.filename,
@@ -176,6 +223,7 @@ impl Database {
                 download.user_agent,
                 download.cookies,
                 download.aria2_gid,
+                download.archived as i64,
                 id,
             ],
         )?;
@@ -192,7 +240,7 @@ impl Database {
         speed: f64,
         status: &DownloadStatus,
     ) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let rows = conn.execute(
             "UPDATE downloads SET downloaded_size = ?1, speed = ?2, status = ?3 WHERE id = ?4",
             params![downloaded_size as i64, speed, status.as_str(), id],
@@ -204,11 +252,11 @@ impl Database {
     }
 
     pub fn get_downloads(&self, filter: &DownloadFilter) -> Result<Vec<Download>> {
-        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let mut sql = String::from(
             "SELECT id, url, filename, save_path, total_size, downloaded_size, status, \
              category, speed, segments, priority, created_at, completed_at, error_message, \
-             referrer, user_agent, cookies, aria2_gid FROM downloads WHERE 1=1",
+             referrer, user_agent, cookies, aria2_gid, archived FROM downloads WHERE 1=1",
         );
 
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -232,7 +280,22 @@ impl Database {
             }
         }
 
+        // ponytail: archived filter. Default (None) hides archived rows so the
+        // active list never shows them; the "Archived" view passes Some(true).
+        match filter.archived {
+            None => sql.push_str(" AND (archived = 0 OR archived IS NULL)"),
+            Some(true) => sql.push_str(" AND archived = 1"),
+            Some(false) => {} // explicit non-archived, already covered by default
+        }
+
         sql.push_str(" ORDER BY id DESC");
+
+        // ponytail: negative LIMIT means "no limit" in SQLite; internal callers pass None → all rows.
+        let limit = filter.limit.unwrap_or(-1);
+        let offset = filter.offset.unwrap_or(0);
+        sql.push_str(" LIMIT ? OFFSET ?");
+        params.push(Box::new(limit));
+        params.push(Box::new(offset));
 
         let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
@@ -247,22 +310,28 @@ impl Database {
     }
 
     pub fn get_download(&self, id: i64) -> Result<Download> {
-        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let mut stmt = conn.prepare(
             "SELECT id, url, filename, save_path, total_size, downloaded_size, status, \
              category, speed, segments, priority, created_at, completed_at, error_message, \
-             referrer, user_agent, cookies, aria2_gid FROM downloads WHERE id = ?1",
+             referrer, user_agent, cookies, aria2_gid, archived FROM downloads WHERE id = ?1",
         )?;
 
-        stmt.query_row(params![id], row_to_download)
-            .map_err(|err| match err {
-                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound(id),
-                other => DatabaseError::Sqlite(other),
-            })
+        stmt.query_row(params![id], row_to_download).map_err(|err| match err {
+            rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound(id),
+            other => DatabaseError::Sqlite(other),
+        })
+    }
+
+    /// Introspect the SQLite journal mode (verify WAL is active).
+    pub fn journal_mode(&self) -> Result<String> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        conn.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .map_err(DatabaseError::from)
     }
 
     pub fn delete_download(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| DatabaseError::LockError)?;
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let rows = conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])?;
         if rows == 0 {
             return Err(DatabaseError::NotFound(id));
@@ -290,6 +359,7 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
     let user_agent: Option<String> = row.get(15)?;
     let cookies: Option<String> = row.get(16)?;
     let aria2_gid: Option<String> = row.get(17)?;
+    let archived: bool = row.get::<_, i64>(18)? != 0;
 
     Ok(Download {
         id: Some(id),
@@ -298,8 +368,14 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
         save_path,
         total_size: total_size as u64,
         downloaded_size: downloaded_size as u64,
-        status: status_str.parse().unwrap_or(DownloadStatus::Queued),
-        category: category_str.parse().unwrap_or(DownloadCategory::Other),
+        status: status_str.parse().unwrap_or_else(|_| {
+            log::warn!("downloads#{id}: unknown status '{status_str}', defaulting to Queued");
+            DownloadStatus::Queued
+        }),
+        category: category_str.parse().unwrap_or_else(|_| {
+            log::warn!("downloads#{id}: unknown category '{category_str}', defaulting to Other");
+            DownloadCategory::Other
+        }),
         speed,
         segments: segments as u32,
         priority: priority as u32,
@@ -310,6 +386,7 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
         user_agent,
         cookies,
         aria2_gid,
+        archived,
     })
 }
 
@@ -337,6 +414,7 @@ mod tests {
             user_agent: Some("FalconDM/1.0".to_string()),
             cookies: None,
             aria2_gid: None,
+            archived: false,
         }
     }
 
@@ -359,9 +437,7 @@ mod tests {
         // Update progress
         db.update_download_progress(id, 512 * 1024, 1024.5, &DownloadStatus::Downloading)
             .expect("Update progress failed");
-        let updated_progress = db
-            .get_download(id)
-            .expect("Get after progress update failed");
+        let updated_progress = db.get_download(id).expect("Get after progress update failed");
         assert_eq!(updated_progress.downloaded_size, 512 * 1024);
         assert_eq!(updated_progress.speed, 1024.5);
         assert_eq!(updated_progress.status, DownloadStatus::Downloading);
@@ -370,15 +446,11 @@ mod tests {
         let mut to_update = updated_progress.clone();
         to_update.status = DownloadStatus::Completed;
         to_update.completed_at = Some("2026-07-30T13:05:00Z".to_string());
-        db.update_download(id, &to_update)
-            .expect("Full update failed");
+        db.update_download(id, &to_update).expect("Full update failed");
 
         let updated_full = db.get_download(id).expect("Get after full update failed");
         assert_eq!(updated_full.status, DownloadStatus::Completed);
-        assert_eq!(
-            updated_full.completed_at,
-            Some("2026-07-30T13:05:00Z".to_string())
-        );
+        assert_eq!(updated_full.completed_at, Some("2026-07-30T13:05:00Z".to_string()));
 
         // Delete
         db.delete_download(id).expect("Delete failed");
@@ -397,34 +469,26 @@ mod tests {
         let id2 = db.insert_download(&d2).unwrap();
         let _id3 = db.insert_download(&d3).unwrap();
 
-        db.update_download_progress(id1, 100, 50.0, &DownloadStatus::Downloading)
-            .unwrap();
-        db.update_download_progress(id2, 100, 0.0, &DownloadStatus::Paused)
-            .unwrap();
+        db.update_download_progress(id1, 100, 50.0, &DownloadStatus::Downloading).unwrap();
+        db.update_download_progress(id2, 100, 0.0, &DownloadStatus::Paused).unwrap();
 
         // Filter by category
-        let video_filter = DownloadFilter {
-            category: Some(DownloadCategory::Video),
-            ..Default::default()
-        };
+        let video_filter =
+            DownloadFilter { category: Some(DownloadCategory::Video), ..Default::default() };
         let videos = db.get_downloads(&video_filter).unwrap();
         assert_eq!(videos.len(), 1);
         assert_eq!(videos[0].filename, "video1.mp4");
 
         // Filter by status
-        let paused_filter = DownloadFilter {
-            status: Some(DownloadStatus::Paused),
-            ..Default::default()
-        };
+        let paused_filter =
+            DownloadFilter { status: Some(DownloadStatus::Paused), ..Default::default() };
         let paused = db.get_downloads(&paused_filter).unwrap();
         assert_eq!(paused.len(), 1);
         assert_eq!(paused[0].filename, "song1.mp3");
 
         // Filter by search term
-        let search_filter = DownloadFilter {
-            search: Some("doc1".to_string()),
-            ..Default::default()
-        };
+        let search_filter =
+            DownloadFilter { search: Some("doc1".to_string()), ..Default::default() };
         let search_results = db.get_downloads(&search_filter).unwrap();
         assert_eq!(search_results.len(), 1);
         assert_eq!(search_results[0].filename, "doc1.pdf");
@@ -443,6 +507,70 @@ mod tests {
         assert_eq!(fetched.filename, "archive.zip");
         assert_eq!(fetched.category, DownloadCategory::Archive);
 
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_wal_mode_enabled() {
+        let temp_dir = std::env::temp_dir().join(format!("falcon_wal_{}", uuid::Uuid::new_v4()));
+        let db = Database::init(&temp_dir).expect("Failed to init db");
+        assert_eq!(db.journal_mode().expect("journal_mode query"), "wal");
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_pagination() {
+        let db = Database::in_memory().expect("Failed to create in-memory db");
+        for i in 0..10u32 {
+            let d = create_test_download(&format!("page{i}.zip"));
+            db.insert_download(&d).expect("insert");
+        }
+        let first = db
+            .get_downloads(&DownloadFilter {
+                limit: Some(3),
+                offset: Some(0),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(first.len(), 3);
+        let second = db
+            .get_downloads(&DownloadFilter {
+                limit: Some(3),
+                offset: Some(3),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(second.len(), 3);
+        // ordered by id DESC → pages must not share the head id
+        assert_ne!(first[0].id, second[0].id);
+        let all = db.get_downloads(&DownloadFilter::default()).unwrap();
+        assert_eq!(all.len(), 10);
+    }
+
+    // ponytail: verify the versioned migration actually advanced user_version.
+    // Without this, a regression to the old CREATE-IF-NOT-EXISTS approach would
+    // silently make future migrations no-ops on existing databases.
+    #[test]
+    fn test_migration_sets_user_version() {
+        let db = Database::in_memory().expect("Failed to create in-memory db");
+        let conn = db.conn.get().expect("pool get");
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version query");
+        assert!(version >= 1, "user_version should be >= 1 after migration, got {version}");
+    }
+
+    #[test]
+    fn test_migration_is_idempotent() {
+        let temp_dir = std::env::temp_dir().join(format!("falcon_mig_{}", uuid::Uuid::new_v4()));
+        // First init creates the schema + sets user_version.
+        let db1 = Database::init(&temp_dir).expect("first init");
+        drop(db1);
+        // Second init on the same DB must not error and must keep the data.
+        let db2 = Database::init(&temp_dir).expect("second init");
+        let d = create_test_download("repeat.mp4");
+        let id = db2.insert_download(&d).expect("insert after re-init");
+        assert!(id > 0);
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

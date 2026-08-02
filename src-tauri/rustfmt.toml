@@ -1,0 +1,5 @@
+# ponytail: enforce a consistent Rust style across contributors and CI.
+# Keep to stable-only options so `cargo fmt` works without a nightly toolchain.
+edition = "2021"
+max_width = 100
+use_small_heuristics = "Max"

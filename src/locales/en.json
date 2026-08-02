@@ -16,7 +16,8 @@
     "other": "Other",
     "settings": "Settings",
     "language": "Language",
-    "completion_progress": "Completed ratio"
+    "completion_progress": "Completed ratio",
+    "archived": "Archived"
   },
   "toolbar": {
     "add_download": "Add Download",
@@ -24,14 +25,19 @@
     "resume_all": "Resume All",
     "scheduler": "Scheduler",
     "clipboard": "Clipboard monitor",
-    "search_placeholder": "Search downloads..."
+    "search_placeholder": "Search downloads...",
+    "speed_limit": "Speed limit",
+    "logs": "Logs",
+    "stats": "Statistics",
+    "command_palette": "Command Palette"
   },
   "downloadList": {
     "no_downloads": "No downloads found",
     "no_downloads_desc": "You don't have any downloads in this category.",
     "no_search_results": "No results found",
     "no_search_desc": "No downloads match your search.",
-    "add_cta": "Add Download"
+    "add_cta": "Add Download",
+    "loading": "Loading downloads…"
   },
   "downloadItem": {
     "pause": "Pause",
@@ -48,7 +54,19 @@
     "status_paused": "Paused",
     "status_failed": "Failed",
     "status_merging": "Merging",
-    "copy_url": "Copy URL"
+    "copy_url": "Copy URL",
+    "copy_curl": "Copy as cURL",
+    "curl_copied": "cURL command copied",
+    "open_file": "Open file",
+    "move_rename": "Move / Rename",
+    "redownload": "Download again",
+    "new_filename": "New filename",
+    "destination_folder": "Destination folder",
+    "cancel": "Cancel",
+    "move": "Move",
+    "moved": "File moved",
+    "archive": "Archive",
+    "unarchive": "Unarchive"
   },
   "statusBar": {
     "speed": "Speed",
@@ -59,11 +77,7 @@
   "inspector": {
     "title": "Details",
     "close": "Close",
-    "threads": "{{count}} Connection Threads",
     "connections": "Engine",
-    "thread_complete": "Complete",
-    "thread_active": "Active",
-    "thread_queued": "Queued",
     "active": "active",
     "merged": "merged",
     "idle": "idle",
@@ -78,6 +92,8 @@
     "copy_link": "Copy Link",
     "copied": "Copied!",
     "remove": "Remove",
+    "retry": "Retry",
+    "error_reason": "Error reason",
     "confirm_remove": "Remove this download from the queue?",
     "source_url": "Source URL",
     "folder_error": "Could not open folder",
@@ -86,10 +102,19 @@
   },
   "app": {
     "window_title": "Falcon DM window title bar",
-    "paused_count": "{{count}} downloads paused",
-    "resumed_count": "{{count}} downloads resumed",
+    "paused_count_one": "{{count}} download paused",
+    "paused_count_other": "{{count}} downloads paused",
+    "resumed_count_one": "{{count}} downloads resumed",
+    "resumed_count_other": "{{count}} downloads resumed",
     "download_captured": "Captured: {{name}}",
-    "clipboard_url": "URL detected in clipboard"
+    "clipboard_url": "URL detected in clipboard",
+    "drop_url": "Drop URL to download",
+    "batch_actions": "Batch actions",
+    "selected": "selected",
+    "clear_selection": "Clear selection",
+    "batch_deleted": "Deleted {{count}} downloads",
+    "speed_limit_set": "Speed limit: {{limit}} KB/s",
+    "skip_to_content": "Skip to content"
   },
   "newDownloadModal": {
     "title": "Add New Download",
@@ -107,13 +132,31 @@
     "adding": "Adding...",
     "added_success": "Download added to queue",
     "add_failed": "Failed to add download",
+    "url_invalid": "Invalid URL",
     "batch_mode": "Batch mode (one URL per line)",
-    "batch_placeholder": "https://example.com/a.zip\nhttps://example.com/b.zip"
+    "batch_placeholder": "https://example.com/a.zip\nhttps://example.com/b.zip",
+    "import_drop_hint": "Drop a .txt or .csv file, or",
+    "import_browse": "browse",
+    "imported_count": "Imported {{count}} URLs",
+    "import_no_urls": "No valid URLs found in the file",
+    "import_unsupported": "Only .txt and .csv files are supported",
+    "import_failed": "Failed to read the file"
   },
   "settings": {
     "title": "Settings",
     "general": "General",
     "network": "Network",
+    "profiles": "Profiles",
+    "profiles_hint": "Per-site profiles override headers/folder when a download URL matches the pattern. Fields only fill gaps — explicit values always win.",
+    "profile_untitled": "Untitled profile",
+    "profile_remove": "Remove profile",
+    "profile_name": "Profile name",
+    "profile_url_pattern": "URL pattern (e.g. example.com)",
+    "profile_save_subdir": "Save subfolder (optional)",
+    "profile_user_agent": "User-Agent",
+    "profile_referrer": "Referrer",
+    "profile_cookies": "Cookies",
+    "profile_add": "Add profile",
     "theme": "Theme",
     "theme_system": "System Default",
     "theme_light": "Light",
@@ -140,6 +183,9 @@
     "pair_none": "No pending extension request",
     "cat_video": "Video save path",
     "cat_music": "Music save path",
+    "cat_documents": "Documents save path",
+    "cat_compressed": "Compressed save path",
+    "cat_programs": "Programs save path",
     "ytdlp_path": "yt-dlp binary path",
     "ytdlp_path_hint": "Leave empty to use PATH. Required for YouTube downloads."
   },
@@ -151,7 +197,8 @@
     "cancel": "Cancel",
     "save": "Save Schedule",
     "saving": "Saving...",
-    "save_failed": "Failed to save schedule"
+    "save_failed": "Failed to save schedule",
+    "invalid_time": "Invalid time: start must be before stop"
   },
   "onboarding": {
     "step1_title": "Welcome to Falcon DM",
@@ -162,12 +209,43 @@
     "step2_instruction2": "Enable Developer Mode in the top right",
     "step2_instruction3": "Click 'Load unpacked' and select the 'extension' folder",
     "step2_instruction4": "Open Falcon DM Settings and approve the pending extension",
-    "api_token": "API token (advanced / not required)",
-    "copy": "Copy",
-    "copied": "Copied",
+    "pair_paired": "Extension approved and connected",
+    "pair_pending": "Extension detected — approve it in Settings",
+    "pair_waiting": "Waiting for extension to connect…",
     "skip": "Skip for now",
     "next": "Next",
     "back": "Back",
     "get_started": "I've Installed It, Let's Start!"
+  },
+  "commandPalette": {
+    "title": "Command Palette",
+    "placeholder": "Search commands or downloads...",
+    "no_results": "No matching commands",
+    "speed_limit_on": "Enable Speed Limit",
+    "speed_limit_off": "Disable Speed Limit",
+    "toggle_theme": "Toggle Theme"
+  },
+  "logs": {
+    "title": "Activity Logs",
+    "close": "Close",
+    "level_filter": "Filter by level",
+    "search": "Search messages or modules...",
+    "auto_refresh": "Auto-refresh",
+    "clear": "Clear logs",
+    "stream": "Log stream",
+    "empty": "No log entries yet",
+    "entries": "entries",
+    "cleared": "Logs cleared"
+  },
+  "stats": {
+    "title": "Statistics",
+    "close": "Close",
+    "active": "Active",
+    "queued": "Queued",
+    "completed": "Completed",
+    "failed": "Failed",
+    "total_downloaded": "Total downloaded",
+    "current_speed": "Current speed",
+    "speed_over_time": "Speed over time"
   }
 }

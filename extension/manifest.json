@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "version": "1.5.1",
+  "version": "1.6.0",
   "default_locale": "en",
   "description": "__MSG_appDesc__",
   "name": "__MSG_appName__",
@@ -11,11 +11,9 @@
   },
   "permissions": [
     "webRequest",
-    "activeTab",
     "notifications",
     "downloads",
     "cookies",
-    "tabs",
     "contextMenus",
     "storage",
     "scripting"
@@ -29,6 +27,7 @@
   },
   "action": {
     "default_title": "__MSG_appName__",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icon16.png",
       "48": "icon48.png"
@@ -37,12 +36,5 @@
   "options_ui": {
     "page": "options.html",
     "open_in_tab": false
-  },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["media-utils.js", "content.js"],
-      "run_at": "document_end"
-    }
-  ]
+  }
 }

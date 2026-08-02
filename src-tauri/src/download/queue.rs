@@ -4,13 +4,16 @@ use crate::storage::{
     models::{DownloadFilter, DownloadStatus},
     Database,
 };
-use crate::util::{is_hls_url, sanitize_header_value, split_falcon_format, youtube_page_url_for_download};
+use crate::util::{
+    is_hls_url, lock_or_recover, sanitize_header_value, split_falcon_format,
+    youtube_page_url_for_download,
+};
 use chrono::{Local, NaiveTime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +24,7 @@ pub struct ScheduleOptions {
 }
 
 async fn determine_connection_limits(
+    client: &reqwest::Client,
     url: &str,
     max_cap: u32,
     cookies: Option<&str>,
@@ -30,11 +34,6 @@ async fn determine_connection_limits(
     if url.starts_with("magnet:") || url.ends_with(".torrent") {
         return (max_cap.min(16), max_cap.min(16));
     }
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
 
     let mut req = client.head(url);
     if let Some(c) = cookies {
@@ -72,6 +71,11 @@ pub struct QueueManager {
     pub max_concurrent: Arc<AtomicUsize>,
     pub max_connections: Arc<AtomicUsize>,
     pub active_stream_tasks: Arc<Mutex<HashMap<i64, tokio::sync::watch::Sender<bool>>>>,
+    /// HEAD probe cache: url -> (connection count, probed_at). TTL 5 min.
+    pub head_probe_cache: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
+    /// Shared reqwest client for HEAD probes (connection-pooled). Previously each
+    /// probe built a fresh Client → a new TLS handshake every time.
+    probe_client: reqwest::Client,
 }
 
 impl Default for QueueManager {
@@ -91,16 +95,21 @@ impl QueueManager {
             max_concurrent: Arc::new(AtomicUsize::new(3)),
             max_connections: Arc::new(AtomicUsize::new(16)),
             active_stream_tasks: Arc::new(Mutex::new(HashMap::new())),
+            head_probe_cache: Arc::new(Mutex::new(HashMap::new())),
+            probe_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
     pub fn set_schedule(&self, opts: ScheduleOptions) {
-        let mut lock = self.schedule.lock().unwrap();
+        let mut lock = lock_or_recover(&self.schedule);
         *lock = opts;
     }
 
     pub fn get_schedule(&self) -> ScheduleOptions {
-        self.schedule.lock().unwrap().clone()
+        lock_or_recover(&self.schedule).clone()
     }
 
     pub fn set_concurrent_downloads(&self, limit: usize) {
@@ -108,17 +117,84 @@ impl QueueManager {
     }
 
     pub fn set_max_connections(&self, limit: usize) {
-        self.max_connections
-            .store(limit.clamp(1, 16), Ordering::SeqCst);
+        self.max_connections.store(limit.clamp(1, 16), Ordering::SeqCst);
     }
 
     pub fn cancel_stream(&self, id: i64) -> bool {
-        if let Some(tx) = self.active_stream_tasks.lock().unwrap().remove(&id) {
+        if let Some(tx) = lock_or_recover(&self.active_stream_tasks).remove(&id) {
             let _ = tx.send(true);
             true
         } else {
             false
         }
+    }
+
+    /// Maximum entries kept in the HEAD probe cache. Beyond this the oldest
+    /// entries are evicted to bound memory (previously the HashMap grew forever
+    /// — a slow memory leak in long-running sessions).
+    const HEAD_CACHE_CAP: usize = 256;
+
+    /// Cached connection count for `url` if fresh (5 min TTL), else None.
+    fn cached_conn_limit(&self, url: &str) -> Option<u32> {
+        let cache = lock_or_recover(&self.head_probe_cache);
+        let (val, ts) = cache.get(url)?;
+        (ts.elapsed() < Duration::from_secs(300)).then_some(*val)
+    }
+
+    /// Sweep expired + excess entries so the cache stays bounded.
+    fn evict_stale_probe_entries(cache: &Arc<Mutex<HashMap<String, (u32, Instant)>>>) {
+        let mut cache = lock_or_recover(cache);
+        let ttl = Duration::from_secs(300);
+        cache.retain(|_, (_, ts)| ts.elapsed() < ttl);
+        if cache.len() > Self::HEAD_CACHE_CAP {
+            // Drop the oldest entries by probe time.
+            let mut by_age: Vec<_> = cache.iter().map(|(k, (_, ts))| (k.clone(), *ts)).collect();
+            by_age.sort_by_key(|(_, ts)| *ts);
+            let excess = cache.len() - Self::HEAD_CACHE_CAP;
+            for (k, _) in by_age.into_iter().take(excess) {
+                cache.remove(&k);
+            }
+        }
+    }
+
+    /// Decide (split, max_connections) for `url` without blocking the tick.
+    /// Cache hit → cached value; miss → default (max_cap) now + best-effort background HEAD probe.
+    // ponytail: first tick after a miss uses the default; the probe fills the cache for subsequent ticks.
+    fn conn_limits(
+        &self,
+        url: &str,
+        max_cap: u32,
+        cookies: Option<&str>,
+        referrer: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> (u32, u32) {
+        if let Some(c) = self.cached_conn_limit(url) {
+            return (c, c);
+        }
+        let cache = self.head_probe_cache.clone();
+        let probe_client = self.probe_client.clone();
+        let url_owned = url.to_string();
+        let c = cookies.map(str::to_string);
+        let r = referrer.map(str::to_string);
+        let u = user_agent.map(str::to_string);
+        tokio::spawn(async move {
+            let (split, _) = determine_connection_limits(
+                &probe_client,
+                &url_owned,
+                max_cap,
+                c.as_deref(),
+                r.as_deref(),
+                u.as_deref(),
+            )
+            .await;
+            {
+                let mut m = lock_or_recover(&cache);
+                m.insert(url_owned, (split, Instant::now()));
+            }
+            // Bound the cache after each insert (evict expired + overflow).
+            QueueManager::evict_stale_probe_entries(&cache);
+        });
+        (max_cap, max_cap)
     }
 
     pub async fn tick(
@@ -132,14 +208,10 @@ impl QueueManager {
 
         if opts.active {
             let now = Local::now().time();
-            let start = opts
-                .start_time
-                .as_ref()
-                .and_then(|s| NaiveTime::parse_from_str(s, "%H:%M").ok());
-            let stop = opts
-                .stop_time
-                .as_ref()
-                .and_then(|s| NaiveTime::parse_from_str(s, "%H:%M").ok());
+            let start =
+                opts.start_time.as_ref().and_then(|s| NaiveTime::parse_from_str(s, "%H:%M").ok());
+            let stop =
+                opts.stop_time.as_ref().and_then(|s| NaiveTime::parse_from_str(s, "%H:%M").ok());
 
             if let (Some(start), Some(stop)) = (start, stop) {
                 if start <= stop {
@@ -226,7 +298,7 @@ impl QueueManager {
 
                         let (tx, rx) = tokio::sync::watch::channel(false);
                         {
-                            let mut map = self.active_stream_tasks.lock().unwrap();
+                            let mut map = lock_or_recover(&self.active_stream_tasks);
                             if map.contains_key(&dl_id) {
                                 continue;
                             }
@@ -235,7 +307,7 @@ impl QueueManager {
 
                         dl.status = DownloadStatus::Downloading;
                         if db.update_download(dl_id, &dl).is_err() {
-                            self.active_stream_tasks.lock().unwrap().remove(&dl_id);
+                            lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
                             continue;
                         }
 
@@ -266,65 +338,21 @@ impl QueueManager {
                         let app_handle_clone = app_handle.clone();
 
                         tokio::spawn(async move {
-                            match crate::download::ytdlp::process_ytdlp(
+                            // ponytail: shared finalize logic — see run_stream_task.
+                            run_stream_task(
                                 &app_handle_clone,
+                                &db_clone,
+                                &stream_tasks_clone,
                                 dl_id,
-                                &url,
                                 &save_path_str,
+                                StreamKind::YtDlp {
+                                    url,
+                                    headers: ytdlp_headers,
+                                    format: ytdlp_fmt,
+                                },
                                 rx,
-                                ytdlp_headers,
-                                Some(db_clone.clone()),
-                                ytdlp_fmt.as_deref(),
                             )
-                            .await
-                            {
-                                Ok(_) => {
-                                    let final_size = tokio::fs::metadata(&save_path_str)
-                                        .await
-                                        .map(|m| m.len())
-                                        .unwrap_or(0);
-                                    if let Ok(mut d) = db_clone.get_download(dl_id) {
-                                        d.downloaded_size = final_size;
-                                        d.total_size = final_size;
-                                        d.speed = 0.0;
-                                        d.status = DownloadStatus::Completed;
-                                        d.completed_at = Some(chrono::Utc::now().to_rfc3339());
-                                        d.error_message = None;
-                                        d.cookies = None;
-                                        let _ = db_clone.update_download(dl_id, &d);
-                                    }
-                                    let _ = app_handle_clone.emit(
-                                        "download-progress",
-                                        serde_json::json!({
-                                            "id": dl_id,
-                                            "downloaded_size": final_size,
-                                            "total_size": final_size,
-                                            "speed": 0.0,
-                                            "status": "Completed",
-                                            "connections": 0
-                                        }),
-                                    );
-                                }
-                                Err(e) => {
-                                    if e == "Cancelled" {
-                                        let _ = db_clone.update_download_progress(
-                                            dl_id,
-                                            0,
-                                            0.0,
-                                            &DownloadStatus::Paused,
-                                        );
-                                    } else {
-                                        log::error!("yt-dlp Error: {}", e);
-                                        if let Ok(mut d) = db_clone.get_download(dl_id) {
-                                            d.status = DownloadStatus::Failed;
-                                            d.error_message = Some(e);
-                                            d.speed = 0.0;
-                                            let _ = db_clone.update_download(dl_id, &d);
-                                        }
-                                    }
-                                }
-                            }
-                            stream_tasks_clone.lock().unwrap().remove(&dl_id);
+                            .await;
                         });
                         continue;
                     }
@@ -332,7 +360,7 @@ impl QueueManager {
                     if is_hls_url(&dl.url) {
                         let (tx, rx) = tokio::sync::watch::channel(false);
                         {
-                            let mut map = self.active_stream_tasks.lock().unwrap();
+                            let mut map = lock_or_recover(&self.active_stream_tasks);
                             if map.contains_key(&dl_id) {
                                 continue;
                             }
@@ -342,7 +370,7 @@ impl QueueManager {
                         // Claim in DB before spawn
                         dl.status = DownloadStatus::Downloading;
                         if db.update_download(dl_id, &dl).is_err() {
-                            self.active_stream_tasks.lock().unwrap().remove(&dl_id);
+                            lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
                             continue;
                         }
 
@@ -362,64 +390,17 @@ impl QueueManager {
                         let app_handle_clone = app_handle.clone();
 
                         tokio::spawn(async move {
-                            match crate::download::hls::process_hls_stream(
+                            // ponytail: shared finalize logic — see run_stream_task.
+                            run_stream_task(
                                 &app_handle_clone,
+                                &db_clone,
+                                &stream_tasks_clone,
                                 dl_id,
-                                &url,
                                 &save_path_str,
+                                StreamKind::Hls { url, headers: hls_headers },
                                 rx,
-                                hls_headers,
-                                Some(db_clone.clone()),
                             )
-                            .await
-                            {
-                                Ok(_) => {
-                                    let final_size = tokio::fs::metadata(&save_path_str)
-                                        .await
-                                        .map(|m| m.len())
-                                        .unwrap_or(0);
-                                    if let Ok(mut d) = db_clone.get_download(dl_id) {
-                                        d.downloaded_size = final_size;
-                                        d.total_size = final_size;
-                                        d.speed = 0.0;
-                                        d.status = DownloadStatus::Completed;
-                                        d.completed_at = Some(chrono::Utc::now().to_rfc3339());
-                                        d.error_message = None;
-                                        d.cookies = None;
-                                        let _ = db_clone.update_download(dl_id, &d);
-                                    }
-                                    let _ = app_handle_clone.emit(
-                                        "download-progress",
-                                        serde_json::json!({
-                                            "id": dl_id,
-                                            "downloaded_size": final_size,
-                                            "total_size": final_size,
-                                            "speed": 0.0,
-                                            "status": "Completed",
-                                            "connections": 0
-                                        }),
-                                    );
-                                }
-                                Err(e) => {
-                                    if e == "Cancelled" {
-                                        let _ = db_clone.update_download_progress(
-                                            dl_id,
-                                            0,
-                                            0.0,
-                                            &DownloadStatus::Paused,
-                                        );
-                                    } else {
-                                        log::error!("HLS Error: {}", e);
-                                        if let Ok(mut d) = db_clone.get_download(dl_id) {
-                                            d.status = DownloadStatus::Failed;
-                                            d.error_message = Some(e);
-                                            d.speed = 0.0;
-                                            let _ = db_clone.update_download(dl_id, &d);
-                                        }
-                                    }
-                                }
-                            }
-                            stream_tasks_clone.lock().unwrap().remove(&dl_id);
+                            .await;
                         });
                         continue; // already updated DB
                     } else if let Some(gid) = &dl.aria2_gid {
@@ -442,21 +423,17 @@ impl QueueManager {
                             }
                         }
 
-                        let (split, max_connections) = determine_connection_limits(
+                        let (split, max_connections) = self.conn_limits(
                             &dl.url,
                             max_conn,
                             dl.cookies.as_deref(),
                             dl.referrer.as_deref(),
                             dl.user_agent.as_deref(),
-                        )
-                        .await;
+                        );
                         let mut headers = vec![];
                         if let Some(c) = &dl.cookies {
                             if !c.is_empty() {
-                                headers.push(format!(
-                                    "Cookie: {}",
-                                    sanitize_header_value(c)
-                                ));
+                                headers.push(format!("Cookie: {}", sanitize_header_value(c)));
                             }
                         }
                         let aria_opts = Aria2Options {
@@ -465,14 +442,8 @@ impl QueueManager {
                             split,
                             max_connections,
                             headers,
-                            referrer: dl
-                                .referrer
-                                .as_ref()
-                                .map(|r| sanitize_header_value(r)),
-                            user_agent: dl
-                                .user_agent
-                                .as_ref()
-                                .map(|u| sanitize_header_value(u)),
+                            referrer: dl.referrer.as_ref().map(|r| sanitize_header_value(r)),
+                            user_agent: dl.user_agent.as_ref().map(|u| sanitize_header_value(u)),
                         };
                         match engine.add_download(&dl.url, aria_opts).await {
                             Ok(gid) => {
@@ -506,6 +477,114 @@ impl QueueManager {
     }
 }
 
+/// What kind of streaming task to spawn. The spawn + finalize logic is identical
+/// between yt-dlp and HLS; only the actual processor call differs. `save_path_str`
+/// is passed separately to `run_stream_task` since both kinds need it for the
+/// shared finalize (metadata read).
+enum StreamKind {
+    YtDlp { url: String, headers: crate::download::ytdlp::YtDlpHeaders, format: Option<String> },
+    Hls { url: String, headers: HlsHeaders },
+}
+
+/// ponytail: shared completion/cleanup logic for yt-dlp and HLS tasks. Previously
+/// this ~60-line block (Ok→Completed, Err→Paused/Failed, progress emit, map
+/// cleanup) was copy-pasted for each processor. Centralizing it means a finalize
+/// fix or status-emission change applies to both at once.
+async fn run_stream_task(
+    app_handle: &tauri::AppHandle,
+    db: &Database,
+    active_stream_tasks: &Arc<Mutex<HashMap<i64, tokio::sync::watch::Sender<bool>>>>,
+    dl_id: i64,
+    save_path_str: &str,
+    kind: StreamKind,
+    rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let result = match kind {
+        StreamKind::YtDlp { url, headers, format } => {
+            crate::download::ytdlp::process_ytdlp(
+                app_handle,
+                dl_id,
+                &url,
+                save_path_str,
+                rx,
+                headers,
+                Some(db.clone()),
+                format.as_deref(),
+            )
+            .await
+        }
+        StreamKind::Hls { url, headers } => {
+            crate::download::hls::process_hls_stream(
+                app_handle,
+                dl_id,
+                &url,
+                save_path_str,
+                rx,
+                headers,
+                Some(db.clone()),
+            )
+            .await
+        }
+    };
+
+    match result {
+        Ok(_) => {
+            let final_size =
+                tokio::fs::metadata(&save_path_str).await.map(|m| m.len()).unwrap_or(0);
+            if let Ok(mut d) = db.get_download(dl_id) {
+                d.downloaded_size = final_size;
+                d.total_size = final_size;
+                d.speed = 0.0;
+                d.status = DownloadStatus::Completed;
+                d.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                d.error_message = None;
+                // Cookie TTL: wipe session cookies after completion (at-rest hygiene).
+                d.cookies = None;
+                let _ = db.update_download(dl_id, &d);
+            }
+            let _ = app_handle.emit(
+                "download-progress",
+                serde_json::json!({
+                    "id": dl_id,
+                    "downloaded_size": final_size,
+                    "total_size": final_size,
+                    "speed": 0.0,
+                    "status": "Completed",
+                    "connections": 0
+                }),
+            );
+        }
+        Err(e) => {
+            if e == "Cancelled" {
+                let _ = db.update_download_progress(dl_id, 0, 0.0, &DownloadStatus::Paused);
+            } else {
+                log::error!("stream task {dl_id} error: {e}");
+                // ponytail: classify transient vs fatal. Transient errors (rate
+                // limits, temporary unavailability, network blips) flip the job
+                // back to Queued so the next tick retries it instead of burning
+                // it as permanently Failed — matching the aria2 transient path.
+                let lower = e.to_lowercase();
+                let is_transient = lower.contains("temporarily")
+                    || lower.contains("rate limit")
+                    || lower.contains("too many requests")
+                    || lower.contains("try again")
+                    || lower.contains("timed out")
+                    || lower.contains("timeout")
+                    || lower.contains("connection reset")
+                    || lower.contains("network error");
+                if let Ok(mut d) = db.get_download(dl_id) {
+                    d.error_message = Some(e);
+                    d.speed = 0.0;
+                    d.status =
+                        if is_transient { DownloadStatus::Queued } else { DownloadStatus::Failed };
+                    let _ = db.update_download(dl_id, &d);
+                }
+            }
+        }
+    }
+    lock_or_recover(active_stream_tasks).remove(&dl_id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,12 +593,63 @@ mod tests {
     fn test_queue_manager_new() {
         let qm = QueueManager::new();
         assert_eq!(qm.max_concurrent.load(Ordering::SeqCst), 3);
-        assert_eq!(qm.get_schedule().active, false);
+        assert!(!qm.get_schedule().active);
     }
 
     #[test]
     fn test_cancel_stream_missing() {
         let qm = QueueManager::new();
         assert!(!qm.cancel_stream(999));
+    }
+
+    #[test]
+    fn test_head_probe_cache_hit_and_ttl() {
+        let qm = QueueManager::new();
+        // miss on empty cache
+        assert!(qm.cached_conn_limit("https://x.com/a").is_none());
+        // fresh hit
+        qm.head_probe_cache.lock().unwrap().insert("https://x.com/a".into(), (8, Instant::now()));
+        assert_eq!(qm.cached_conn_limit("https://x.com/a"), Some(8));
+        // expired (> 5 min TTL)
+        let stale = Instant::now().checked_sub(Duration::from_secs(301)).expect("system uptime");
+        qm.head_probe_cache.lock().unwrap().insert("https://y.com/b".into(), (4, stale));
+        assert!(qm.cached_conn_limit("https://y.com/b").is_none());
+    }
+
+    // ponytail: the probe cache must be bounded — previously it grew forever
+    // (a slow memory leak). Verify eviction trims to HEAD_CACHE_CAP and drops
+    // expired entries.
+    #[test]
+    fn test_head_probe_cache_eviction_bounds_size() {
+        let qm = QueueManager::new();
+        // Fill beyond the cap with fresh entries.
+        for i in 0..(QueueManager::HEAD_CACHE_CAP + 50) {
+            qm.head_probe_cache
+                .lock()
+                .unwrap()
+                .insert(format!("https://x.com/{i}"), (4, Instant::now()));
+        }
+        QueueManager::evict_stale_probe_entries(&qm.head_probe_cache);
+        let len = qm.head_probe_cache.lock().unwrap().len();
+        assert!(
+            len <= QueueManager::HEAD_CACHE_CAP,
+            "cache size {len} exceeded cap {}",
+            QueueManager::HEAD_CACHE_CAP
+        );
+    }
+
+    #[test]
+    fn test_head_probe_cache_eviction_drops_expired() {
+        let qm = QueueManager::new();
+        let stale = Instant::now().checked_sub(Duration::from_secs(301)).expect("system uptime");
+        qm.head_probe_cache.lock().unwrap().insert("https://stale.com/a".into(), (4, stale));
+        qm.head_probe_cache
+            .lock()
+            .unwrap()
+            .insert("https://fresh.com/b".into(), (8, Instant::now()));
+        QueueManager::evict_stale_probe_entries(&qm.head_probe_cache);
+        let cache = qm.head_probe_cache.lock().unwrap();
+        assert!(!cache.contains_key("https://stale.com/a"));
+        assert!(cache.contains_key("https://fresh.com/b"));
     }
 }

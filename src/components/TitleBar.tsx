@@ -1,6 +1,6 @@
-import { useCallback } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useTranslation } from "react-i18next";
+import { useCallback } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { useTranslation } from 'react-i18next';
 
 export default function TitleBar() {
   const { t } = useTranslation();
@@ -21,9 +21,9 @@ export default function TitleBar() {
       className="titlebar"
       data-tauri-drag-region
       onMouseDown={startDrag}
-      aria-label={t("app.window_title")}
+      aria-label={t('app.window_title')}
     >
-      <span className="titlebar-title">{t("sidebar.title")}</span>
+      <span className="titlebar-title">{t('sidebar.title')}</span>
     </header>
   );
 }

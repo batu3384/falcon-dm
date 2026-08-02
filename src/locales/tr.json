@@ -16,7 +16,8 @@
     "other": "Diğer",
     "settings": "Ayarlar",
     "language": "Dil",
-    "completion_progress": "Tamamlanma"
+    "completion_progress": "Tamamlanma",
+    "archived": "Arşiv"
   },
   "toolbar": {
     "add_download": "İndirme Ekle",
@@ -24,14 +25,19 @@
     "resume_all": "Tümünü Sürdür",
     "scheduler": "Zamanlayıcı",
     "clipboard": "Pano izleyici",
-    "search_placeholder": "İndirmelerde ara..."
+    "search_placeholder": "İndirmelerde ara...",
+    "speed_limit": "Hız limiti",
+    "logs": "Günlükler",
+    "stats": "İstatistikler",
+    "command_palette": "Komut Paleti"
   },
   "downloadList": {
     "no_downloads": "İndirme bulunamadı",
     "no_downloads_desc": "Bu kategoride henüz hiçbir indirme işlemi yok.",
     "no_search_results": "Sonuç bulunamadı",
     "no_search_desc": "Aramanla eşleşen indirme yok.",
-    "add_cta": "İndirme Ekle"
+    "add_cta": "İndirme Ekle",
+    "loading": "İndirmeler yükleniyor…"
   },
   "downloadItem": {
     "pause": "Duraklat",
@@ -48,7 +54,19 @@
     "status_paused": "Duraklatıldı",
     "status_failed": "Hata",
     "status_merging": "Birleştiriliyor",
-    "copy_url": "URL kopyala"
+    "copy_url": "URL kopyala",
+    "copy_curl": "cURL olarak kopyala",
+    "curl_copied": "cURL komutu kopyalandı",
+    "open_file": "Dosyayı aç",
+    "move_rename": "Taşı / Yeniden adlandır",
+    "redownload": "Tekrar indir",
+    "new_filename": "Yeni dosya adı",
+    "destination_folder": "Hedef klasör",
+    "cancel": "İptal",
+    "move": "Taşı",
+    "moved": "Dosya taşındı",
+    "archive": "Arşivle",
+    "unarchive": "Arşivden çıkar"
   },
   "statusBar": {
     "speed": "Hız",
@@ -59,11 +77,7 @@
   "inspector": {
     "title": "Detaylar",
     "close": "Kapat",
-    "threads": "{{count}} Bağlantı Kanalı",
     "connections": "Motor",
-    "thread_complete": "Tamam",
-    "thread_active": "Aktif",
-    "thread_queued": "Beklemede",
     "active": "aktif",
     "merged": "birleştirildi",
     "idle": "boşta",
@@ -78,6 +92,8 @@
     "copy_link": "Bağlantıyı Kopyala",
     "copied": "Kopyalandı!",
     "remove": "Kaldır",
+    "retry": "Tekrar Dene",
+    "error_reason": "Hata nedeni",
     "confirm_remove": "Bu indirmeyi kuyruktan kaldırmak istiyor musun?",
     "source_url": "Kaynak URL",
     "folder_error": "Klasör açılamadı",
@@ -86,10 +102,19 @@
   },
   "app": {
     "window_title": "Falcon DM pencere başlığı",
-    "paused_count": "{{count}} indirme duraklatıldı",
-    "resumed_count": "{{count}} indirme sürdürüldü",
+    "paused_count_one": "{{count}} indirme duraklatıldı",
+    "paused_count_other": "{{count}} indirme duraklatıldı",
+    "resumed_count_one": "{{count}} indirme sürdürüldü",
+    "resumed_count_other": "{{count}} indirme sürdürüldü",
     "download_captured": "Yakalandı: {{name}}",
-    "clipboard_url": "Panoda URL algılandı"
+    "clipboard_url": "Panoda URL algılandı",
+    "drop_url": "URL'yi bırakın",
+    "batch_actions": "Toplu işlemler",
+    "selected": "seçili",
+    "clear_selection": "Seçimi temizle",
+    "batch_deleted": "{{count}} indirme silindi",
+    "speed_limit_set": "Hız limiti: {{limit}} KB/s",
+    "skip_to_content": "İçeriğe geç"
   },
   "newDownloadModal": {
     "title": "Yeni İndirme Ekle",
@@ -107,13 +132,31 @@
     "adding": "Ekleniyor...",
     "added_success": "İndirme kuyruğa eklendi",
     "add_failed": "İndirme eklenemedi",
+    "url_invalid": "Geçersiz URL",
     "batch_mode": "Toplu mod (satır başına bir URL)",
-    "batch_placeholder": "https://ornek.com/a.zip\nhttps://ornek.com/b.zip"
+    "batch_placeholder": "https://ornek.com/a.zip\nhttps://ornek.com/b.zip",
+    "import_drop_hint": "Bir .txt veya .csv dosyası bırak ya da",
+    "import_browse": "göz at",
+    "imported_count": "{{count}} URL içe aktarıldı",
+    "import_no_urls": "Dosyada geçerli URL bulunamadı",
+    "import_unsupported": "Sadece .txt ve .csv dosyaları desteklenir",
+    "import_failed": "Dosya okunamadı"
   },
   "settings": {
     "title": "Ayarlar",
     "general": "Genel",
     "network": "Ağ",
+    "profiles": "Profiller",
+    "profiles_hint": "Site bazlı profiller, bir indirme URL'si desenle eşleştiğinde başlık/klasör geçersiz kılar. Alanlar sadece boşlukları doldurur — açık değerler her zaman önceliklidir.",
+    "profile_untitled": "Adsız profil",
+    "profile_remove": "Profili kaldır",
+    "profile_name": "Profil adı",
+    "profile_url_pattern": "URL deseni (örn. example.com)",
+    "profile_save_subdir": "Kayıt alt klasörü (opsiyonel)",
+    "profile_user_agent": "User-Agent",
+    "profile_referrer": "Yönlendiren",
+    "profile_cookies": "Çerezler",
+    "profile_add": "Profil ekle",
     "theme": "Tema",
     "theme_system": "Sistem Varsayılanı",
     "theme_light": "Açık",
@@ -140,6 +183,9 @@
     "pair_none": "Bekleyen eklenti isteği yok",
     "cat_video": "Video kayıt yolu",
     "cat_music": "Müzik kayıt yolu",
+    "cat_documents": "Belgeler kayıt yolu",
+    "cat_compressed": "Sıkıştırılmış kayıt yolu",
+    "cat_programs": "Programlar kayıt yolu",
     "ytdlp_path": "yt-dlp binary yolu",
     "ytdlp_path_hint": "Boş = PATH. YouTube indirmeleri için gerekli."
   },
@@ -151,7 +197,8 @@
     "cancel": "İptal",
     "save": "Zamanlamayı Kaydet",
     "saving": "Kaydediliyor...",
-    "save_failed": "Zamanlama kaydedilemedi"
+    "save_failed": "Zamanlama kaydedilemedi",
+    "invalid_time": "Geçersiz: başlangıç bitişten önce olmalı"
   },
   "onboarding": {
     "step1_title": "Falcon DM'e Hoş Geldin",
@@ -162,12 +209,43 @@
     "step2_instruction2": "Sağ üstten Geliştirici Modu'nu aç",
     "step2_instruction3": "'Paketlenmemiş öğe yükle'ye tıkla ve extension klasörünü seç",
     "step2_instruction4": "Falcon DM Ayarlar'dan bekleyen eklentiyi onayla",
-    "api_token": "API token (gelişmiş / gerekmez)",
-    "copy": "Kopyala",
-    "copied": "Kopyalandı",
+    "pair_paired": "Eklenti onaylandı ve bağlandı",
+    "pair_pending": "Eklenti algılandı — Ayarlar'dan onayla",
+    "pair_waiting": "Eklentinin bağlanması bekleniyor…",
     "skip": "Şimdilik atla",
     "next": "İleri",
     "back": "Geri",
     "get_started": "Kurulumu Tamamladım, Başla!"
+  },
+  "commandPalette": {
+    "title": "Komut Paleti",
+    "placeholder": "Komut veya indirme ara...",
+    "no_results": "Eşleşen komut yok",
+    "speed_limit_on": "Hız Limitini Aç",
+    "speed_limit_off": "Hız Limitini Kapat",
+    "toggle_theme": "Temayı Değiştir"
+  },
+  "logs": {
+    "title": "Etkinlik Günlükleri",
+    "close": "Kapat",
+    "level_filter": "Seviyeye göre filtrele",
+    "search": "Mesaj veya modül ara...",
+    "auto_refresh": "Otomatik yenile",
+    "clear": "Günlükleri temizle",
+    "stream": "Günlük akışı",
+    "empty": "Henüz günlük kaydı yok",
+    "entries": "kayıt",
+    "cleared": "Günlükler temizlendi"
+  },
+  "stats": {
+    "title": "İstatistikler",
+    "close": "Kapat",
+    "active": "Aktif",
+    "queued": "Sırada",
+    "completed": "Tamamlanan",
+    "failed": "Başarısız",
+    "total_downloaded": "Toplam indirilen",
+    "current_speed": "Anlık hız",
+    "speed_over_time": "Zamana göre hız"
   }
 }

@@ -1,7 +1,15 @@
-import { useState, useEffect } from "react";
-import { useTranslation } from "react-i18next";
-import { invoke } from "@tauri-apps/api/core";
-import { Zap, CheckCircle2, ChevronRight, ChevronLeft, Puzzle, Copy } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
+import { invoke } from '@tauri-apps/api/core';
+import { Zap, CheckCircle2, ChevronRight, ChevronLeft, Puzzle, ShieldCheck } from 'lucide-react';
+import { useModalA11y } from '../hooks/useModalA11y';
+import { onPairRequest } from '../api/events';
+
+interface ExtensionStatus {
+  has_token: boolean;
+  approved_extension_ids: string[];
+  pending_pair_id: string | null;
+}
 
 interface OnboardingProps {
   onComplete: () => void;
@@ -11,55 +19,83 @@ interface OnboardingProps {
 export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
   const { t } = useTranslation();
   const [step, setStep] = useState(1);
-  const [token, setToken] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [status, setStatus] = useState<ExtensionStatus | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const handleClose = useCallback(() => {
+    localStorage.setItem('onboarding_complete', 'true');
+    onSkip?.();
+    onComplete();
+  }, [onSkip, onComplete]);
+  useModalA11y(panelRef, handleClose);
 
-  useEffect(() => {
-    invoke<string>("get_api_token").then(setToken).catch(() => {});
+  const refreshStatus = useCallback(async () => {
+    try {
+      setStatus(await invoke<ExtensionStatus>('get_extension_status'));
+    } catch {
+      /* token fetch is best-effort; the pairing flow still works via Settings */
+    }
   }, []);
 
+  useEffect(() => {
+    refreshStatus();
+    // Live-update when the user approves the extension while the wizard is open.
+    const unlisten = onPairRequest(() => refreshStatus());
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [refreshStatus]);
+
   const finish = () => {
-    localStorage.setItem("onboarding_complete", "true");
+    localStorage.setItem('onboarding_complete', 'true');
     onComplete();
   };
 
   const skip = () => {
-    localStorage.setItem("onboarding_complete", "true");
-    onSkip?.();
-    onComplete();
-  };
-
-  const copyToken = () => {
-    navigator.clipboard.writeText(token).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
+    handleClose();
   };
 
   const instructions = [
-    t("onboarding.step2_instruction1"),
-    t("onboarding.step2_instruction2"),
-    t("onboarding.step2_instruction3"),
-    t("onboarding.step2_instruction4"),
+    t('onboarding.step2_instruction1'),
+    t('onboarding.step2_instruction2'),
+    t('onboarding.step2_instruction3'),
+    t('onboarding.step2_instruction4'),
   ];
 
+  const paired = (status?.approved_extension_ids?.length ?? 0) > 0;
+  const pending = !!status?.pending_pair_id;
+
   return (
-    <div className="wizard-overlay" role="dialog" aria-modal="true" aria-labelledby="wizard-title">
-      <div className="wizard-panel">
+    <div className="wizard-overlay" onClick={skip} role="presentation">
+      <div
+        ref={panelRef}
+        className="wizard-panel"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="wizard-title"
+      >
         <div className="wizard-steps">
-          <div className={step >= 1 ? "active" : ""} />
-          <div className={step >= 2 ? "active" : ""} />
+          <div className={step >= 1 ? 'active' : ''} />
+          <div className={step >= 2 ? 'active' : ''} />
         </div>
 
         <div className="wizard-content">
           {step === 1 ? (
-            <div className={`wizard-icon accent`}><Zap strokeWidth={1.6} /></div>
+            <div className={`wizard-icon accent`}>
+              <Zap strokeWidth={1.6} />
+            </div>
           ) : (
-            <div className="wizard-icon success"><Puzzle strokeWidth={1.6} /></div>
+            <div className="wizard-icon success">
+              <Puzzle strokeWidth={1.6} />
+            </div>
           )}
 
-          <h2 id="wizard-title" className="wizard-h">{step === 1 ? t("onboarding.step1_title") : t("onboarding.step2_title")}</h2>
-          <p className="wizard-p">{step === 1 ? t("onboarding.step1_desc") : t("onboarding.step2_desc")}</p>
+          <h2 id="wizard-title" className="wizard-h">
+            {step === 1 ? t('onboarding.step1_title') : t('onboarding.step2_title')}
+          </h2>
+          <p className="wizard-p">
+            {step === 1 ? t('onboarding.step1_desc') : t('onboarding.step2_desc')}
+          </p>
 
           {step === 2 && (
             <>
@@ -71,13 +107,31 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
                   </div>
                 ))}
               </div>
+              {/* ponytail: pair status replaces the raw API token. The secret
+                  token never reaches the frontend now — it only leaves the app
+                  via the authenticated /api/pair HTTP flow after the user
+                  explicitly approves a specific extension ID. */}
               <div className="field" style={{ marginTop: 12 }}>
-                <label className="field-label">{t("onboarding.api_token")}</label>
-                <div className="input-action">
-                  <input className="field-input" readOnly value={token} />
-                  <button type="button" className="btn-secondary" onClick={copyToken}>
-                    <Copy size={14} /> {copied ? t("onboarding.copied") : t("onboarding.copy")}
-                  </button>
+                <div
+                  className="pair-status"
+                  data-state={paired ? 'paired' : pending ? 'pending' : 'waiting'}
+                >
+                  {paired ? (
+                    <>
+                      <ShieldCheck size={16} />
+                      <span>{t('onboarding.pair_paired')}</span>
+                    </>
+                  ) : pending ? (
+                    <>
+                      <Puzzle size={16} />
+                      <span>{t('onboarding.pair_pending')}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap size={16} />
+                      <span>{t('onboarding.pair_waiting')}</span>
+                    </>
+                  )}
                 </div>
               </div>
             </>
@@ -87,18 +141,20 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
         <div className="wizard-foot">
           {step > 1 ? (
             <button type="button" onClick={() => setStep(step - 1)} className="btn-ghost">
-              <ChevronLeft size={15} /> {t("onboarding.back")}
+              <ChevronLeft size={15} /> {t('onboarding.back')}
             </button>
           ) : (
-            <button type="button" onClick={skip} className="btn-ghost">{t("onboarding.skip")}</button>
+            <button type="button" onClick={skip} className="btn-ghost">
+              {t('onboarding.skip')}
+            </button>
           )}
           {step < 2 ? (
             <button type="button" onClick={() => setStep(step + 1)} className="btn-primary">
-              {t("onboarding.next")} <ChevronRight size={15} />
+              {t('onboarding.next')} <ChevronRight size={15} />
             </button>
           ) : (
             <button type="button" onClick={finish} className="btn-primary">
-              <CheckCircle2 size={15} /> {t("onboarding.get_started")}
+              <CheckCircle2 size={15} /> {t('onboarding.get_started')}
             </button>
           )}
         </div>

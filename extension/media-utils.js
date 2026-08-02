@@ -1,5 +1,14 @@
 /* Shared media URL analysis — loaded in background + content scripts */
 (function (root) {
+  function _i18n(key, fb) {
+    try {
+      if (typeof chrome !== "undefined" && chrome.i18n && chrome.i18n.getMessage) {
+        return chrome.i18n.getMessage(key) || fb;
+      }
+    } catch (_) {}
+    return fb;
+  }
+
   const YT_ITAG = {
     // Progressive (video+audio muxed) — preferred for direct download
     18: { q: "360p", fmt: "MP4", type: "video", muxed: true },
@@ -198,7 +207,13 @@
     score += qn;
     if (size > 0) score += Math.min(Math.log10(size) * 100, 500);
 
-    const kind = isHls ? "Akış" : isAudio ? "Ses" : muxed ? "Video+Ses" : "Sadece video";
+    const kind = isHls
+      ? _i18n("kindStream", "Stream")
+      : isAudio
+        ? _i18n("kindAudio", "Audio")
+        : muxed
+          ? _i18n("kindVideoAudio", "Video+Audio")
+          : _i18n("kindVideoOnly", "Video only");
     const title = [quality, fmt.fmt, kind].filter(Boolean).join(" · ");
     const subtitle = hostLabel(clean);
     const ext = extFromUrl(clean, meta, fmt, isHls, isAudio);

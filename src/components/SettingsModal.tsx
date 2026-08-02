@@ -1,57 +1,57 @@
-import { invoke } from "@tauri-apps/api/core";
-import { useState, useEffect, useRef } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { useTranslation } from "react-i18next";
-import { X } from "lucide-react";
-import type { SettingsModel } from "../types";
-import { applyTheme } from "../types";
-import { useModalA11y } from "../hooks/useModalA11y";
+import { useState, useEffect, useRef } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
+import { useTranslation } from 'react-i18next';
+import { X, Trash2, Plus } from 'lucide-react';
+import type { SettingsModel } from '../types';
+import { applyTheme } from '../types';
+import { useModalA11y } from '../hooks/useModalA11y';
+import { useToastStore } from '../store/toast';
+import { onPairRequest } from '../api/events';
+import * as api from '../api/commands';
 
 interface SettingsModalProps {
   onClose: () => void;
-  showToast?: (kind: "success" | "error" | "info", msg: string) => void;
 }
 
-export const SettingsModal = ({ onClose, showToast }: SettingsModalProps) => {
+export const SettingsModal = ({ onClose }: SettingsModalProps) => {
   const { t } = useTranslation();
+  const showToast = useToastStore((s) => s.showToast);
   const panelRef = useRef<HTMLDivElement>(null);
   useModalA11y(panelRef, onClose);
-  const [activeTab, setActiveTab] = useState<"general" | "network">("general");
+  const [activeTab, setActiveTab] = useState<'general' | 'network' | 'profiles'>('general');
   const [settings, setSettings] = useState<SettingsModel>({
-    theme: "system",
-    default_download_path: "~/Downloads",
+    theme: 'system',
+    default_download_path: '~/Downloads',
     max_concurrent_downloads: 3,
     max_connections_per_server: 16,
     proxy: null,
-    api_token: "",
+    api_token: '',
     speed_limit_kbps: 0,
     category_paths: {},
     allowed_extension_ids: [],
-    ytdlp_path: "",
+    ytdlp_path: '',
+    download_profiles: [],
   });
-  const [saveError, setSaveError] = useState("");
+  const [saveError, setSaveError] = useState('');
   const [pendingPair, setPendingPair] = useState<string | null>(null);
 
   useEffect(() => {
-    invoke<SettingsModel>("get_settings")
+    api
+      .getSettings()
       .then(setSettings)
-      .catch((e) => console.error("Failed to load settings:", e));
-    invoke<string | null>("get_pending_pair")
+      .catch((e) => console.error('Failed to load settings:', e));
+    api
+      .getPendingPair()
       .then(setPendingPair)
       .catch(() => {});
   }, []);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    import("@tauri-apps/api/event").then(({ listen }) => {
-      listen<{ extension_id: string }>("pair-request", (e) => {
-        setPendingPair(e.payload.extension_id);
-      }).then((fn) => {
-        unlisten = fn;
-      });
+    const unlisten = onPairRequest((extensionId) => {
+      setPendingPair(extensionId);
     });
     return () => {
-      unlisten?.();
+      unlisten.then((f) => f());
     };
   }, []);
 
@@ -62,126 +62,194 @@ export const SettingsModal = ({ onClose, showToast }: SettingsModalProps) => {
   const handleBrowse = async () => {
     try {
       const selected = await open({ directory: true, multiple: false });
-      if (selected && typeof selected === "string") handleChange("default_download_path", selected);
+      if (selected && typeof selected === 'string') handleChange('default_download_path', selected);
     } catch (e) {
-      console.error("Browse error:", e);
+      console.error('Browse error:', e);
     }
   };
 
   const handleRelinkExtension = async () => {
     try {
-      await invoke("reset_extension_pin");
+      await api.resetExtensionPin();
       setPendingPair(null);
-      showToast?.("success", t("settings.extension_reset"));
+      showToast('success', t('settings.extension_reset'));
     } catch (e) {
       console.error(e);
-      showToast?.("error", t("settings.save_failed"));
+      showToast('error', t('settings.save_failed'));
     }
   };
 
   const handleApprovePair = async () => {
     if (!pendingPair) return;
     try {
-      await invoke("approve_extension_pair", { extensionId: pendingPair });
+      await api.approveExtensionPair(pendingPair);
       setPendingPair(null);
-      const s = await invoke<SettingsModel>("get_settings");
+      const s = await api.getSettings();
       setSettings(s);
-      showToast?.("success", t("settings.pair_approved"));
+      showToast('success', t('settings.pair_approved'));
     } catch (e) {
       console.error(e);
-      showToast?.("error", t("settings.save_failed"));
+      showToast('error', t('settings.save_failed'));
     }
   };
 
   const handleSave = async () => {
-    setSaveError("");
+    setSaveError('');
     try {
-      await invoke("save_settings", { settings });
+      await api.saveSettings(settings);
       applyTheme(settings.theme);
-      showToast?.("success", t("settings.saved"));
+      showToast('success', t('settings.saved'));
       onClose();
     } catch (e) {
-      console.error("Failed to save settings:", e);
-      setSaveError(t("settings.save_failed"));
-      showToast?.("error", t("settings.save_failed"));
+      console.error('Failed to save settings:', e);
+      setSaveError(t('settings.save_failed'));
+      showToast('error', t('settings.save_failed'));
     }
   };
 
   return (
     <div className="modal-overlay" onClick={onClose} role="presentation">
-      <div ref={panelRef} className="modal-panel" style={{ width: 500 }} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div
+        ref={panelRef}
+        className="modal-panel modal-lg"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+      >
         <div className="modal-head">
-          <h2 id="settings-title" className="modal-title">{t("settings.title")}</h2>
-          <button type="button" onClick={onClose} className="icon-btn" aria-label={t("settings.cancel")}><X size={18} /></button>
+          <h2 id="settings-title" className="modal-title">
+            {t('settings.title')}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="icon-btn"
+            aria-label={t('settings.cancel')}
+          >
+            <X size={18} />
+          </button>
         </div>
 
         <div className="modal-body">
           <div className="tabs" role="tablist">
-            <button type="button" role="tab" aria-selected={activeTab === "general"} className={`tab ${activeTab === "general" ? "active" : ""}`} onClick={() => setActiveTab("general")}>
-              {t("settings.general")}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'general'}
+              className={`tab ${activeTab === 'general' ? 'active' : ''}`}
+              onClick={() => setActiveTab('general')}
+            >
+              {t('settings.general')}
             </button>
-            <button type="button" role="tab" aria-selected={activeTab === "network"} className={`tab ${activeTab === "network" ? "active" : ""}`} onClick={() => setActiveTab("network")}>
-              {t("settings.network")}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'network'}
+              className={`tab ${activeTab === 'network' ? 'active' : ''}`}
+              onClick={() => setActiveTab('network')}
+            >
+              {t('settings.network')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'profiles'}
+              className={`tab ${activeTab === 'profiles' ? 'active' : ''}`}
+              onClick={() => setActiveTab('profiles')}
+            >
+              {t('settings.profiles')}
             </button>
           </div>
 
-          {activeTab === "general" && (
+          {activeTab === 'general' && (
             <>
               <div className="field">
-                <label className="field-label" htmlFor="set-theme">{t("settings.theme")}</label>
-                <select id="set-theme" className="field-input field-select" value={settings.theme} onChange={(e) => handleChange("theme", e.target.value)}>
-                  <option value="system">{t("settings.theme_system")}</option>
-                  <option value="light">{t("settings.theme_light")}</option>
-                  <option value="dark">{t("settings.theme_dark")}</option>
+                <label className="field-label" htmlFor="set-theme">
+                  {t('settings.theme')}
+                </label>
+                <select
+                  id="set-theme"
+                  className="field-input field-select"
+                  value={settings.theme}
+                  onChange={(e) => handleChange('theme', e.target.value)}
+                >
+                  <option value="system">{t('settings.theme_system')}</option>
+                  <option value="light">{t('settings.theme_light')}</option>
+                  <option value="dark">{t('settings.theme_dark')}</option>
                 </select>
               </div>
               <div className="field">
-                <label className="field-label" htmlFor="set-path">{t("settings.download_path")}</label>
+                <label className="field-label" htmlFor="set-path">
+                  {t('settings.download_path')}
+                </label>
                 <div className="input-action">
-                  <input id="set-path" className="field-input" type="text" value={settings.default_download_path} onChange={(e) => handleChange("default_download_path", e.target.value)} />
-                  <button type="button" className="btn-secondary" onClick={handleBrowse}>{t("settings.browse")}</button>
+                  <input
+                    id="set-path"
+                    className="field-input"
+                    type="text"
+                    value={settings.default_download_path}
+                    onChange={(e) => handleChange('default_download_path', e.target.value)}
+                  />
+                  <button type="button" className="btn-secondary" onClick={handleBrowse}>
+                    {t('settings.browse')}
+                  </button>
                 </div>
               </div>
               <div className="field">
-                <label className="field-label" htmlFor="set-ytdlp">{t("settings.ytdlp_path")}</label>
+                <label className="field-label" htmlFor="set-ytdlp">
+                  {t('settings.ytdlp_path')}
+                </label>
                 <input
                   id="set-ytdlp"
                   className="field-input"
                   type="text"
-                  value={settings.ytdlp_path || ""}
-                  onChange={(e) => handleChange("ytdlp_path", e.target.value)}
+                  value={settings.ytdlp_path || ''}
+                  onChange={(e) => handleChange('ytdlp_path', e.target.value)}
                   placeholder="/opt/homebrew/bin/yt-dlp"
                 />
-                <p className="field-hint">{t("settings.ytdlp_path_hint")}</p>
+                <p className="field-hint">{t('settings.ytdlp_path_hint')}</p>
               </div>
               <div className="field">
-                <label className="field-label" htmlFor="set-token">{t("settings.api_token")}</label>
-                <input id="set-token" className="field-input" type="text" value={settings.api_token || ""} onChange={(e) => handleChange("api_token", e.target.value)} />
+                <label className="field-label" htmlFor="set-token">
+                  {t('settings.api_token')}
+                </label>
+                <input
+                  id="set-token"
+                  className="field-input mono"
+                  type="password"
+                  value={settings.api_token || ''}
+                  onChange={(e) => handleChange('api_token', e.target.value)}
+                />
               </div>
               <div className="field">
-                <label className="field-label">{t("settings.extension")}</label>
-                <p className="field-hint">{t("settings.extension_hint")}</p>
+                <label className="field-label">{t('settings.extension')}</label>
+                <p className="field-hint">{t('settings.extension_hint')}</p>
                 {pendingPair ? (
                   <div className="input-action" style={{ marginBottom: 8 }}>
-                    <code className="field-hint" style={{ flex: 1 }}>{pendingPair}</code>
+                    <code className="field-hint" style={{ flex: 1 }}>
+                      {pendingPair}
+                    </code>
                     <button type="button" className="btn-primary" onClick={handleApprovePair}>
-                      {t("settings.pair_approve")}
+                      {t('settings.pair_approve')}
                     </button>
                   </div>
                 ) : (
-                  <p className="field-hint">{t("settings.pair_none")}</p>
+                  <p className="field-hint">{t('settings.pair_none')}</p>
                 )}
                 <button type="button" className="btn-secondary" onClick={handleRelinkExtension}>
-                  {t("settings.relink_extension")}
+                  {t('settings.relink_extension')}
                 </button>
               </div>
               <div className="field">
-                <label className="field-label" htmlFor="cat-video">{t("settings.cat_video")}</label>
+                <label className="field-label" htmlFor="cat-video">
+                  {t('settings.cat_video')}
+                </label>
                 <input
                   id="cat-video"
                   className="field-input"
                   type="text"
-                  value={settings.category_paths?.Video || ""}
+                  value={settings.category_paths?.Video || ''}
                   onChange={(e) =>
                     setSettings((prev) => ({
                       ...prev,
@@ -192,12 +260,14 @@ export const SettingsModal = ({ onClose, showToast }: SettingsModalProps) => {
                 />
               </div>
               <div className="field">
-                <label className="field-label" htmlFor="cat-music">{t("settings.cat_music")}</label>
+                <label className="field-label" htmlFor="cat-music">
+                  {t('settings.cat_music')}
+                </label>
                 <input
                   id="cat-music"
                   className="field-input"
                   type="text"
-                  value={settings.category_paths?.Music || ""}
+                  value={settings.category_paths?.Music || ''}
                   onChange={(e) =>
                     setSettings((prev) => ({
                       ...prev,
@@ -207,35 +277,272 @@ export const SettingsModal = ({ onClose, showToast }: SettingsModalProps) => {
                   placeholder="~/Music"
                 />
               </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cat-docs">
+                  {t('settings.cat_documents')}
+                </label>
+                <input
+                  id="cat-docs"
+                  className="field-input"
+                  type="text"
+                  value={settings.category_paths?.Document || ''}
+                  onChange={(e) =>
+                    setSettings((prev) => ({
+                      ...prev,
+                      category_paths: { ...(prev.category_paths || {}), Document: e.target.value },
+                    }))
+                  }
+                  placeholder="~/Documents"
+                />
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cat-arch">
+                  {t('settings.cat_compressed')}
+                </label>
+                <input
+                  id="cat-arch"
+                  className="field-input"
+                  type="text"
+                  value={settings.category_paths?.Archive || ''}
+                  onChange={(e) =>
+                    setSettings((prev) => ({
+                      ...prev,
+                      category_paths: { ...(prev.category_paths || {}), Archive: e.target.value },
+                    }))
+                  }
+                  placeholder="~/Downloads"
+                />
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cat-prog">
+                  {t('settings.cat_programs')}
+                </label>
+                <input
+                  id="cat-prog"
+                  className="field-input"
+                  type="text"
+                  value={settings.category_paths?.Program || ''}
+                  onChange={(e) =>
+                    setSettings((prev) => ({
+                      ...prev,
+                      category_paths: { ...(prev.category_paths || {}), Program: e.target.value },
+                    }))
+                  }
+                  placeholder="~/Applications"
+                />
+              </div>
             </>
           )}
 
-          {activeTab === "network" && (
+          {activeTab === 'network' && (
             <>
               <div className="field">
-                <label className="field-label" htmlFor="set-concurrent">{t("settings.max_concurrent")} ({settings.max_concurrent_downloads})</label>
-                <input id="set-concurrent" type="range" min="1" max="10" value={settings.max_concurrent_downloads} onChange={(e) => handleChange("max_concurrent_downloads", parseInt(e.target.value))} className="field-range" />
+                <label className="field-label" htmlFor="set-concurrent">
+                  {t('settings.max_concurrent')} ({settings.max_concurrent_downloads})
+                </label>
+                <input
+                  id="set-concurrent"
+                  type="range"
+                  min="1"
+                  max="10"
+                  value={settings.max_concurrent_downloads}
+                  onChange={(e) =>
+                    handleChange('max_concurrent_downloads', parseInt(e.target.value))
+                  }
+                  className="field-range"
+                />
               </div>
               <div className="field">
-                <label className="field-label" htmlFor="set-conn">{t("settings.max_connections")}</label>
-                <input id="set-conn" type="number" min="1" max="16" value={settings.max_connections_per_server} onChange={(e) => handleChange("max_connections_per_server", parseInt(e.target.value))} className="field-input" />
+                <label className="field-label" htmlFor="set-conn">
+                  {t('settings.max_connections')}
+                </label>
+                <input
+                  id="set-conn"
+                  type="number"
+                  min="1"
+                  max="16"
+                  value={settings.max_connections_per_server}
+                  onChange={(e) =>
+                    handleChange('max_connections_per_server', parseInt(e.target.value))
+                  }
+                  className="field-input"
+                />
               </div>
               <div className="field">
-                <label className="field-label" htmlFor="set-speed">{t("settings.speed_limit")}</label>
-                <input id="set-speed" type="number" min="0" value={settings.speed_limit_kbps || 0} onChange={(e) => handleChange("speed_limit_kbps", parseInt(e.target.value) || 0)} className="field-input" />
+                <label className="field-label" htmlFor="set-speed">
+                  {t('settings.speed_limit')}
+                </label>
+                <input
+                  id="set-speed"
+                  type="number"
+                  min="0"
+                  value={settings.speed_limit_kbps || 0}
+                  onChange={(e) => handleChange('speed_limit_kbps', parseInt(e.target.value) || 0)}
+                  className="field-input"
+                />
               </div>
               <div className="field">
-                <label className="field-label" htmlFor="set-proxy">{t("settings.proxy")}</label>
-                <input id="set-proxy" type="text" placeholder={t("settings.proxy_placeholder")} value={settings.proxy || ""} onChange={(e) => handleChange("proxy", e.target.value || null)} className="field-input" />
+                <label className="field-label" htmlFor="set-proxy">
+                  {t('settings.proxy')}
+                </label>
+                <input
+                  id="set-proxy"
+                  type="text"
+                  placeholder={t('settings.proxy_placeholder')}
+                  value={settings.proxy || ''}
+                  onChange={(e) => handleChange('proxy', e.target.value || null)}
+                  className="field-input"
+                />
               </div>
+            </>
+          )}
+          {activeTab === 'profiles' && (
+            <>
+              <p className="field-hint">{t('settings.profiles_hint')}</p>
+              {(settings.download_profiles || []).map((p, i) => (
+                <div className="profile-card" key={i}>
+                  <div className="profile-card-head">
+                    <span className="profile-card-title">
+                      {p.name || t('settings.profile_untitled')}
+                    </span>
+                    <button
+                      type="button"
+                      className="icon-btn danger"
+                      aria-label={t('settings.profile_remove')}
+                      onClick={() =>
+                        setSettings((prev) => ({
+                          ...prev,
+                          download_profiles: (prev.download_profiles || []).filter(
+                            (_, idx) => idx !== i,
+                          ),
+                        }))
+                      }
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                  <div className="profile-fields">
+                    <input
+                      className="field-input"
+                      placeholder={t('settings.profile_name')}
+                      value={p.name}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setSettings((prev) => ({
+                          ...prev,
+                          download_profiles: (prev.download_profiles || []).map((q, idx) =>
+                            idx === i ? { ...q, name: v } : q,
+                          ),
+                        }));
+                      }}
+                    />
+                    <input
+                      className="field-input"
+                      placeholder={t('settings.profile_url_pattern')}
+                      value={p.url_pattern}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setSettings((prev) => ({
+                          ...prev,
+                          download_profiles: (prev.download_profiles || []).map((q, idx) =>
+                            idx === i ? { ...q, url_pattern: v } : q,
+                          ),
+                        }));
+                      }}
+                    />
+                    <input
+                      className="field-input"
+                      placeholder={t('settings.profile_save_subdir')}
+                      value={p.save_subdir || ''}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setSettings((prev) => ({
+                          ...prev,
+                          download_profiles: (prev.download_profiles || []).map((q, idx) =>
+                            idx === i ? { ...q, save_subdir: v || null } : q,
+                          ),
+                        }));
+                      }}
+                    />
+                    <input
+                      className="field-input"
+                      placeholder={t('settings.profile_user_agent')}
+                      value={p.user_agent || ''}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setSettings((prev) => ({
+                          ...prev,
+                          download_profiles: (prev.download_profiles || []).map((q, idx) =>
+                            idx === i ? { ...q, user_agent: v || null } : q,
+                          ),
+                        }));
+                      }}
+                    />
+                    <input
+                      className="field-input"
+                      placeholder={t('settings.profile_referrer')}
+                      value={p.referrer || ''}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setSettings((prev) => ({
+                          ...prev,
+                          download_profiles: (prev.download_profiles || []).map((q, idx) =>
+                            idx === i ? { ...q, referrer: v || null } : q,
+                          ),
+                        }));
+                      }}
+                    />
+                    <input
+                      className="field-input"
+                      placeholder={t('settings.profile_cookies')}
+                      value={p.cookies || ''}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setSettings((prev) => ({
+                          ...prev,
+                          download_profiles: (prev.download_profiles || []).map((q, idx) =>
+                            idx === i ? { ...q, cookies: v || null } : q,
+                          ),
+                        }));
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    download_profiles: [
+                      ...(prev.download_profiles || []),
+                      {
+                        name: '',
+                        url_pattern: '',
+                        user_agent: null,
+                        referrer: null,
+                        cookies: null,
+                        save_subdir: null,
+                      },
+                    ],
+                  }))
+                }
+              >
+                <Plus size={14} /> {t('settings.profile_add')}
+              </button>
             </>
           )}
           {saveError && <p className="field-error">{saveError}</p>}
         </div>
 
         <div className="modal-foot">
-          <button type="button" className="btn-secondary" onClick={onClose}>{t("settings.cancel")}</button>
-          <button type="button" className="btn-primary" onClick={handleSave}>{t("settings.save")}</button>
+          <button type="button" className="btn-secondary" onClick={onClose}>
+            {t('settings.cancel')}
+          </button>
+          <button type="button" className="btn-primary" onClick={handleSave}>
+            {t('settings.save')}
+          </button>
         </div>
       </div>
     </div>

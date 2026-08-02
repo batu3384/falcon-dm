@@ -9,6 +9,13 @@
   Falcon DM combines a Rust (Tauri v2) backend with a React/TypeScript frontend to provide native OS integration, rigorous process isolation, and maximum network throughput.
 </p>
 
+<p align="center">
+  <a href="https://github.com/batuhanyuksel/downloadmanager/actions/workflows/ci.yml"><img src="https://github.com/batuhanyuksel/downloadmanager/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/batuhanyuksel/downloadmanager/actions/workflows/release.yml"><img src="https://github.com/batuhanyuksel/downloadmanager/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
+  <img src="https://img.shields.io/badge/platforms-macOS%20(Intel%20%2B%20Apple%20Silicon)-lightgrey" alt="Platforms" />
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License" />
+</p>
+
 <br>
 
 <table align="center" border="0" cellpadding="0" cellspacing="0">
@@ -60,14 +67,20 @@ Falcon DM enforces a zero-dependency execution model by bundling its engines via
 
 ### 1. Sidecar Provisioning
 
-For Apple Silicon (M1/M2/M3) hosts:
-1. Acquire statically compiled `aria2c` and `ffmpeg` binaries for the `aarch64-apple-darwin` target.
-2. Place the binaries into `src-tauri/binaries/`.
-3. Verify nomenclature matches the target triple precisely:
-   - `src-tauri/binaries/aria2c-aarch64-apple-darwin`
-   - `src-tauri/binaries/ffmpeg-aarch64-apple-darwin`
+A helper script provisions the `aria2c` and `ffmpeg` sidecar binaries for your
+machine's architecture (Apple Silicon or Intel), copying aria2 from Homebrew and
+fetching ffmpeg. Run it once before the first build:
 
-*(For Intel hosts, utilize the `-x86_64-apple-darwin` suffix).*
+```bash
+./scripts/provision-sidecars.sh
+```
+
+This places the binaries with the correct target-triple suffix into
+`src-tauri/binaries/` (`aria2c-<arch>-apple-darwin`, `ffmpeg-<arch>-apple-darwin`).
+It is idempotent — re-running skips binaries that are already present.
+
+> Prerequisites for the script: `brew install aria2 ffmpeg yt-dlp`. The release
+> CI (`release.yml`) runs the same script automatically on both architectures.
 
 ### 2. Compilation
 
@@ -88,6 +101,30 @@ npm run tauri build
 2. Open Falcon DM → **Settings → Approve extension** when the pair request appears (no silent first-wins).
 3. YouTube downloads require system `yt-dlp` (`brew install yt-dlp`). aria2/ffmpeg are bundled sidecars; yt-dlp is not.
 4. **Deep link wake:** `falcondm://wake` only (production `.app`). Download enqueue via deep-link query is disabled — secrets must not appear in URLs; extension uses wake → HTTP API. `tauri dev` often does not register the scheme.
+
+## Development & Contributing
+
+For local development, linting, testing, and contribution guidelines see
+[CONTRIBUTING.md](CONTRIBUTING.md). Quick reference:
+
+```bash
+# Frontend
+npm run lint            # ESLint (--max-warnings 0)
+npm run format:check    # Prettier
+npm run test            # Vitest (46 tests)
+npm run build           # tsc + vite build
+
+# Backend (in src-tauri/)
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test              # 29 tests
+```
+
+Supply-chain checks: `cargo deny check` (Rust advisories/licenses) and
+`npm audit --omit=dev --audit-level=high` run in CI on every push.
+
+To report a security issue, see [SECURITY.md](SECURITY.md) — **do not open a
+public issue** for vulnerabilities.
 
 ## Security Posture
 

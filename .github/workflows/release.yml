@@ -1,0 +1,84 @@
+# ponytail: release pipeline — triggered by a `v*` tag. Provisions both macOS
+# architectures' sidecar binaries, builds a signed + notarized .dmg, and uploads
+# it to the GitHub Release. Falls back to an unsigned build if Apple signing
+# secrets are absent (so forks/dev can still cut builds).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            arch: aarch64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      # ponytail: provision aria2c + ffmpeg sidecars for THIS architecture. aria2
+      # has no official macOS binary, so we install it via Homebrew (available on
+      # GitHub macOS runners) and copy it in. ffmpeg x86_64 comes from evermeet.
+      - name: Provision sidecars (${{ matrix.arch }})
+        run: ./scripts/provision-sidecars.sh
+        env:
+          ARCH: ${{ matrix.arch }}
+
+      - run: npm ci
+
+      # ponytail: Tauri notarization needs the signing identity + Apple ID creds.
+      # When absent (e.g. a fork without a paid developer account), we skip
+      # signing and still produce a usable dev build.
+      - name: Build + sign + notarize (Tauri)
+        if: ${{ env.APPLE_SIGNING_IDENTITY != '' }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Falcon DM ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
+
+      - name: Build (unsigned fallback)
+        if: ${{ env.APPLE_SIGNING_IDENTITY == '' }}
+        run: npx tauri build --target ${{ matrix.target }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute checksum
+        run: |
+          cd src-tauri/target/${{ matrix.target }}/release/bundle
+          find . -type f \( -name "*.dmg" -o -name "*.app" \) -exec shasum -a 256 {} \; >> $GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums-${{ matrix.arch }}
+          path: checksums-${{ matrix.arch }}.txt

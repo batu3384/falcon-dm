@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::process::Command; // ponytail: tokio async process — std::process would block the worker thread.
 
 #[derive(Clone, Default)]
 pub struct YtDlpHeaders {
@@ -17,7 +17,7 @@ pub struct YtDlpHeaders {
 
 fn find_ytdlp(preferred: Option<&str>) -> Result<PathBuf, String> {
     if let Some(raw) = preferred.map(str::trim).filter(|s| !s.is_empty()) {
-        let p = PathBuf::from(crate::util::expand_tilde(raw));
+        let p = crate::util::expand_tilde(raw);
         if p.is_file() {
             return Ok(p);
         }
@@ -53,13 +53,11 @@ fn find_ytdlp(preferred: Option<&str>) -> Result<PathBuf, String> {
             return Ok(p);
         }
     }
-    Err(
-        "yt-dlp bulunamadı. YouTube için: brew install yt-dlp — veya Settings → yt-dlp path"
-            .into(),
-    )
+    Err("yt-dlp bulunamadı. YouTube için: brew install yt-dlp — veya Settings → yt-dlp path".into())
 }
 
 /// Download a YouTube (or yt-dlp supported) watch URL into `out_path`.
+#[allow(clippy::too_many_arguments)]
 pub async fn process_ytdlp(
     app_handle: &AppHandle,
     download_id: i64,
@@ -71,12 +69,18 @@ pub async fn process_ytdlp(
     format: Option<&str>,
 ) -> Result<(), String> {
     let preferred = crate::settings::Settings::load(&crate::util::app_data_dir()).ytdlp_path;
-    let bin = find_ytdlp(Some(preferred.as_str()).filter(|s| !s.trim().is_empty()))?;
+    // ponytail: find_ytdlp runs `yt-dlp --version` (a subprocess) + filesystem
+    // existence checks — all blocking. Run on a blocking-pool thread so we don't
+    // stall a tokio worker thread (with max_concurrent downloads, several of these
+    // could run concurrently and starve the runtime). Move an owned Option<String>
+    // across the thread boundary (borrows can't satisfy 'static).
+    let pref_opt: Option<String> = if preferred.trim().is_empty() { None } else { Some(preferred) };
+    let bin = tokio::task::spawn_blocking(move || find_ytdlp(pref_opt.as_deref()))
+        .await
+        .map_err(|e| format!("yt-dlp lookup task failed: {e}"))??;
     let out = PathBuf::from(out_path);
-    let dir = out
-        .parent()
-        .ok_or_else(|| "Invalid output path".to_string())?;
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let dir = out.parent().ok_or_else(|| "Invalid output path".to_string())?;
+    tokio::fs::create_dir_all(dir).await.map_err(|e| e.to_string())?;
 
     let tmpl = out.with_extension("%(ext)s");
     let fmt = format.unwrap_or(
@@ -188,33 +192,44 @@ pub async fn process_ytdlp(
     }
 
     // Resolve final file (yt-dlp may change extension)
-    let final_path = resolve_output(&out)?;
-    let meta = std::fs::metadata(&final_path).map_err(|e| e.to_string())?;
-    let size = meta.len();
-    if size < 1024 {
-        let _ = std::fs::remove_file(&final_path);
-        return Err("Downloaded file too small — YouTube blocked the request".into());
-    }
+    // ponytail: resolve_output + metadata + rename are all blocking fs ops;
+    // batch them onto a blocking-pool thread.
+    let out_for_resolve = out.clone();
+    let final_path = tokio::task::spawn_blocking(move || resolve_output(&out_for_resolve))
+        .await
+        .map_err(|e| format!("yt-dlp output resolve task failed: {e}"))??;
 
-    // Rename to requested path if needed
-    if final_path != out {
-        let _ = std::fs::remove_file(&out);
-        std::fs::rename(&final_path, &out).or_else(|_| {
-            std::fs::copy(&final_path, &out).map(|_| {
-                let _ = std::fs::remove_file(&final_path);
-            })
-        }).map_err(|e| e.to_string())?;
-    }
+    let final_path_cloned = final_path.clone();
+    let out_cloned = out.clone();
+    let size = tokio::task::spawn_blocking(move || -> Result<u64, String> {
+        let meta = std::fs::metadata(&final_path_cloned).map_err(|e| e.to_string())?;
+        let size = meta.len();
+        if size < 1024 {
+            let _ = std::fs::remove_file(&final_path_cloned);
+            return Err("Downloaded file too small — YouTube blocked the request".into());
+        }
+        // Rename to requested path if needed
+        if final_path_cloned != out_cloned {
+            let _ = std::fs::remove_file(&out_cloned);
+            std::fs::rename(&final_path_cloned, &out_cloned)
+                .or_else(|_| {
+                    std::fs::copy(&final_path_cloned, &out_cloned).map(|_| {
+                        let _ = std::fs::remove_file(&final_path_cloned);
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(size)
+    })
+    .await
+    .map_err(|e| format!("yt-dlp finalize task failed: {e}"))??;
 
     if let Some(ref db) = db {
         if let Ok(mut d) = db.get_download(download_id) {
             d.downloaded_size = size;
             d.total_size = size;
-            d.filename = out
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&d.filename)
-                .to_string();
+            d.filename =
+                out.file_name().and_then(|s| s.to_str()).unwrap_or(&d.filename).to_string();
             // keep status update to caller
             let _ = db.update_download(download_id, &d);
         }
@@ -279,22 +294,15 @@ fn resolve_output(requested: &Path) -> Result<PathBuf, String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| "Missing filename".to_string())?;
-    let parent = requested
-        .parent()
-        .ok_or_else(|| "Missing parent".to_string())?;
+    let parent = requested.parent().ok_or_else(|| "Missing parent".to_string())?;
     let mut candidates: Vec<_> = std::fs::read_dir(parent)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.file_stem()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s == stem || s.starts_with(stem))
+            p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s == stem || s.starts_with(stem))
         })
         .collect();
     candidates.sort_by_key(|p| std::cmp::Reverse(p.metadata().map(|m| m.len()).unwrap_or(0)));
-    candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| "yt-dlp output file not found".into())
+    candidates.into_iter().next().ok_or_else(|| "yt-dlp output file not found".into())
 }

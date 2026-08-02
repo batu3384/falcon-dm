@@ -44,3 +44,12 @@ Thumbs.db
 # Falcon DM Temp Files
 *.falcondm-temp
 .superpowers/
+.zcode/
+
+# Test / coverage artifacts (Faz 3)
+coverage/
+coverage.html
+.nyc_output/
+.vitest-cache/
+.eslintcache
+*.tsbuildinfo

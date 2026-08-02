@@ -1,9 +1,8 @@
-import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { useTranslation } from "react-i18next";
-import { X } from "lucide-react";
-import type { ScheduleModel } from "../types";
-import { useModalA11y } from "../hooks/useModalA11y";
+import { useState, useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import { X } from 'lucide-react';
+import { useModalA11y } from '../hooks/useModalA11y';
+import * as api from '../api/commands';
 
 interface SchedulerModalProps {
   isOpen: boolean;
@@ -15,18 +14,19 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   useModalA11y(panelRef, onClose, isOpen);
   const [active, setActive] = useState(false);
-  const [startTime, setStartTime] = useState("");
-  const [stopTime, setStopTime] = useState("");
+  const [startTime, setStartTime] = useState('');
+  const [stopTime, setStopTime] = useState('');
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState('');
 
   useEffect(() => {
     if (!isOpen) return;
-    invoke<ScheduleModel>("get_schedule")
+    api
+      .getSchedule()
       .then((s) => {
         setActive(s.active);
-        setStartTime(s.start_time || "");
-        setStopTime(s.stop_time || "");
+        setStartTime(s.start_time || '');
+        setStopTime(s.stop_time || '');
       })
       .catch(() => {});
   }, [isOpen]);
@@ -35,9 +35,14 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
 
   const handleSave = async () => {
     setSaving(true);
-    setError("");
+    setError('');
+    if (active && startTime && stopTime && startTime >= stopTime) {
+      setError(t('scheduler.invalid_time'));
+      setSaving(false);
+      return;
+    }
     try {
-      await invoke("set_schedule", {
+      await api.setSchedule({
         startTime: startTime || null,
         stopTime: stopTime || null,
         active,
@@ -45,7 +50,7 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
       onClose();
     } catch (e) {
       console.error(e);
-      setError(t("scheduler.save_failed"));
+      setError(t('scheduler.save_failed'));
     } finally {
       setSaving(false);
     }
@@ -53,33 +58,76 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
 
   return (
     <div className="modal-overlay" onClick={onClose} role="presentation">
-      <div ref={panelRef} className="modal-panel" style={{ width: 440 }} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="sched-title">
+      <div
+        ref={panelRef}
+        className="modal-panel modal-sm"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sched-title"
+      >
         <div className="modal-head">
-          <h2 id="sched-title" className="modal-title">{t("scheduler.title")}</h2>
-          <button type="button" onClick={onClose} className="icon-btn" aria-label={t("scheduler.cancel")}><X size={18} /></button>
+          <h2 id="sched-title" className="modal-title">
+            {t('scheduler.title')}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="icon-btn"
+            aria-label={t('scheduler.cancel')}
+          >
+            <X size={18} />
+          </button>
         </div>
 
         <div className="modal-body">
           <div className="check-row">
-            <input id="enable-scheduler" type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
-            <label htmlFor="enable-scheduler">{t("scheduler.enable")}</label>
+            <input
+              id="enable-scheduler"
+              type="checkbox"
+              checked={active}
+              onChange={(e) => setActive(e.target.checked)}
+            />
+            <label htmlFor="enable-scheduler">{t('scheduler.enable')}</label>
           </div>
 
           <div className="field">
-            <label className="field-label" htmlFor="sched-start">{t("scheduler.start_time")}</label>
-            <input id="sched-start" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} disabled={!active} className="field-input" />
+            <label className="field-label" htmlFor="sched-start">
+              {t('scheduler.start_time')}
+            </label>
+            <input
+              id="sched-start"
+              type="time"
+              value={startTime}
+              onChange={(e) => setStartTime(e.target.value)}
+              disabled={!active}
+              className="field-input"
+            />
           </div>
 
           <div className="field">
-            <label className="field-label" htmlFor="sched-stop">{t("scheduler.stop_time")}</label>
-            <input id="sched-stop" type="time" value={stopTime} onChange={(e) => setStopTime(e.target.value)} disabled={!active} className="field-input" />
+            <label className="field-label" htmlFor="sched-stop">
+              {t('scheduler.stop_time')}
+            </label>
+            <input
+              id="sched-stop"
+              type="time"
+              value={stopTime}
+              onChange={(e) => setStopTime(e.target.value)}
+              disabled={!active}
+              className="field-input"
+            />
           </div>
           {error && <p className="field-error">{error}</p>}
         </div>
 
         <div className="modal-foot">
-          <button type="button" className="btn-secondary" onClick={onClose}>{t("scheduler.cancel")}</button>
-          <button type="button" className="btn-primary" onClick={handleSave} disabled={saving}>{saving ? t("scheduler.saving") : t("scheduler.save")}</button>
+          <button type="button" className="btn-secondary" onClick={onClose}>
+            {t('scheduler.cancel')}
+          </button>
+          <button type="button" className="btn-primary" onClick={handleSave} disabled={saving}>
+            {saving ? t('scheduler.saving') : t('scheduler.save')}
+          </button>
         </div>
       </div>
     </div>

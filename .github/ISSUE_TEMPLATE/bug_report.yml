@@ -1,0 +1,39 @@
+name: Bug report
+description: Report something that's broken
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. Steps to reproduce are gold.
+      placeholder: "1. ... 2. ... Expected: ... Actual: ..."
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Area
+      options:
+        - Desktop app (frontend)
+        - Backend / download engine
+        - Browser extension
+        - Build / install
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Falcon DM version
+      placeholder: "0.2.0"
+  - type: input
+    id: mac
+    attributes:
+      label: macOS version & chip
+      placeholder: "macOS 15.6, Apple Silicon / Intel"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / errors
+      render: shell

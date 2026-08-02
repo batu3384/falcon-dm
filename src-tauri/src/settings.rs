@@ -4,6 +4,37 @@ use std::collections::HashMap;
 use std::fs;
 use uuid::Uuid;
 
+// ponytail: per-site download profile. Matched against a URL via simple
+// substring (case-insensitive). When a download's URL contains the pattern,
+// the profile's headers/subdir override the request defaults — so users can
+// set a specific UA + referer + cookies + save folder for a host without
+// re-entering them each time. Keep it opt-in and simple; no regex engine.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DownloadProfile {
+    /// Human label shown in Settings.
+    pub name: String,
+    /// Case-insensitive substring matched against the download URL (e.g. "example.com").
+    pub url_pattern: String,
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    #[serde(default)]
+    pub referrer: Option<String>,
+    #[serde(default)]
+    pub cookies: Option<String>,
+    /// Subdirectory under the save root (e.g. "SiteA"). Empty = default folder.
+    #[serde(default)]
+    pub save_subdir: Option<String>,
+}
+
+impl DownloadProfile {
+    /// True if `url` contains the profile's pattern (case-insensitive). Empty
+    /// patterns never match (a blank profile is inert).
+    pub fn matches(&self, url: &str) -> bool {
+        let p = self.url_pattern.trim().to_lowercase();
+        !p.is_empty() && url.to_lowercase().contains(&p)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub theme: String,
@@ -29,6 +60,11 @@ pub struct Settings {
     /// Optional absolute path to yt-dlp binary (empty = PATH + common locations).
     #[serde(default)]
     pub ytdlp_path: String,
+    /// ponytail: per-site download profiles. Empty by default. When a download
+    /// URL matches a profile's `url_pattern`, that profile's UA/referer/cookies/
+    /// subdir override the request defaults.
+    #[serde(default)]
+    pub download_profiles: Vec<DownloadProfile>,
 }
 
 impl Default for Settings {
@@ -49,14 +85,15 @@ impl Default for Settings {
             schedule_stop: None,
             allowed_extension_ids: Vec::new(),
             ytdlp_path: String::new(),
+            download_profiles: Vec::new(),
         }
     }
 }
 
 impl Settings {
     fn ensure_secure_token(mut settings: Self) -> Self {
-        let weak = settings.api_token.trim().is_empty()
-            || settings.api_token == LEGACY_DEFAULT_API_TOKEN;
+        let weak =
+            settings.api_token.trim().is_empty() || settings.api_token == LEGACY_DEFAULT_API_TOKEN;
         if weak {
             settings.api_token = Uuid::new_v4().to_string();
         }
@@ -94,16 +131,32 @@ impl Settings {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let content = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(&settings_path, content).map_err(|e| e.to_string())?;
+        // ponytail: atomic write — write to a temp sibling then rename. A direct
+        // fs::write can leave a half-written settings.json if the app crashes
+        // mid-write, silently wiping the user's config on the next load.
+        let tmp_path = app_data_dir.join(format!("settings.json.tmp.{}", uuid::Uuid::new_v4()));
+        fs::write(&tmp_path, &content).map_err(|e| e.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&settings_path, fs::Permissions::from_mode(0o600));
+            let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
         }
+        fs::rename(&tmp_path, &settings_path).map_err(|e| {
+            // Best-effort cleanup of the temp file if rename failed.
+            let _ = fs::remove_file(&tmp_path);
+            e.to_string()
+        })?;
         Ok(())
     }
 
     pub fn path_for_category(&self, category: &str) -> Option<String> {
         self.category_paths.get(category).cloned()
+    }
+
+    /// ponytail: first profile whose url_pattern matches `url` (case-insensitive
+    /// substring). Profiles are tried in declaration order so the user controls
+    /// precedence by reordering them in Settings.
+    pub fn profile_for_url(&self, url: &str) -> Option<&DownloadProfile> {
+        self.download_profiles.iter().find(|p| p.matches(url))
     }
 }

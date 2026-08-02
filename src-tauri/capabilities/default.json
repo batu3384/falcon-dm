@@ -17,12 +17,33 @@
         {
           "name": "binaries/aria2c",
           "sidecar": true,
-          "args": true
+          "args": [
+            { "validator": "^--conf-path=" },
+            { "validator": "^--max-concurrent-downloads=" },
+            { "validator": "^--max-connection-per-server=" },
+            { "validator": "^--split=" },
+            { "validator": "^--min-split-size=" },
+            { "validator": "^--continue=" },
+            { "validator": "^--auto-file-renaming=" },
+            { "validator": "^--allow-overwrite=" },
+            { "validator": "^--quiet=" },
+            { "validator": "^--daemon=" },
+            { "validator": "^--max-overall-download-limit=" }
+          ]
         },
         {
           "name": "binaries/ffmpeg",
           "sidecar": true,
-          "args": true
+          "args": [
+            { "validator": "^-f$" },
+            { "validator": "^-safe$" },
+            { "validator": "^-i$" },
+            { "validator": "^-c$" },
+            { "validator": "^-bsf:a$" },
+            { "validator": "^-y$" },
+            { "validator": "^(concat|0|copy|aac_adtstoasc)$" },
+            { "validator": "^/|^.*[/]list\\.txt$|^.*\\.falcondm-temp[/].*|^seg_[0-9]{5}\\.ts$|.+\\.(mp4|mkv|m4a|ts|webm)$|^[^/]+$" }
+          ]
         }
       ]
     }

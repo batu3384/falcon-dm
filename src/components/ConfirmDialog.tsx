@@ -1,6 +1,6 @@
-import { useRef } from "react";
-import { useTranslation } from "react-i18next";
-import { useModalA11y } from "../hooks/useModalA11y";
+import { useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useModalA11y } from '../hooks/useModalA11y';
 
 interface ConfirmDialogProps {
   message: string;
@@ -35,22 +35,25 @@ export function ConfirmDialog({
         aria-describedby="confirm-msg"
       >
         <div className="modal-body">
-          <p id="confirm-msg" className="field-hint" style={{ margin: 0, color: "inherit", fontSize: 14 }}>
+          <p
+            id="confirm-msg"
+            className="field-hint"
+            style={{ margin: 0, color: 'inherit', fontSize: 14 }}
+          >
             {message}
           </p>
         </div>
         <div className="modal-foot">
           <button type="button" className="btn-secondary" onClick={onCancel}>
-            {cancelLabel || t("settings.cancel")}
+            {cancelLabel || t('settings.cancel')}
           </button>
           <button
             type="button"
-            className={danger ? "btn-primary" : "btn-primary"}
-            style={danger ? { background: "var(--danger, #dc2626)" } : undefined}
+            className="btn-primary"
+            style={danger ? { background: 'var(--danger)' } : undefined}
             onClick={onConfirm}
-            autoFocus
           >
-            {confirmLabel || t("inspector.remove")}
+            {confirmLabel || t('inspector.remove')}
           </button>
         </div>
       </div>
