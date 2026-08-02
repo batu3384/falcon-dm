@@ -47,7 +47,7 @@ subtle = "2"
 # the version-less CREATE TABLE IF NOT EXISTS approach so future schema changes
 # apply to existing user databases.
 rusqlite_migration = "1"
-reqwest = { version = "0.12", features = ["stream", "json"] }
+reqwest = { version = "0.13", features = ["stream", "json"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 dirs = "5"
