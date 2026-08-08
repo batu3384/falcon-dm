@@ -5,13 +5,13 @@
 <h1 align="center">Falcon DM</h1>
 
 <p align="center">
-  <strong>A high-performance macOS download manager engineered for speed and precision.</strong><br>
-  Falcon DM combines a Rust (Tauri v2) backend with a React/TypeScript frontend to provide native OS integration, rigorous process isolation, and maximum network throughput.
+  <strong>macOS download manager — multi-thread HTTP, HLS, YouTube, browser capture.</strong><br>
+  Tauri v2 (Rust) backend + React/TypeScript UI. Local-only: no telemetry, no cloud queue.
 </p>
 
 <p align="center">
-  <a href="https://github.com/batuhanyuksel/downloadmanager/actions/workflows/ci.yml"><img src="https://github.com/batuhanyuksel/downloadmanager/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/batuhanyuksel/downloadmanager/actions/workflows/release.yml"><img src="https://github.com/batuhanyuksel/downloadmanager/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
+  <a href="https://github.com/batu3384/falcon-dm/actions/workflows/ci.yml"><img src="https://github.com/batu3384/falcon-dm/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/batu3384/falcon-dm/actions/workflows/release.yml"><img src="https://github.com/batu3384/falcon-dm/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
   <img src="https://img.shields.io/badge/platforms-macOS%20(Intel%20%2B%20Apple%20Silicon)-lightgrey" alt="Platforms" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License" />
 </p>
@@ -25,11 +25,11 @@
     </td>
     <td width="50%" valign="middle" style="padding-left: 20px;">
       <h3>Meet Falco (The Sniffer)</h3>
-      <p>The official mascot of Falcon DM embodies the engineering pillars of the project:</p>
+      <p>The mascot reflects what the stack actually does:</p>
       <ul>
-        <li><strong>Speed:</strong> Multi-threaded chunking via <code>aria2c</code>.</li>
-        <li><strong>Precision:</strong> Byte-perfect HLS assembly via <code>ffmpeg</code>.</li>
-        <li><strong>Stealth:</strong> Silent browser interception via PNA CORS.</li>
+        <li><strong>Speed:</strong> Multi-connection downloads via bundled <code>aria2c</code>.</li>
+        <li><strong>Precision:</strong> HLS segment assembly + <code>ffmpeg</code> merge.</li>
+        <li><strong>Capture:</strong> Chrome MV3 extension → authenticated localhost API.</li>
       </ul>
     </td>
   </tr>
@@ -37,101 +37,100 @@
 
 ---
 
+## Features
+
+| Area | What you get |
+|------|----------------|
+| **HTTP / magnet** | aria2 sidecar, resume, priority queue, speed limit, scheduler |
+| **HLS (m3u8)** | Parallel segment fetch, ffmpeg mux |
+| **YouTube** | Watch URL + <code>yt-dlp</code> (quality via API <code>format</code> field) |
+| **Browser extension** | Download hijack, video quality picker, link grabber (batch ≤20) |
+| **Desktop UI** | Inspector panel, speed graph, EN/TR i18n, category paths |
+| **Security** | Extension pair approval, SSRF URL block, token + Origin allowlist |
+
 ## Core Architecture
 
-### Download Engine (Aria2c Sidecar)
-The core download pipeline is delegated to a bundled, statically linked `aria2c` binary. This sidecar handles:
-- Dynamic block-level file segmentation (up to 16 concurrent connections per server).
-- Resilient connection pooling and chunk validation.
-- JSON-RPC communication with the Rust host over a protected local port.
+### Download engine (aria2c sidecar)
 
-### HLS Stream Capture (FFmpeg Sidecar)
-Stream interception (m3u8) is processed asynchronously. The Rust host reads the master playlist, downloads segments concurrently via `tokio::spawn`, and delegates final lossless concatenation to a bundled `ffmpeg` sidecar. This pipeline prevents memory bloat during multi-gigabyte video assembly.
+HTTP and magnet traffic goes through a bundled `aria2c` binary (provisioned per architecture — see below). The Rust host drives aria2 over JSON-RPC on a local port with up to 16 connections per server.
 
-### Queue Management & State Synchronization
-The `QueueManager` operates on a strict 500ms tick cycle. It maintains bounded concurrency using atomic counters and provides deterministic cancellation tokens (`tokio::sync::watch`) for in-flight HLS tasks. Persistent state is managed via SQLite (`rusqlite`), ensuring zero data loss upon abrupt termination.
+### Stream pipeline (HLS + YouTube)
 
-### IPC & Browser Integration
-Falcon DM hosts a local Axum HTTP server (`127.0.0.1:14201`) to intercept requests from browser extensions. This endpoint strictly enforces Private Network Access (PNA) CORS policies to prevent CSRF vectors from arbitrary domains.
+- **HLS:** Rust downloads segments concurrently; `ffmpeg` sidecar muxes to disk.
+- **YouTube:** CDN (<code>googlevideo</code>) URLs are rewritten to watch URLs; <code>yt-dlp</code> runs as an external tool (PATH or **Settings → yt-dlp path**). Not bundled.
 
-## Build Requirements
+### Queue & persistence
+
+`QueueManager` ticks every 500ms, bounds concurrency with atomics, and cancels in-flight stream jobs via `tokio::sync::watch`. State lives in SQLite (`rusqlite`) with crash-safe recovery.
+
+### Local API (browser extension)
+
+Axum serves `http://127.0.0.1:14201`:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/pair` | Extension pairing (`200` token or `202` pending approval) |
+| `POST /api/intercept` | Media / hijacked download |
+| `POST /api/add` | Direct URL (e.g. grabber batch) |
+| `GET /api/health` | Liveness |
+
+Requests require `X-Falcon-Token` and a `chrome-extension://` (or Firefox/Edge) `Origin` on the allowlist after you approve in Settings. See [extension/README.md](extension/README.md).
+
+## Build requirements
 
 - macOS 13.0+ (Ventura or later)
-- Node.js 18.0+
-- Rust 1.70+
-- `cargo-tauri`
+- **Node.js 22+** (matches CI; Node 24 breaks Vitest/jsdom on GitHub Actions)
+- **Rust** stable (`rustup`)
+- **Tauri CLI:** `npm install` (devDependency) or `cargo install tauri-cli`
+- **Homebrew:** `brew install aria2 ffmpeg yt-dlp`
 
-## Compilation & Bootstrapping
+## Compilation & bootstrapping
 
-Falcon DM enforces a zero-dependency execution model by bundling its engines via Tauri Sidecars. Prior to compilation, statically linked binaries must be injected into the build path.
-
-### 1. Sidecar Provisioning
-
-A helper script provisions the `aria2c` and `ffmpeg` sidecar binaries for your
-machine's architecture (Apple Silicon or Intel), copying aria2 from Homebrew and
-fetching ffmpeg. Run it once before the first build:
+Sidecars are **not** committed (`.gitignore`). Provision before first `tauri build`:
 
 ```bash
 ./scripts/provision-sidecars.sh
 ```
 
-This places the binaries with the correct target-triple suffix into
-`src-tauri/binaries/` (`aria2c-<arch>-apple-darwin`, `ffmpeg-<arch>-apple-darwin`).
-It is idempotent — re-running skips binaries that are already present.
-
-> Prerequisites for the script: `brew install aria2 ffmpeg yt-dlp`. The release
-> CI (`release.yml`) runs the same script automatically on both architectures.
-
-### 2. Compilation
+Copies `aria2c` from Homebrew and `ffmpeg` (Homebrew on arm64, evermeet.cx static on Intel) into `src-tauri/binaries/` as `aria2c-<triple>` and `ffmpeg-<triple>`. Idempotent.
 
 ```bash
-# Install frontend dependencies
 npm install
-
-# Initialize development environment
-npm run tauri dev
-
-# Compile production binary (.app / .dmg)
-npm run tauri build
+npm run tauri dev      # development
+npm run tauri build    # .app / .dmg (see release.yml for signed builds)
 ```
 
-### 3. Browser extension + wake
+### Browser extension
 
-1. Load unpacked `extension/` in Chrome (`chrome://extensions` → Developer mode).
-2. Open Falcon DM → **Settings → Approve extension** when the pair request appears (no silent first-wins).
-3. YouTube downloads require system `yt-dlp` (`brew install yt-dlp`). aria2/ffmpeg are bundled sidecars; yt-dlp is not.
-4. **Deep link wake:** `falcondm://wake` only (production `.app`). Download enqueue via deep-link query is disabled — secrets must not appear in URLs; extension uses wake → HTTP API. `tauri dev` often does not register the scheme.
+1. Chrome/Edge → `chrome://extensions` → **Load unpacked** → `extension/`
+2. Open Falcon DM → **Settings → Approve extension** when pair request appears
+3. YouTube: install `yt-dlp`; optional custom binary path in Settings
+4. **Wake deep link:** `falcondm://wake` only (no download params — avoids token-in-URL leaks). Extension wakes app then uses HTTP API. `tauri dev` may not register the URL scheme.
 
-## Development & Contributing
+## Development & contributing
 
-For local development, linting, testing, and contribution guidelines see
-[CONTRIBUTING.md](CONTRIBUTING.md). Quick reference:
+Details: [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md) (no public issues for vulns).
 
 ```bash
 # Frontend
-npm run lint            # ESLint (--max-warnings 0)
-npm run format:check    # Prettier
-npm run test            # Vitest (46 tests)
-npm run build           # tsc + vite build
+npm run lint && npm run format:check && npm run test && npm run build
 
-# Backend (in src-tauri/)
+# Backend (src-tauri/)
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test              # 29 tests
+cargo test
 ```
 
-Supply-chain checks: `cargo deny check` (Rust advisories/licenses) and
-`npm audit --omit=dev --audit-level=high` run in CI on every push.
+CI on `main` (protected branch) runs: Frontend lint/test/build, Rust fmt/clippy/test/build on macOS arm64, and `cargo deny` supply-chain audit. Intel builds are validated in the **Release** workflow (`release.yml`).
 
-To report a security issue, see [SECURITY.md](SECURITY.md) — **do not open a
-public issue** for vulnerabilities.
+## Security posture
 
-## Security Posture
-
-- **Network Boundary:** The Axum IPC server validates preflight `OPTIONS` requests and enforces `Access-Control-Allow-Private-Network`, mitigating cross-origin threats. Extension pairing requires explicit user approval; private/loopback download URLs are blocked.
-- **Process Isolation:** The application executes within Tauri's security sandbox. Shell execution is explicitly bounded to the defined sidecars (`aria2c`, `ffmpeg`); arbitrary command execution is disabled by design. aria2 port reclaim only kills Falcon's own PID file.
-- **Data Governance:** No telemetry. No external analytics. All state and network operations remain strictly local. Completed-download cookies are wiped on startup.
+- **Extension trust:** No silent auto-pair; user must approve extension ID in Settings. API token is UUID; legacy default token rejected.
+- **Network boundary:** Download URLs validated (no `file://`, loopback, or private IP SSRF). Local API binds `127.0.0.1` only.
+- **Deep links:** `falcondm://wake` only — enqueue happens over authenticated HTTP, not query strings.
+- **Process isolation:** Shell use limited to declared sidecars (`aria2c`, `ffmpeg`, `yt-dlp`). aria2 PID reclaim only touches Falcon's own `aria2.pid`.
+- **Data:** No telemetry. Completed-download cookie fields cleared after success.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
