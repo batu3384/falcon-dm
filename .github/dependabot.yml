@@ -1,5 +1,4 @@
-# ponytail: keep dependencies current. Weekly PRs for npm and cargo; security
-# advisories get prioritized automatically by Dependabot.
+# ponytail: security advisories only — no automatic version-update PRs (main-only branch policy).
 version: 2
 updates:
   - package-ecosystem: "npm"
@@ -7,17 +6,18 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     labels: ["dependencies", "frontend"]
   - package-ecosystem: "cargo"
     directory: "/src-tauri"
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     labels: ["dependencies", "backend"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "monthly"
+    open-pull-requests-limit: 0
     labels: ["dependencies", "ci"]
