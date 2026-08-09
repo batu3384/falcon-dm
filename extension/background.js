@@ -5,9 +5,32 @@ const WAKE_URL = "falcondm://wake";
 const MEDIA_URLS = new Map();
 const MEDIA_META = new Map();
 let pairInFlight = null;
+const REQUEST_TIMEOUT_MS = 10000;
+const HEALTH_TIMEOUT_MS = 4000;
+const PAIR_POLL_ATTEMPTS = 15;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function fetchWithTimeout(url, options, timeoutMs, label) {
+  const controller = new AbortController();
+  return withTimeout(
+    fetch(url, { ...options, signal: controller.signal }),
+    timeoutMs,
+    label
+  ).catch((error) => {
+    controller.abort();
+    throw error;
+  });
 }
 
 // Connection / UI state shared with popup + toolbar badge.
@@ -96,7 +119,12 @@ async function getToken() {
 
 async function appHealthy() {
   try {
-    const r = await fetch(`${FALCON_API}/api/health`, { method: "GET" });
+    const r = await fetchWithTimeout(
+      `${FALCON_API}/api/health`,
+      { method: "GET" },
+      HEALTH_TIMEOUT_MS,
+      "Falcon health check"
+    );
     return r.ok;
   } catch {
     return false;
@@ -156,15 +184,20 @@ function getNativePairProof(challenge, timeoutMs = 3000) {
 async function requestPair() {
   const challenge = newPairChallenge();
   const proof = await getNativePairProof(challenge);
-  return fetch(`${FALCON_API}/api/pair`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      extension_id: chrome.runtime.id,
-      challenge,
-      proof,
-    }),
-  });
+  return fetchWithTimeout(
+    `${FALCON_API}/api/pair`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        extension_id: chrome.runtime.id,
+        challenge,
+        proof,
+      }),
+    },
+    REQUEST_TIMEOUT_MS,
+    "Pair request"
+  );
 }
 
 function msg(key, fallback) {
@@ -195,7 +228,7 @@ async function waitForHealthy(timeoutMs = 25000) {
 /** Ensure Falcon is running — wake + poll like IDM. */
 async function ensureAppRunning() {
   if (await appHealthy()) return true;
-  await wakeFalcon();
+  await withTimeout(wakeFalcon(), 5000, "Falcon wake");
   return waitForHealthy(25000);
 }
 
@@ -207,14 +240,19 @@ async function ensurePaired(force = false) {
         const existing = await getToken();
         if (existing && (await appHealthy())) {
           try {
-            const r = await fetch(`${FALCON_API}/api/ping`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "X-Falcon-Token": existing,
+            const r = await fetchWithTimeout(
+              `${FALCON_API}/api/ping`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Falcon-Token": existing,
+                },
+                body: "{}",
               },
-              body: "{}",
-            });
+              REQUEST_TIMEOUT_MS,
+              "Falcon ping"
+            );
             if (r.ok) {
               setState("connected");
               return existing;
@@ -224,7 +262,7 @@ async function ensurePaired(force = false) {
       }
 
       if (!(await appHealthy())) {
-        await wakeFalcon();
+        await withTimeout(wakeFalcon(), 5000, "Falcon wake");
         if (!(await waitForHealthy(25000))) {
           throw new Error(
             msg("errorWaking", "Falcon DM başlatılamadı — uygulamayı kurun veya manuel açın")
@@ -288,7 +326,7 @@ async function ensurePaired(force = false) {
           "Approve this extension in Falcon DM Settings, then try again"
         )
       );
-      for (let i = 0; i < 90; i++) {
+      for (let i = 0; i < PAIR_POLL_ATTEMPTS; i++) {
         await new Promise((res) => setTimeout(res, 2000));
         let r2;
         try {
@@ -344,14 +382,19 @@ async function postFalcon(path, body) {
 
   let response;
   try {
-    response = await fetch(`${FALCON_API}${path}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Falcon-Token": token,
+    response = await fetchWithTimeout(
+      `${FALCON_API}${path}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Falcon-Token": token,
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+      REQUEST_TIMEOUT_MS,
+      `Falcon ${path}`
+    );
   } catch {
     setState("offline");
     throw new Error(msg("errorAppOffline", "Falcon DM is not running — open the desktop app"));
@@ -360,14 +403,19 @@ async function postFalcon(path, body) {
   if (response.status === 401) {
     token = await ensurePaired(true);
     try {
-      response = await fetch(`${FALCON_API}${path}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Falcon-Token": token,
+      response = await fetchWithTimeout(
+        `${FALCON_API}${path}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Falcon-Token": token,
+          },
+          body: JSON.stringify(body),
         },
-        body: JSON.stringify(body),
-      });
+        REQUEST_TIMEOUT_MS,
+        `Falcon ${path} retry`
+      );
     } catch {
       setState("offline");
       throw new Error(msg("errorAppOffline", "Falcon DM is not running — open the desktop app"));
@@ -397,13 +445,30 @@ async function postFalcon(path, body) {
   return data;
 }
 
+async function getCookiesHeader(url, fallbackUrl = "") {
+  for (const target of [url, fallbackUrl]) {
+    if (!target) continue;
+    try {
+      const cookies = await withTimeout(
+        chrome.cookies.getAll({ url: target }),
+        3000,
+        "Cookie lookup"
+      );
+      if (cookies.length) {
+        return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+      }
+    } catch (_) {}
+  }
+  return "";
+}
+
 /** Deep-link download removed — token-in-URL leaks secrets. Cold path = wake + HTTP only. */
 async function sendToFalcon(path, body) {
   if (await appHealthy()) {
     return postFalcon(path, body);
   }
 
-  await wakeFalcon();
+  await withTimeout(wakeFalcon(), 5000, "Falcon wake");
   if (await waitForHealthy(30000)) {
     return postFalcon(path, body);
   }
@@ -462,6 +527,13 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   INJECTED.delete(tabId);
 });
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!changeInfo.url) return;
+  MEDIA_URLS.delete(tabId);
+  MEDIA_META.delete(tabId);
+  INJECTED.delete(tabId);
+});
+
 function headerValue(headers, name) {
   const h = (headers || []).find((x) => x.name.toLowerCase() === name.toLowerCase());
   return h ? h.value : "";
@@ -509,11 +581,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   }
   (async () => {
     try {
-      let cookiesHeader = "";
-      try {
-        const cookies = await chrome.cookies.getAll({ url: item.url });
-        cookiesHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-      } catch (_) {}
+      const cookiesHeader = await getCookiesHeader(item.url);
 
       const filename =
         item.filename ||
@@ -544,11 +612,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (!url) return;
     const filename = url.split("/").pop().split("?")[0] || "download";
     try {
-      let cookiesHeader = "";
-      try {
-        const cookies = await chrome.cookies.getAll({ url });
-        cookiesHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-      } catch (_) {}
+      const cookiesHeader = await getCookiesHeader(url);
       await sendToFalcon("/api/add", {
         url,
         filename,
@@ -645,12 +709,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return true;
     }
     (async () => {
-      let cookies = "";
       try {
-        const list = await chrome.cookies.getAll({ url: rawUrl });
-        cookies = (list || []).map((c) => `${c.name}=${c.value}`).join("; ");
-      } catch (_) {}
-      try {
+        const cookies = await getCookiesHeader(rawUrl);
         await sendToFalcon("/api/add", {
           url: rawUrl,
           filename: rawUrl.split("/").pop().split("?")[0] || "download",
@@ -681,18 +741,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       });
     }
 
-    const finish = (extraUrls) => {
-      chrome.cookies.getAll({ url: pageUrl }, (cookies) => {
-        const cookieString = (cookies || []).map((c) => `${c.name}=${c.value}`).join("; ");
-        const merged = [...new Set([...(urls || []), ...(extraUrls || [])])];
-        sendResponse({
-          url: merged[merged.length - 1] || null,
-          urls: merged,
-          metaMap,
-          title,
-          cookies: cookieString,
-          userAgent: navigator.userAgent,
-        });
+    const finish = async (extraUrls) => {
+      const cookieString = await getCookiesHeader(pageUrl);
+      const merged = [...new Set([...(urls || []), ...(extraUrls || [])])];
+      sendResponse({
+        url: merged[merged.length - 1] || null,
+        urls: merged,
+        metaMap,
+        title,
+        cookies: cookieString,
+        userAgent: navigator.userAgent,
       });
     };
 
@@ -805,25 +863,41 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "batch_download") {
     const items = (request.items || []).slice(0, 20);
     (async () => {
-      let cookies = request.cookies || "";
-      if (!cookies && request.page_url) {
-        try {
-          const list = await chrome.cookies.getAll({ url: request.page_url });
-          cookies = (list || []).map((c) => `${c.name}=${c.value}`).join("; ");
-        } catch (_) {}
-      }
-      await Promise.all(
-        items.map((it) =>
-          sendToFalcon("/api/add", {
-            url: it.url,
-            filename: it.filename || it.url.split("/").pop().split("?")[0] || "download",
-            referrer: request.page_url || "",
-            user_agent: navigator.userAgent,
-            cookies,
-          })
-        )
+      const settled = await Promise.allSettled(
+        items.map(async (it) => {
+          try {
+            const cookies = await getCookiesHeader(it.url, request.page_url);
+            const data = await sendToFalcon("/api/add", {
+              url: it.url,
+              filename: it.filename || it.url.split("/").pop().split("?")[0] || "download",
+              referrer: request.page_url || "",
+              user_agent: navigator.userAgent,
+              cookies,
+            });
+            return {
+              url: it.url,
+              ok: true,
+              id: data?.id || data?.download?.id,
+            };
+          } catch (error) {
+            return {
+              url: it.url,
+              ok: false,
+              error: error?.message || String(error),
+            };
+          }
+        })
       );
-      sendResponse({ success: true, count: items.length });
+      const results = settled.map((result, index) =>
+        result.status === "fulfilled"
+          ? result.value
+          : { url: items[index].url, ok: false, error: result.reason?.message || String(result.reason) }
+      );
+      sendResponse({
+        success: results.every((result) => result.ok),
+        count: items.length,
+        results,
+      });
     })().catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
   }

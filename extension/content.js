@@ -410,7 +410,7 @@
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.checked = true;
-      checks.push({ cb, it });
+      checks.push({ cb, it, row });
       const span = document.createElement("span");
       span.textContent = it.filename;
       span.title = it.url;
@@ -439,8 +439,26 @@
           page_url: location.href,
           cookies: "",
         });
-        if (!response || !response.success) throw new Error((response && response.error) || "failed");
-        host.remove();
+        const results = response && Array.isArray(response.results) ? response.results : [];
+        const failed = results.filter((result) => !result.ok);
+        if (!response || (!response.success && !results.length)) {
+          throw new Error((response && response.error) || "failed");
+        }
+        checks.forEach((check) => {
+          const result = results.find((item) => item.url === check.it.url);
+          if (result?.ok) {
+            check.cb.checked = false;
+            check.cb.disabled = true;
+            check.row.style.opacity = "0.5";
+          }
+        });
+        if (!failed.length) {
+          host.remove();
+          return;
+        }
+        info.textContent = `${failed.length} ${msg("grabberFailed", "downloads failed")} — ${msg("grabberRetry", "retry failed items")}`;
+        info.style.color = "#f87171";
+        send.disabled = false;
       } catch (e) {
         info.textContent = e.message || "failed";
         info.style.color = "#f87171";

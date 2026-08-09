@@ -10,6 +10,7 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(path.join(__dirname, "media-utils.js"), "utf8");
 const background = readFileSync(path.join(__dirname, "background.js"), "utf8");
+const content = readFileSync(path.join(__dirname, "content.js"), "utf8");
 const manifest = JSON.parse(readFileSync(path.join(__dirname, "manifest.json"), "utf8"));
 const sandbox = { console, globalThis: {} };
 sandbox.globalThis = sandbox;
@@ -29,6 +30,20 @@ const norm = FM.normalizeMediaUrl("https://googlevideo.com/videoplayback?id=abc&
 assert(!norm.includes("range="), "strip range");
 assert(norm.includes("id=abc"), "keep id");
 assert(manifest.permissions.includes("nativeMessaging"), "native messaging permission");
+assert(
+  manifest.host_permissions.includes("http://127.0.0.1:14201/*"),
+  "localhost host permission"
+);
 assert(background.includes("sendNativeMessage"), "native pairing proof");
+assert(background.includes("withTimeout"), "bounded request timeout");
+assert(background.includes('suggest({ cancel: false })'), "download fallback");
+assert(background.includes("Promise.allSettled"), "batch partial results");
+assert(background.includes("getCookiesHeader"), "target cookie lookup");
+assert(background.includes("results"), "batch result contract");
+assert(background.includes("format"), "YouTube format field");
+assert(background.includes("chrome.tabs.onUpdated"), "tab navigation cleanup");
+assert(content.includes("pageUrl.split"), "YouTube watch URL");
+assert(content.includes("Math.min(Math.max(h, 144), 2160)"), "bounded YouTube height");
+assert(content.includes("googlevideo"), "YouTube CDN source guard");
 
 console.log("extension smoke ok");

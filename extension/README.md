@@ -6,6 +6,8 @@ Load unpacked from this folder in Chrome/Edge.
 
 - Pair: extension first asks registered `com.falcondm.native` host for a single-use proof, then calls `POST /api/pair` → `200` + token, or `202` pending (approve in Falcon Settings). Extension polls until approved.
 - Downloads: `POST /api/intercept` or `/api/add` with `X-Falcon-Token`.
+- Requests use bounded timeouts. If Falcon cannot be reached, browser downloads stay native.
+- Batch enqueue returns per-item `results`; successful items are removed from retry selection while failed items remain retryable.
 - YouTube quality: send JSON field `format` (yt-dlp `-f` selector). Do **not** put format in the URL. Legacy `#falconfmt=` still accepted server-side as internal storage.
 - Origin must be `chrome-extension://<id>` and that id must be allowlisted after Settings approve.
 - Native messaging host must be installed for Chrome and Edge. Missing host, timeout, or app rejection keeps native browser downloads intact.
