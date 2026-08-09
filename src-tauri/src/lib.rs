@@ -1,5 +1,6 @@
 pub mod download;
 pub mod log_buffer;
+pub mod native_messaging;
 pub mod settings;
 pub mod storage;
 pub mod util;
@@ -8,6 +9,7 @@ use chrono::Utc;
 use download::engine::Aria2Engine;
 use download::queue::{QueueManager, ScheduleOptions};
 use futures::FutureExt;
+use native_messaging::{PairProofStore, PairRequest};
 use serde::{Deserialize, Serialize};
 use settings::Settings;
 use storage::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
@@ -54,6 +56,17 @@ fn token_matches(provided: &str, expected: &str) -> bool {
     p.ct_eq(e).into()
 }
 
+fn extension_id_from_origin(origin: &str) -> Option<&str> {
+    origin
+        .strip_prefix("chrome-extension://")
+        .or_else(|| origin.strip_prefix("moz-extension://"))
+        .or_else(|| origin.strip_prefix("edge-extension://"))
+}
+
+fn is_valid_extension_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
 #[derive(Clone, Serialize)]
 struct ProgressPayload {
     id: i64,
@@ -72,6 +85,7 @@ pub struct AppState {
     pub rate_bucket: Arc<Mutex<VecDeque<Instant>>>,
     /// Extension ID waiting for user approval (pair consent).
     pub pending_pair_id: Arc<Mutex<Option<String>>>,
+    pub pair_proofs: Arc<PairProofStore>,
 }
 
 fn check_rate_limit(state: &AppState) -> Result<(), StatusCode> {
@@ -258,18 +272,12 @@ fn check_api_token(
 
     // Origin required — blocks bare curl with stolen token (must forge extension Origin + allowlist).
     let origin = origin.filter(|s| !s.is_empty()).ok_or(StatusCode::FORBIDDEN)?;
-    let ext_id = origin
-        .strip_prefix("chrome-extension://")
-        .or_else(|| origin.strip_prefix("moz-extension://"))
-        .or_else(|| origin.strip_prefix("edge-extension://"))
-        .ok_or(StatusCode::FORBIDDEN)?;
-    if ext_id.is_empty() {
+    let ext_id = extension_id_from_origin(origin).ok_or(StatusCode::FORBIDDEN)?;
+    if !is_valid_extension_id(ext_id) {
         return Err(StatusCode::FORBIDDEN);
     }
     let settings = Settings::load(&app_data_dir());
-    if settings.allowed_extension_ids.is_empty()
-        || !settings.allowed_extension_ids.iter().any(|x| x == ext_id)
-    {
+    if !settings.allowed_extension_ids.iter().any(|x| x == ext_id) {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(())
@@ -816,18 +824,24 @@ async fn handle_health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true, "service": "falcon-dm" }))
 }
 
-/// Pair browser extension ↔ desktop. Requires prior user approval (no first-wins auto-pin).
-async fn handle_pair(AxumState(app): AxumState<AppHandle>, headers: HeaderMap) -> Response {
+/// Pair browser extension ↔ desktop. Requires native proof + user approval.
+async fn handle_pair(
+    AxumState(app): AxumState<AppHandle>,
+    headers: HeaderMap,
+    Json(payload): Json<PairRequest>,
+) -> Response {
     let origin = headers.get("origin").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let ext_id = origin
-        .strip_prefix("chrome-extension://")
-        .or_else(|| origin.strip_prefix("moz-extension://"))
-        .or_else(|| origin.strip_prefix("edge-extension://"));
-    let Some(id) = ext_id.filter(|s| !s.is_empty()) else {
+    let Some(id) = extension_id_from_origin(origin) else {
         return StatusCode::FORBIDDEN.into_response();
     };
+    if id != payload.extension_id || !is_valid_extension_id(id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
 
     let state = app.state::<AppState>();
+    if !state.pair_proofs.consume(&payload.challenge, id, &payload.proof) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let token = lock_or_recover(&state.api_token).clone();
     if token.trim().is_empty() || token == LEGACY_DEFAULT_API_TOKEN {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -971,6 +985,7 @@ pub fn run() {
         api_token: Arc::new(Mutex::new(settings.api_token.clone())),
         rate_bucket: Arc::new(Mutex::new(VecDeque::new())),
         pending_pair_id: Arc::new(Mutex::new(None)),
+        pair_proofs: Arc::new(PairProofStore::default()),
     };
 
     let app = tauri::Builder::default()
@@ -983,6 +998,12 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let state = app_handle.state::<AppState>();
             let data_dir = app_data_dir();
+
+            if let Err(error) =
+                native_messaging::start_pairing_server(&data_dir, state.pair_proofs.clone())
+            {
+                log::error!("failed to start native pairing server: {error}");
+            }
 
             #[cfg(desktop)]
             {
@@ -1413,4 +1434,20 @@ pub fn run() {
             log::info!("Shutting down Falcon DM, stopped aria2 engine.");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_origin_must_contain_a_valid_id() {
+        assert_eq!(
+            extension_id_from_origin("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert!(extension_id_from_origin("https://example.com").is_none());
+        assert!(!is_valid_extension_id("short"));
+        assert!(!is_valid_extension_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
+    }
 }

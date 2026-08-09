@@ -9,6 +9,8 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(path.join(__dirname, "media-utils.js"), "utf8");
+const background = readFileSync(path.join(__dirname, "background.js"), "utf8");
+const manifest = JSON.parse(readFileSync(path.join(__dirname, "manifest.json"), "utf8"));
 const sandbox = { console, globalThis: {} };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
@@ -26,5 +28,7 @@ assert(FM.isCapturableMedia("https://x.com/a.m3u8", "application/vnd.apple.mpegu
 const norm = FM.normalizeMediaUrl("https://googlevideo.com/videoplayback?id=abc&range=0-100&other=1");
 assert(!norm.includes("range="), "strip range");
 assert(norm.includes("id=abc"), "keep id");
+assert(manifest.permissions.includes("nativeMessaging"), "native messaging permission");
+assert(background.includes("sendNativeMessage"), "native pairing proof");
 
 console.log("extension smoke ok");

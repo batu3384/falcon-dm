@@ -103,6 +103,70 @@ async function appHealthy() {
   }
 }
 
+function newPairChallenge() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function getNativePairProof(challenge, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    if (!chrome.runtime.sendNativeMessage) {
+      reject(new Error("Native messaging is unavailable"));
+      return;
+    }
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error("Native pairing timed out"));
+      }
+    }, timeoutMs);
+    try {
+      chrome.runtime.sendNativeMessage(
+        "com.falcondm.native",
+        { extension_id: chrome.runtime.id, challenge },
+        (response) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          const runtimeError = chrome.runtime.lastError;
+          if (runtimeError) {
+            reject(new Error(runtimeError.message));
+            return;
+          }
+          if (!response || !response.ok || !response.proof) {
+            reject(new Error(response?.error || "Native pairing failed"));
+            return;
+          }
+          resolve(response.proof);
+        },
+      );
+    } catch (error) {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+    }
+  });
+}
+
+async function requestPair() {
+  const challenge = newPairChallenge();
+  const proof = await getNativePairProof(challenge);
+  return fetch(`${FALCON_API}/api/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      extension_id: chrome.runtime.id,
+      challenge,
+      proof,
+    }),
+  });
+}
+
 function msg(key, fallback) {
   return chrome.i18n.getMessage(key) || fallback;
 }
@@ -168,11 +232,7 @@ async function ensurePaired(force = false) {
         }
       }
 
-      const r = await fetch(`${FALCON_API}/api/pair`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
+      const r = await requestPair();
       if (r.status === 403) {
         throw new Error(
           msg(
@@ -200,11 +260,7 @@ async function ensurePaired(force = false) {
       // Cold-start 503 race: short backoff + retry before giving up.
       for (let i = 0; first.retry && i < 5; i++) {
         await sleep(500);
-        const rr = await fetch(`${FALCON_API}/api/pair`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
+        const rr = await requestPair();
         if (rr.status === 403) {
           throw new Error(
             msg(
@@ -236,11 +292,7 @@ async function ensurePaired(force = false) {
         await new Promise((res) => setTimeout(res, 2000));
         let r2;
         try {
-          r2 = await fetch(`${FALCON_API}/api/pair`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: "{}",
-          });
+          r2 = await requestPair();
         } catch {
           continue;
         }

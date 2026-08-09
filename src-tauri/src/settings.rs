@@ -54,7 +54,7 @@ pub struct Settings {
     pub schedule_start: Option<String>,
     #[serde(default)]
     pub schedule_stop: Option<String>,
-    /// Chrome/Firefox extension IDs allowed to call the local API (empty = any extension origin, token still required).
+    /// Chrome/Edge extension IDs allowed to call the local API.
     #[serde(default)]
     pub allowed_extension_ids: Vec<String>,
     /// Optional absolute path to yt-dlp binary (empty = PATH + common locations).
