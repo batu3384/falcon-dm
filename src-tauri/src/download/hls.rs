@@ -1,9 +1,9 @@
 use crate::storage::{models::DownloadStatus, Database};
-use crate::util::sanitize_header_value;
+use crate::util::{sanitize_header_value, validate_fetch_url};
 use futures::stream::{self, StreamExt};
 use m3u8_rs::Playlist;
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, REFERER, USER_AGENT};
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -33,6 +33,11 @@ pub struct HlsHeaders {
     pub user_agent: Option<String>,
 }
 
+const MAX_PLAYLIST_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SEGMENT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SEGMENTS: usize = 10_000;
+const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 #[derive(Clone, serde::Serialize)]
 struct HlsProgressEvent {
     id: i64,
@@ -45,12 +50,6 @@ struct HlsProgressEvent {
 
 fn build_client(headers: &HlsHeaders) -> Result<Client, String> {
     let mut map = HeaderMap::new();
-    if let Some(ref c) = headers.cookies {
-        let v = sanitize_header_value(c);
-        if !v.is_empty() {
-            map.insert(COOKIE, HeaderValue::from_str(&v).map_err(|e| e.to_string())?);
-        }
-    }
     if let Some(ref r) = headers.referrer {
         let v = sanitize_header_value(r);
         if !v.is_empty() {
@@ -63,7 +62,71 @@ fn build_client(headers: &HlsHeaders) -> Result<Client, String> {
             map.insert(USER_AGENT, HeaderValue::from_str(&v).map_err(|e| e.to_string())?);
         }
     }
-    Client::builder().default_headers(map).build().map_err(|e| e.to_string())
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if validate_fetch_url(attempt.url().as_str()).is_ok() {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .default_headers(map)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+fn cookie_header_for_target(
+    source: &Url,
+    target: &Url,
+    cookies: Option<&str>,
+) -> Option<HeaderValue> {
+    let source_host = source.host_str()?.to_ascii_lowercase();
+    let target_host = target.host_str()?.to_ascii_lowercase();
+    if source_host != target_host {
+        return None;
+    }
+    let value = sanitize_header_value(cookies?.trim());
+    if value.is_empty() {
+        return None;
+    }
+    HeaderValue::from_str(&value).ok()
+}
+
+fn request_with_headers(
+    client: &Client,
+    source: &Url,
+    target: &Url,
+    headers: &HlsHeaders,
+) -> RequestBuilder {
+    let request = client.get(target.clone());
+    match cookie_header_for_target(source, target, headers.cookies.as_deref()) {
+        Some(cookie) => request.header(COOKIE, cookie),
+        None => request,
+    }
+}
+
+async fn read_bounded_response(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status().as_u16()));
+    }
+    if response.content_length().is_some_and(|size| size > max_bytes as u64) {
+        return Err(format!("HTTP response exceeds {max_bytes} bytes"));
+    }
+
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("HTTP response exceeds {max_bytes} bytes"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn pick_best_variant(variants: &[m3u8_rs::VariantStream]) -> Option<&m3u8_rs::VariantStream> {
@@ -80,10 +143,13 @@ pub async fn process_hls_stream(
     db: Option<Database>,
 ) -> Result<(), String> {
     let client = build_client(&headers)?;
-    let base_url = Url::parse(url).map_err(|e| e.to_string())?;
+    let base_url = validate_fetch_url(url)?;
 
-    let res = client.get(url).send().await.map_err(|e| e.to_string())?;
-    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+    let res = request_with_headers(&client, &base_url, &base_url, &headers)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let bytes = read_bounded_response(res, MAX_PLAYLIST_BYTES).await?;
 
     let playlist = match m3u8_rs::parse_playlist_res(&bytes) {
         Ok(p) => p,
@@ -105,9 +171,14 @@ pub async fn process_hls_stream(
             if variant.bandwidth > 0 {
                 estimated_total_bytes = variant.bandwidth.checked_div(8);
             }
-            let variant_url = base_url.join(&variant.uri).map_err(|e| e.to_string())?;
-            let m_res = client.get(variant_url.clone()).send().await.map_err(|e| e.to_string())?;
-            let m_bytes = m_res.bytes().await.map_err(|e| e.to_string())?;
+            let variant_url = validate_fetch_url(
+                base_url.join(&variant.uri).map_err(|e| e.to_string())?.as_str(),
+            )?;
+            let m_res = request_with_headers(&client, &base_url, &variant_url, &headers)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let m_bytes = read_bounded_response(m_res, MAX_PLAYLIST_BYTES).await?;
             match m3u8_rs::parse_playlist_res(&m_bytes) {
                 Ok(Playlist::MediaPlaylist(m_pl)) => {
                     // Refine estimate: bandwidth(bps)/8 × total_duration(s).
@@ -116,7 +187,9 @@ pub async fn process_hls_stream(
                         estimated_total_bytes = Some((bw as f64 * total_dur) as u64);
                     }
                     for seg in m_pl.segments {
-                        segment_urls.push(variant_url.join(&seg.uri).map_err(|e| e.to_string())?);
+                        segment_urls.push(validate_fetch_url(
+                            variant_url.join(&seg.uri).map_err(|e| e.to_string())?.as_str(),
+                        )?);
                     }
                 }
                 _ => return Err("Expected MediaPlaylist in variant".into()),
@@ -124,13 +197,18 @@ pub async fn process_hls_stream(
         }
         Playlist::MediaPlaylist(pl) => {
             for seg in pl.segments {
-                segment_urls.push(base_url.join(&seg.uri).map_err(|e| e.to_string())?);
+                segment_urls.push(validate_fetch_url(
+                    base_url.join(&seg.uri).map_err(|e| e.to_string())?.as_str(),
+                )?);
             }
         }
     }
 
     if segment_urls.is_empty() {
         return Err("No segments found".into());
+    }
+    if segment_urls.len() > MAX_SEGMENTS {
+        return Err(format!("Playlist contains too many segments: {}", segment_urls.len()));
     }
 
     let total_segments = segment_urls.len() as u64;
@@ -168,6 +246,8 @@ pub async fn process_hls_stream(
             let completed_segs = completed_segs.clone();
             let total_size_estimate = total_size_estimate.clone();
             let app_handle = app_handle.clone();
+            let source_url = base_url.clone();
+            let headers = headers.clone();
             async move {
                 if *rx_clone.borrow() {
                     return Err("Cancelled".to_string());
@@ -191,7 +271,10 @@ pub async fn process_hls_stream(
                     if *rx_clone.borrow() {
                         return Err("Cancelled".to_string());
                     }
-                    match client.get(seg_url.as_str()).send().await {
+                    match request_with_headers(&client, &source_url, &seg_url, &headers)
+                        .send()
+                        .await
+                    {
                         Ok(resp) => {
                             let status = resp.status();
                             if status.is_server_error() || status.as_u16() == 429 {
@@ -208,9 +291,9 @@ pub async fn process_hls_stream(
                                 // 4xx (except 429) — permanent, don't retry.
                                 return Err(format!("segment HTTP {}", status.as_u16()));
                             } else {
-                                match resp.bytes().await {
+                                match read_bounded_response(resp, MAX_SEGMENT_BYTES).await {
                                     Ok(b) => {
-                                        bytes = b.to_vec();
+                                        bytes = b;
                                         last_err = None;
                                         break;
                                     }
@@ -244,8 +327,12 @@ pub async fn process_hls_stream(
                 }
 
                 let seg_len = bytes.len() as u64;
-                let bytes_so_far =
-                    { downloaded_bytes.fetch_add(seg_len, Ordering::Relaxed) + seg_len };
+                let previous = downloaded_bytes
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                        current.checked_add(seg_len).filter(|next| *next <= MAX_OUTPUT_BYTES)
+                    })
+                    .map_err(|_| "HLS output exceeds maximum size".to_string())?;
+                let bytes_so_far = previous + seg_len;
                 let done = completed_segs.fetch_add(1, Ordering::Relaxed) + 1;
                 // Progressive total estimate: refine from observed bytes.
                 // average_segment_size = downloaded / done; total ≈ avg × total_segments.
@@ -368,5 +455,14 @@ mod tests {
     fn test_pick_best_variant_bandwidth() {
         // Smoke: empty → None
         assert!(pick_best_variant(&[]).is_none());
+    }
+
+    #[test]
+    fn cookies_are_not_sent_to_unrelated_segment_host() {
+        let source = Url::parse("https://media.example.com/master.m3u8").unwrap();
+        let same_host = Url::parse("https://media.example.com/seg.ts").unwrap();
+        let other_host = Url::parse("https://cdn.example.net/seg.ts").unwrap();
+        assert!(cookie_header_for_target(&source, &same_host, Some("sid=abc")).is_some());
+        assert!(cookie_header_for_target(&source, &other_host, Some("sid=abc")).is_none());
     }
 }

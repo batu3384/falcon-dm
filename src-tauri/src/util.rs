@@ -109,6 +109,16 @@ pub fn validate_download_url(url: &str) -> Result<(), String> {
     }
 }
 
+/// Validate an HTTP(S) URL before every HLS network hop.
+pub fn validate_fetch_url(raw: &str) -> Result<url::Url, String> {
+    let parsed = url::Url::parse(raw.trim()).map_err(|e| format!("Invalid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("Unsupported fetch URL scheme: {}", parsed.scheme()));
+    }
+    validate_download_url(parsed.as_str())?;
+    Ok(parsed)
+}
+
 /// Reject path traversal and absolute paths in filenames.
 pub fn sanitize_filename(name: &str) -> String {
     let name = name.trim().replace('\\', "/");
@@ -519,6 +529,18 @@ mod tests {
         assert!(validate_download_url("http://127.0.0.1/secret").is_err());
         assert!(validate_download_url("http://localhost/x").is_err());
         assert!(validate_download_url("http://192.168.1.1/a").is_err());
+    }
+
+    #[test]
+    fn validate_fetch_url_rejects_private_literal_and_unsupported_scheme() {
+        assert!(validate_fetch_url("http://127.0.0.1/live.m3u8").is_err());
+        assert!(validate_fetch_url("http://[::1]/live.m3u8").is_err());
+        assert!(validate_fetch_url("file:///tmp/live.m3u8").is_err());
+    }
+
+    #[test]
+    fn validate_fetch_url_accepts_public_literal_url() {
+        assert!(validate_fetch_url("https://8.8.8.8/live.m3u8").is_ok());
     }
 
     #[test]
