@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { downloadDir } from '@tauri-apps/api/path';
 import { useTranslation } from 'react-i18next';
 import { X, ChevronRight, Loader2, UploadCloud } from 'lucide-react';
@@ -13,6 +13,15 @@ function parseUrlsFromText(text: string): string[] {
     .split(/[\n\r,;\s]+/)
     .map((s) => s.trim())
     .filter((s) => /^https?:\/\//i.test(s));
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !!parsed.hostname;
+  } catch {
+    return false;
+  }
 }
 
 interface NewDownloadModalProps {
@@ -31,7 +40,6 @@ export default function NewDownloadModal({
   const { t } = useTranslation();
   const showToast = useToastStore((s) => s.showToast);
   const panelRef = useRef<HTMLFormElement>(null);
-  useModalA11y(panelRef, onClose);
   const [url, setUrl] = useState(initialUrl || '');
   const [filename, setFilename] = useState('');
   const [savePath, setSavePath] = useState('');
@@ -42,6 +50,10 @@ export default function NewDownloadModal({
   const [submitting, setSubmitting] = useState(false);
   const [batchMode, setBatchMode] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const requestClose = useCallback(() => {
+    if (!submitting) onClose();
+  }, [onClose, submitting]);
+  useModalA11y(panelRef, requestClose);
 
   // ponytail: handle a dropped .txt/.csv — read it as text, parse out URLs, fill
   // the batch textarea and switch to batch mode automatically.
@@ -102,10 +114,10 @@ export default function NewDownloadModal({
         ? url
             .split(/[\n\s]+/)
             .map((u) => u.trim())
-            .filter((u) => /^https?:\/\//i.test(u))
+            .filter(Boolean)
         : [url.trim()];
 
-      if (urls.length === 0) {
+      if (urls.length === 0 || urls.some((candidate) => !isHttpUrl(candidate))) {
         showToast(
           'error',
           `${t('newDownloadModal.add_failed')}: ${t('newDownloadModal.url_invalid')}`,
@@ -140,7 +152,7 @@ export default function NewDownloadModal({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose} role="presentation">
+    <div className="modal-overlay" onClick={requestClose} role="presentation">
       <form
         ref={panelRef}
         className="modal-panel modal-md"
@@ -156,8 +168,9 @@ export default function NewDownloadModal({
           </h2>
           <button
             type="button"
-            onClick={onClose}
+            onClick={requestClose}
             className="icon-btn"
+            data-modal-cancel
             aria-label={t('newDownloadModal.cancel')}
           >
             <X size={18} />
@@ -319,7 +332,7 @@ export default function NewDownloadModal({
         </div>
 
         <div className="modal-foot">
-          <button type="button" className="btn-secondary" onClick={onClose}>
+          <button type="button" className="btn-secondary" data-modal-cancel onClick={requestClose}>
             {t('newDownloadModal.cancel')}
           </button>
           <button type="submit" className="btn-primary" disabled={submitting || !url.trim()}>

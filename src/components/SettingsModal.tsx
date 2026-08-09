@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
 import { X, Trash2, Plus } from 'lucide-react';
 import type { SettingsModel } from '../types';
 import { applyTheme } from '../types';
 import { useModalA11y } from '../hooks/useModalA11y';
+import { ConfirmDialog } from './ConfirmDialog';
 import { useToastStore } from '../store/toast';
 import { onPairRequest } from '../api/events';
 import * as api from '../api/commands';
@@ -17,9 +18,8 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
   const { t } = useTranslation();
   const showToast = useToastStore((s) => s.showToast);
   const panelRef = useRef<HTMLDivElement>(null);
-  useModalA11y(panelRef, onClose);
   const [activeTab, setActiveTab] = useState<'general' | 'network' | 'profiles'>('general');
-  const [settings, setSettings] = useState<SettingsModel>({
+  const [settings, setSettingsState] = useState<SettingsModel>({
     theme: 'system',
     default_download_path: '~/Downloads',
     max_concurrent_downloads: 3,
@@ -34,11 +34,29 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
   });
   const [saveError, setSaveError] = useState('');
   const [pendingPair, setPendingPair] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const dirtyRef = useRef(false);
+
+  const updateSettings = (next: SettingsModel | ((previous: SettingsModel) => SettingsModel)) => {
+    dirtyRef.current = true;
+    setSettingsState(next);
+  };
+  const setSettings = updateSettings;
+
+  const requestClose = useCallback(() => {
+    if (dirtyRef.current && !saving) setConfirmClose(true);
+    else onClose();
+  }, [onClose, saving]);
+
+  useModalA11y(panelRef, requestClose);
 
   useEffect(() => {
     api
       .getSettings()
-      .then(setSettings)
+      .then((loaded) => {
+        if (!dirtyRef.current) setSettingsState(loaded);
+      })
       .catch((e) => console.error('Failed to load settings:', e));
     api
       .getPendingPair()
@@ -56,7 +74,18 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
   }, []);
 
   const handleChange = (field: keyof SettingsModel, value: string | number | null) => {
-    setSettings((prev) => ({ ...prev, [field]: value }));
+    let nextValue = value;
+    if (field === 'max_concurrent_downloads') {
+      const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 1;
+      nextValue = Math.min(32, Math.max(1, numeric));
+    } else if (field === 'max_connections_per_server') {
+      const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 1;
+      nextValue = Math.min(16, Math.max(1, numeric));
+    } else if (field === 'speed_limit_kbps') {
+      const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+      nextValue = Math.min(1_048_576, Math.max(0, numeric));
+    }
+    updateSettings((prev) => ({ ...prev, [field]: nextValue }));
   };
 
   const handleBrowse = async () => {
@@ -85,7 +114,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
       await api.approveExtensionPair(pendingPair);
       setPendingPair(null);
       const s = await api.getSettings();
-      setSettings(s);
+      if (!dirtyRef.current) setSettingsState(s);
       showToast('success', t('settings.pair_approved'));
     } catch (e) {
       console.error(e);
@@ -94,21 +123,26 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
   };
 
   const handleSave = async () => {
+    if (saving) return;
     setSaveError('');
+    setSaving(true);
     try {
       await api.saveSettings(settings);
       applyTheme(settings.theme);
+      dirtyRef.current = false;
       showToast('success', t('settings.saved'));
       onClose();
     } catch (e) {
       console.error('Failed to save settings:', e);
       setSaveError(t('settings.save_failed'));
       showToast('error', t('settings.save_failed'));
+    } finally {
+      setSaving(false);
     }
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose} role="presentation">
+    <div className="modal-overlay" onClick={requestClose} role="presentation">
       <div
         ref={panelRef}
         className="modal-panel modal-lg"
@@ -123,8 +157,9 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
           </h2>
           <button
             type="button"
-            onClick={onClose}
+            onClick={requestClose}
             className="icon-btn"
+            data-modal-cancel
             aria-label={t('settings.cancel')}
           >
             <X size={18} />
@@ -344,7 +379,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
                   id="set-concurrent"
                   type="range"
                   min="1"
-                  max="10"
+                  max="32"
                   value={settings.max_concurrent_downloads}
                   onChange={(e) =>
                     handleChange('max_concurrent_downloads', parseInt(e.target.value))
@@ -376,6 +411,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
                   id="set-speed"
                   type="number"
                   min="0"
+                  max="1048576"
                   value={settings.speed_limit_kbps || 0}
                   onChange={(e) => handleChange('speed_limit_kbps', parseInt(e.target.value) || 0)}
                   className="field-input"
@@ -537,14 +573,27 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
         </div>
 
         <div className="modal-foot">
-          <button type="button" className="btn-secondary" onClick={onClose}>
+          <button type="button" className="btn-secondary" data-modal-cancel onClick={requestClose}>
             {t('settings.cancel')}
           </button>
-          <button type="button" className="btn-primary" onClick={handleSave}>
-            {t('settings.save')}
+          <button type="button" className="btn-primary" onClick={handleSave} disabled={saving}>
+            {saving ? t('settings.saving') : t('settings.save')}
           </button>
         </div>
       </div>
+      {confirmClose && (
+        <ConfirmDialog
+          message={t('settings.confirm_close')}
+          confirmLabel={t('settings.discard')}
+          cancelLabel={t('settings.continue_editing')}
+          onConfirm={() => {
+            dirtyRef.current = false;
+            setConfirmClose(false);
+            onClose();
+          }}
+          onCancel={() => setConfirmClose(false)}
+        />
+      )}
     </div>
   );
 };

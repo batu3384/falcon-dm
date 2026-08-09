@@ -16,15 +16,22 @@ export function useModalA11y(
 
     const list = () =>
       Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-        (el) => !el.hasAttribute('disabled') && el.offsetParent !== null,
+        (el) =>
+          !el.hasAttribute('disabled') &&
+          !el.hasAttribute('hidden') &&
+          el.getAttribute('aria-hidden') !== 'true' &&
+          getComputedStyle(el).display !== 'none' &&
+          getComputedStyle(el).visibility !== 'hidden',
       );
 
     const prev = document.activeElement as HTMLElement | null;
-    const first = list()[0];
+    const items = list();
+    const first = items.find((el) => el.hasAttribute('data-modal-cancel')) || items[0];
     first?.focus();
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        e.preventDefault();
         e.stopPropagation();
         onClose();
         return;

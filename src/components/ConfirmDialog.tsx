@@ -24,7 +24,14 @@ export function ConfirmDialog({
   useModalA11y(panelRef, onCancel);
 
   return (
-    <div className="modal-overlay" onClick={onCancel} role="presentation">
+    <div
+      className="modal-overlay"
+      onClick={(e) => {
+        e.stopPropagation();
+        if (e.target === e.currentTarget) onCancel();
+      }}
+      role="presentation"
+    >
       <div
         ref={panelRef}
         className="modal-panel"
@@ -44,7 +51,7 @@ export function ConfirmDialog({
           </p>
         </div>
         <div className="modal-foot">
-          <button type="button" className="btn-secondary" onClick={onCancel}>
+          <button type="button" className="btn-secondary" data-modal-cancel onClick={onCancel}>
             {cancelLabel || t('settings.cancel')}
           </button>
           <button

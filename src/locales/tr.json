@@ -176,8 +176,12 @@
     "proxy_placeholder": "ör. http://127.0.0.1:8080",
     "cancel": "İptal",
     "save": "Değişiklikleri Kaydet",
+    "saving": "Kaydediliyor...",
     "saved": "Ayarlar kaydedildi",
     "save_failed": "Ayarlar kaydedilemedi",
+    "confirm_close": "Kaydedilmemiş ayar değişiklikleri silinsin mi?",
+    "discard": "Değişiklikleri sil",
+    "continue_editing": "Düzenlemeye devam et",
     "extension": "Tarayıcı eklentisi",
     "extension_hint": "Eklenti bağlanırken onaylayın; yeniden yükleme sonrası sıfırlayıp tekrar onaylayın.",
     "relink_extension": "Eklenti bağlantısını sıfırla",
@@ -203,7 +207,8 @@
     "save": "Zamanlamayı Kaydet",
     "saving": "Kaydediliyor...",
     "save_failed": "Zamanlama kaydedilemedi",
-    "invalid_time": "Geçersiz: başlangıç bitişten önce olmalı"
+    "invalid_time": "Geçersiz: başlangıç bitişten önce olmalı",
+    "confirm_close": "Kaydedilmemiş zamanlama değişiklikleri silinsin mi?"
   },
   "onboarding": {
     "step1_title": "Falcon DM'e Hoş Geldin",

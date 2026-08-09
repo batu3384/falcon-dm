@@ -176,8 +176,12 @@
     "proxy_placeholder": "e.g. http://127.0.0.1:8080",
     "cancel": "Cancel",
     "save": "Save Changes",
+    "saving": "Saving...",
     "saved": "Settings saved",
     "save_failed": "Failed to save settings",
+    "confirm_close": "Discard unsaved settings changes?",
+    "discard": "Discard changes",
+    "continue_editing": "Continue editing",
     "extension": "Browser extension",
     "extension_hint": "Approve the extension when prompted, or reconnect after reinstall.",
     "relink_extension": "Reset extension link",
@@ -203,7 +207,8 @@
     "save": "Save Schedule",
     "saving": "Saving...",
     "save_failed": "Failed to save schedule",
-    "invalid_time": "Invalid time: start must be before stop"
+    "invalid_time": "Invalid time: start must be before stop",
+    "confirm_close": "Discard unsaved schedule changes?"
   },
   "onboarding": {
     "step1_title": "Welcome to Falcon DM",

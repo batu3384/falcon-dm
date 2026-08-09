@@ -1,4 +1,4 @@
-import { useEffect, useState, memo } from 'react';
+import { useEffect, useState, useRef, memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Play,
@@ -25,6 +25,7 @@ import { formatBytes, calculateETA, progressPercent, fileExtension, fileFullPath
 import { getDownloadCapabilities } from '../lib/downloadCapabilities';
 import { useToastStore } from '../store/toast';
 import * as api from '../api/commands';
+import { useModalA11y } from '../hooks/useModalA11y';
 
 interface DownloadItemProps {
   item: DownloadModel;
@@ -480,9 +481,12 @@ function MoveRenameDialog({
   const { t } = useTranslation();
   const [fname, setFname] = useState(filename);
   const [path, setPath] = useState(savePath);
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onCancel);
   return (
     <div className="modal-overlay" onClick={onCancel} role="presentation">
       <div
+        ref={panelRef}
         className="modal-panel modal-sm"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
@@ -520,7 +524,7 @@ function MoveRenameDialog({
           </div>
         </div>
         <div className="modal-foot">
-          <button type="button" className="btn-secondary" onClick={onCancel}>
+          <button type="button" className="btn-secondary" data-modal-cancel onClick={onCancel}>
             {t('downloadItem.cancel')}
           </button>
           <button type="button" className="btn-primary" onClick={() => onConfirm(fname, path)}>
