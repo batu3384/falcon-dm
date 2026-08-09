@@ -23,7 +23,6 @@ export interface DownloadModel {
   error_message: string | null;
   referrer: string | null;
   user_agent: string | null;
-  cookies: string | null;
   aria2_gid: string | null;
   archived?: boolean;
 }

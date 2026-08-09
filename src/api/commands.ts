@@ -2,6 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import {
   DownloadArraySchema,
   DownloadSchema,
+  DownloadStatsSchema,
+  LogArraySchema,
   ScheduleSchema,
   SettingsSchema,
   ExtensionStatusSchema,
@@ -138,7 +140,8 @@ export interface LogEntry {
 }
 
 export async function getLogs(level?: string): Promise<LogEntry[]> {
-  return invoke<LogEntry[]>('get_logs', { level: level ?? null });
+  const raw = await invoke<unknown>('get_logs', { level: level ?? null });
+  return LogArraySchema.parse(raw) as LogEntry[];
 }
 
 export async function clearLogs(): Promise<void> {
@@ -156,7 +159,8 @@ export interface DownloadStats {
 }
 
 export async function getStats(): Promise<DownloadStats> {
-  return invoke<DownloadStats>('get_stats');
+  const raw = await invoke<unknown>('get_stats');
+  return DownloadStatsSchema.parse(raw) as DownloadStats;
 }
 
 // ponytail: rename and/or move a completed download's file.

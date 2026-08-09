@@ -42,7 +42,6 @@ export const DownloadSchema = z.object({
   error_message: z.string().nullable(),
   referrer: z.string().nullable(),
   user_agent: z.string().nullable(),
-  cookies: z.string().nullable(),
   aria2_gid: z.string().nullable(),
   archived: z.boolean().optional().default(false),
 });
@@ -94,6 +93,24 @@ export const ExtensionStatusSchema = z.object({
   has_token: z.boolean(),
   approved_extension_ids: z.array(z.string()),
   pending_pair_id: z.string().nullable(),
+});
+
+export const LogEntrySchema = z.object({
+  ts: z.number(),
+  level: z.string(),
+  target: z.string(),
+  message: z.string(),
+});
+
+export const LogArraySchema = z.array(LogEntrySchema);
+
+export const DownloadStatsSchema = z.object({
+  active: z.number(),
+  queued: z.number(),
+  completed: z.number(),
+  failed: z.number(),
+  total_downloaded_bytes: z.number(),
+  current_speed: z.number(),
 });
 
 export type ParsedDownload = z.infer<typeof DownloadSchema>;

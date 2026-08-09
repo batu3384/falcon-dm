@@ -7,6 +7,8 @@ import {
   ExtensionStatusSchema,
   DownloadStatusEnum,
   DownloadCategoryEnum,
+  LogArraySchema,
+  DownloadStatsSchema,
 } from './schema';
 
 // ponytail: schema tests guard the boundary between Rust and TS. If the backend
@@ -39,6 +41,14 @@ describe('DownloadSchema', () => {
     const parsed = DownloadSchema.parse(validDownload);
     expect(parsed.id).toBe(1);
     expect(parsed.status).toBe('Downloading');
+  });
+
+  it('does not expose cookies in download payload schema', () => {
+    const parsed = DownloadSchema.parse({
+      ...validDownload,
+      cookies: 'sid=secret',
+    });
+    expect(parsed).not.toHaveProperty('cookies');
   });
 
   it('rejects an unknown status string', () => {
@@ -113,6 +123,28 @@ describe('ExtensionStatusSchema', () => {
       pending_pair_id: null,
     });
     expect(parsed.has_token).toBe(true);
+  });
+});
+
+describe('diagnostic payload schemas', () => {
+  it('parses log entries and rejects malformed entries', () => {
+    expect(
+      LogArraySchema.parse([{ ts: 1, level: 'ERROR', target: 'app', message: 'failed' }]),
+    ).toHaveLength(1);
+    expect(() => LogArraySchema.parse([{ ts: 'now' }])).toThrow();
+  });
+
+  it('parses download stats and rejects malformed counters', () => {
+    const stats = {
+      active: 1,
+      queued: 2,
+      completed: 3,
+      failed: 4,
+      total_downloaded_bytes: 5,
+      current_speed: 6,
+    };
+    expect(DownloadStatsSchema.parse(stats).active).toBe(1);
+    expect(() => DownloadStatsSchema.parse({ ...stats, active: '1' })).toThrow();
   });
 });
 

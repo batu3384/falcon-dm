@@ -380,7 +380,6 @@ function DownloadItemInner({
                     savePath: item.save_path,
                     referrer: item.referrer || undefined,
                     userAgent: item.user_agent || undefined,
-                    cookies: item.cookies || undefined,
                   }),
                 t('downloadItem.action_failed'),
               );

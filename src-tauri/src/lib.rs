@@ -951,16 +951,14 @@ fn restore_orphan_downloads(db: &Database) {
             }
         }
     }
-    // Cookie TTL: wipe session cookies from finished jobs (at-rest hygiene)
-    if let Ok(done) = db.get_downloads(&DownloadFilter {
-        status: Some(DownloadStatus::Completed),
-        ..Default::default()
-    }) {
-        for mut dl in done {
-            if dl.cookies.is_some() {
-                dl.cookies = None;
+    // Cookie TTL: wipe session cookies from terminal jobs (at-rest hygiene).
+    for status in [DownloadStatus::Completed, DownloadStatus::Failed] {
+        if let Ok(done) =
+            db.get_downloads(&DownloadFilter { status: Some(status), ..Default::default() })
+        {
+            for dl in done {
                 if let Some(id) = dl.id {
-                    if let Err(e) = db.update_download(id, &dl) {
+                    if let Err(e) = db.clear_session_cookies(id) {
                         log::warn!("restore: cookie wipe {id} DB update failed: {e}");
                     }
                 }
@@ -1135,8 +1133,18 @@ pub fn run() {
                                     }
                                     dl.status = DownloadStatus::Paused;
                                     let id = dl.id.unwrap();
-                                    if let Err(e) = state.db.update_download(id, &dl) {
-                                        log::warn!("tray pause-all: {id} DB update failed: {e}");
+                                    match state.db.update_download_if_status(
+                                        id,
+                                        &[DownloadStatus::Downloading, DownloadStatus::Merging],
+                                        &dl,
+                                    ) {
+                                        Ok(true) => {
+                                            let _ = state.db.clear_session_cookies(id);
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => {
+                                            log::warn!("tray pause-all: {id} DB update failed: {e}");
+                                        }
                                     }
                                 }
                             }
@@ -1154,7 +1162,10 @@ pub fn run() {
                                     // Respect queue concurrency — mark Queued, let tick start
                                     dl.status = DownloadStatus::Queued;
                                     let id = dl.id.unwrap();
-                                    if let Err(e) = state.db.update_download(id, &dl) {
+                                    if let Err(e) = state
+                                        .db
+                                        .update_download_if_status(id, &[DownloadStatus::Paused], &dl)
+                                    {
                                         log::warn!("tray resume-all: {id} DB update failed: {e}");
                                     }
                                 }

@@ -23,7 +23,6 @@ const baseDownload: DownloadModel = {
   error_message: null,
   referrer: null,
   user_agent: null,
-  cookies: null,
   aria2_gid: null,
 };
 

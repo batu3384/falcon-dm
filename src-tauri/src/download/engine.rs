@@ -68,6 +68,7 @@ pub struct Aria2Engine {
     rpc_url: String,
     secret: String,
     secret_file: Mutex<Option<PathBuf>>,
+    config_file: Mutex<Option<PathBuf>>,
     pid_file: Mutex<Option<PathBuf>>,
     process: Mutex<Option<CommandChild>>,
     running: Mutex<bool>,
@@ -89,6 +90,7 @@ impl Aria2Engine {
             rpc_url: format!("http://127.0.0.1:{RPC_PORT}/jsonrpc"),
             secret: Uuid::new_v4().to_string(),
             secret_file: Mutex::new(None),
+            config_file: Mutex::new(None),
             pid_file: Mutex::new(None),
             process: Mutex::new(None),
             running: Mutex::new(false),
@@ -168,6 +170,7 @@ impl Aria2Engine {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&conf_path, std::fs::Permissions::from_mode(0o600));
         }
+        *lock_or_recover(&self.config_file) = Some(conf_path.clone());
 
         let secret_path = app_data_dir.join("aria2_rpc_secret");
         std::fs::write(&secret_path, &self.secret)?;
@@ -280,14 +283,9 @@ impl Aria2Engine {
         if let Some(path) = lock_or_recover(&self.secret_file).take() {
             let _ = std::fs::remove_file(path);
         }
-        // ponytail: also remove the aria2.conf (contains the rpc-secret) on stop.
-        let _ = std::fs::remove_file(
-            lock_or_recover(&self.secret_file)
-                .as_ref()
-                .and_then(|p| p.parent())
-                .map(|d| d.join("aria2.conf"))
-                .unwrap_or_else(|| std::path::PathBuf::from("aria2.conf")),
-        );
+        if let Some(path) = lock_or_recover(&self.config_file).take() {
+            let _ = std::fs::remove_file(path);
+        }
         if let Some(path) = lock_or_recover(&self.pid_file).take() {
             #[cfg(unix)]
             if let Ok(s) = std::fs::read_to_string(&path) {
@@ -382,5 +380,33 @@ impl Aria2Engine {
     pub async fn get_active_statuses(&self) -> Result<Vec<Value>> {
         let res = self.call_rpc("aria2.tellActive", vec![]).await?;
         Ok(res.as_array().cloned().unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_removes_runtime_files() {
+        let root = std::env::temp_dir().join(format!("falcon-dm-engine-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let secret = root.join("aria2_rpc_secret");
+        let config = root.join("aria2.conf");
+        let pid = root.join("aria2.pid");
+        for path in [&secret, &config, &pid] {
+            std::fs::write(path, "").unwrap();
+        }
+
+        let engine = Aria2Engine::new();
+        *engine.secret_file.lock().unwrap() = Some(secret.clone());
+        *engine.config_file.lock().unwrap() = Some(config.clone());
+        *engine.pid_file.lock().unwrap() = Some(pid.clone());
+        engine.stop().unwrap();
+
+        assert!(!secret.exists());
+        assert!(!config.exists());
+        assert!(!pid.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

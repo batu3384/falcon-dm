@@ -127,6 +127,7 @@ pub struct Download {
     pub error_message: Option<String>,
     pub referrer: Option<String>,
     pub user_agent: Option<String>,
+    #[serde(skip_serializing)]
     pub cookies: Option<String>,
     pub aria2_gid: Option<String>,
     /// ponytail: archived flag — completed downloads can be hidden from the

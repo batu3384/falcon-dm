@@ -83,6 +83,11 @@ impl Database {
 
         let db = Self { conn: Arc::new(pool) };
         db.run_migrations()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
+        }
         Ok(db)
     }
 
@@ -622,6 +627,18 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn database_file_is_private() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("falcon_db_mode_{}", uuid::Uuid::new_v4()));
+        let _db = Database::init(&temp_dir).expect("Failed to init db");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(temp_dir.join("falcon_dm.db")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
     #[test]
     fn test_wal_mode_enabled() {
         let temp_dir = std::env::temp_dir().join(format!("falcon_wal_{}", uuid::Uuid::new_v4()));
@@ -695,6 +712,18 @@ mod tests {
         assert!(!db
             .update_download_if_status(id, &[DownloadStatus::Completed], &download)
             .unwrap());
+    }
+
+    #[test]
+    fn clear_session_cookies_removes_storage_only_cookie() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("cookie.mp4");
+        download.cookies = Some("sid=secret".into());
+        download.status = DownloadStatus::Failed;
+        let id = db.insert_download(&download).unwrap();
+
+        assert!(db.clear_session_cookies(id).unwrap());
+        assert!(db.get_download(id).unwrap().cookies.is_none());
     }
 
     #[test]

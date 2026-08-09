@@ -532,7 +532,7 @@ rtk git commit -m "fix: make download worker claims and cancellation atomic"
 - `DownloadSchema` cookies kabul etmez.
 - `getLogs` ve `getStats` Zod ile parse edilmiş payload döndürür.
 
-- [ ] **Step 1: Frontend payload testini yaz**
+- [x] **Step 1: Frontend payload testini yaz**
 
 ```ts
 it('does not expose cookies in download payload schema', () => {
@@ -552,7 +552,7 @@ rtk npm test -- src/lib/schema.test.ts
 
 Expected: Schema strip davranışı tanımlı değilse test FAIL eder.
 
-- [ ] **Step 2: Storage-only cookie serialization implement et**
+- [x] **Step 2: Storage-only cookie serialization implement et**
 
 Rust `Download` serde output’unda `cookies` skip edilir. TypeScript
 `DownloadModel`, test fixtures, `DownloadItem` curl/redownload yolları
@@ -560,21 +560,21 @@ cookie’siz API modeline geçirilir. `NewDownloadModal` ve Settings site profil
 formları kullanıcıdan cookie almayı sürdürebilir; bu alanlar yalnız enqueue/
 settings save request’inde backend’e gider.
 
-- [ ] **Step 3: Terminal cookie cleanup ve file permissions ekle**
+- [x] **Step 3: Terminal cookie cleanup ve file permissions ekle**
 
 `run_stream_task`, cancelled/failed/completed terminal geçişlerinde
 `clear_session_cookies` çağırır. Startup recovery failed/completed rows için
 cookie wipe yapar. Database dosyası, settings, aria2 config/secret ve geçici
 pairing socket `0600` olur.
 
-- [ ] **Step 4: aria2 config cleanup bug’ını düzelt**
+- [x] **Step 4: aria2 config cleanup bug’ını düzelt**
 
 `Aria2Engine::stop` `secret_file.take()` sonrasında parent aramaya çalışmayacak.
 Config path startup sırasında ayrı tracked field olarak tutulacak veya
 `app_data_dir` path’i doğrudan kullanılacak. Stop testinde config, secret ve pid
 dosyalarının üçünün de silindiği doğrulanır.
 
-- [ ] **Step 5: Testleri geçir ve commit**
+- [x] **Step 5: Testleri geçir ve commit**
 
 Run:
 
