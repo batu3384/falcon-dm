@@ -233,6 +233,71 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_download_if_status(
+        &self,
+        id: i64,
+        expected: &[DownloadStatus],
+        download: &Download,
+    ) -> Result<bool> {
+        if expected.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let placeholders = (0..expected.len()).map(|i| format!("?{}", i + 20)).collect::<Vec<_>>();
+        let sql = format!(
+            "UPDATE downloads SET
+                url = ?1,
+                filename = ?2,
+                save_path = ?3,
+                total_size = ?4,
+                downloaded_size = ?5,
+                status = ?6,
+                category = ?7,
+                speed = ?8,
+                segments = ?9,
+                priority = ?10,
+                created_at = ?11,
+                completed_at = ?12,
+                error_message = ?13,
+                referrer = ?14,
+                user_agent = ?15,
+                cookies = ?16,
+                aria2_gid = ?17,
+                archived = ?18
+            WHERE id = ?19 AND status IN ({})",
+            placeholders.join(", ")
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(download.url.clone()),
+            Box::new(download.filename.clone()),
+            Box::new(download.save_path.clone()),
+            Box::new(download.total_size as i64),
+            Box::new(download.downloaded_size as i64),
+            Box::new(download.status.as_str().to_string()),
+            Box::new(download.category.as_str().to_string()),
+            Box::new(download.speed),
+            Box::new(download.segments as i64),
+            Box::new(download.priority as i64),
+            Box::new(download.created_at.clone()),
+            Box::new(download.completed_at.clone()),
+            Box::new(download.error_message.clone()),
+            Box::new(download.referrer.clone()),
+            Box::new(download.user_agent.clone()),
+            Box::new(download.cookies.clone()),
+            Box::new(download.aria2_gid.clone()),
+            Box::new(download.archived as i64),
+            Box::new(id),
+        ];
+        params.extend(
+            expected
+                .iter()
+                .map(|status| Box::new(status.as_str().to_string()) as Box<dyn rusqlite::ToSql>),
+        );
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|value| value.as_ref()).collect();
+        Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
+    }
+
     pub fn update_download_progress(
         &self,
         id: i64,
@@ -572,5 +637,16 @@ mod tests {
         let id = db2.insert_download(&d).expect("insert after re-init");
         assert!(id > 0);
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn update_if_status_rejects_active_download() {
+        let db = Database::in_memory().expect("Failed to create in-memory db");
+        let mut download = create_test_download("active.mp4");
+        download.status = DownloadStatus::Downloading;
+        let id = db.insert_download(&download).unwrap();
+        assert!(!db
+            .update_download_if_status(id, &[DownloadStatus::Completed], &download)
+            .unwrap());
     }
 }

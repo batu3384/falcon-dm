@@ -22,9 +22,9 @@ use tauri::{
 use tauri_plugin_notification::NotificationExt;
 use util::{
     app_data_dir, default_download_dir, full_file_path, is_hls_url, is_junk_media_url,
-    lock_or_recover, normalize_media_url, resolve_download_filename, resolve_save_dir,
-    sanitize_filename, sanitize_header_value, validate_completed_file, validate_download_url,
-    validate_open_path, LEGACY_DEFAULT_API_TOKEN,
+    lock_or_recover, normalize_media_url, resolve_download_filename, resolve_download_target,
+    resolve_save_dir, sanitize_filename, sanitize_header_value, validate_completed_file,
+    validate_download_url, validate_open_path, LEGACY_DEFAULT_API_TOKEN,
 };
 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
@@ -642,43 +642,49 @@ async fn move_download(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let mut dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-
-    // Resolve the new filename (sanitized) and destination dir.
-    let filename = match new_filename {
-        Some(ref f) if !f.trim().is_empty() => sanitize_filename(f),
-        _ => dl.filename.clone(),
-    };
-    let dest_dir = match new_save_path {
-        Some(ref p) if !p.trim().is_empty() => {
-            // Validate the destination is a real, accessible folder (reject traversal).
-            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
-            p.clone()
-        }
-        _ => dl.save_path.clone(),
-    };
-
-    let src = full_file_path(&dl.save_path, &dl.filename);
-    let dst = full_file_path(&dest_dir, &filename);
-
-    if src == dst {
-        return Ok(()); // nothing to do
+    if !matches!(dl.status, DownloadStatus::Completed | DownloadStatus::Failed) {
+        return Err("Only completed or failed downloads can be moved".into());
     }
 
+    let filename = match new_filename.as_deref().filter(|f| !f.trim().is_empty()) {
+        Some(f) => {
+            let sanitized = sanitize_filename(f);
+            if sanitized != f.trim() {
+                return Err("Invalid download filename".into());
+            }
+            sanitized
+        }
+        _ => dl.filename.clone(),
+    };
+    let requested_dir =
+        new_save_path.as_deref().filter(|path| !path.trim().is_empty()).unwrap_or(&dl.save_path);
+    let dest_dir = resolve_download_save_path(Some(requested_dir), &dl.category)?;
+    let dest_path = resolve_download_target(&dest_dir, &filename)?;
+    let src = resolve_download_target(&dl.save_path, &dl.filename)?;
+
+    if std::fs::symlink_metadata(&src).map_err(|e| e.to_string())?.file_type().is_symlink() {
+        return Err("Source file cannot be a symlink".into());
+    }
+
+    if src == dest_path {
+        return Ok(()); // nothing to do
+    }
+    let dest_save_path = dest_path
+        .parent()
+        .ok_or_else(|| "Moved file has no parent directory".to_string())?
+        .to_string_lossy()
+        .to_string();
+
     // ponytail: blocking fs move on a pool thread.
-    let result = tokio::task::spawn_blocking(move || {
-        std::fs::rename(&src, &dst).or_else(|_| {
-            // cross-device fallback: copy then remove source.
-            std::fs::copy(&src, &dst).and_then(|_| std::fs::remove_file(&src))
-        })
-    })
-    .await
-    .map_err(|e| format!("move task failed: {e}"))?;
+    let result = tokio::task::spawn_blocking(move || util::copy_file_exclusive(&src, &dest_path))
+        .await
+        .map_err(|e| format!("move task failed: {e}"))?;
 
     result.map_err(|e| format!("failed to move file: {e}"))?;
 
     // Update DB only after the file landed.
     dl.filename = filename;
-    dl.save_path = dest_dir;
+    dl.save_path = dest_save_path;
     state.db.update_download(id, &dl).map_err(|e| e.to_string())?;
     Ok(())
 }

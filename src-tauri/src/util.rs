@@ -215,6 +215,54 @@ pub fn full_file_path(save_path: &str, filename: &str) -> PathBuf {
     PathBuf::from(save_path).join(sanitize_filename(filename))
 }
 
+/// Resolve a single safe filename under an already validated save directory.
+pub fn resolve_download_target(save_dir: &str, filename: &str) -> Result<PathBuf, String> {
+    let raw = filename.trim().replace('\\', "/");
+    let path = Path::new(&raw);
+    if raw.is_empty()
+        || path.is_absolute()
+        || path.components().count() != 1
+        || !matches!(path.components().next(), Some(Component::Normal(_)))
+    {
+        return Err("Invalid download filename".into());
+    }
+    let dir =
+        Path::new(save_dir).canonicalize().map_err(|e| format!("Invalid save directory: {e}"))?;
+    if !dir.is_dir() {
+        return Err("Save path is not a directory".into());
+    }
+    Ok(dir.join(sanitize_filename(&raw)))
+}
+
+/// Copy a file without overwriting an existing destination, then remove source.
+pub fn copy_file_exclusive(source: &Path, destination: &Path) -> Result<(), String> {
+    if destination.exists() {
+        return Err("Destination file already exists".into());
+    }
+    let mut input = std::fs::File::open(source).map_err(|e| e.to_string())?;
+    let mut output =
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(destination) {
+            Ok(file) => file,
+            Err(error) => return Err(error.to_string()),
+        };
+    if let Err(error) = std::io::copy(&mut input, &mut output) {
+        let _ = std::fs::remove_file(destination);
+        return Err(error.to_string());
+    }
+    if let Err(error) = output.sync_all() {
+        let _ = std::fs::remove_file(destination);
+        return Err(error.to_string());
+    }
+    let source_size = std::fs::metadata(source).map_err(|e| e.to_string())?.len();
+    let destination_size = std::fs::metadata(destination).map_err(|e| e.to_string())?.len();
+    if source_size != destination_size {
+        let _ = std::fs::remove_file(destination);
+        return Err("Copied file size does not match source".into());
+    }
+    std::fs::remove_file(source).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Reject completed downloads that are obvious error pages — any file type allowed.
 pub fn validate_completed_file(path: &Path) -> Result<u64, String> {
     if !path.exists() {
@@ -518,6 +566,28 @@ mod tests {
         assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
         assert_eq!(sanitize_filename("a/b/c.zip"), "c.zip");
         assert!(!sanitize_filename("foo\0bar").contains('\0'));
+    }
+
+    #[test]
+    fn move_target_rejects_traversal_and_absolute_filename() {
+        let root = std::env::temp_dir().join(format!("falcon-dm-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(resolve_download_target(root.to_str().unwrap(), "../outside.mp4").is_err());
+        assert!(resolve_download_target(root.to_str().unwrap(), "/tmp/outside.mp4").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_file_exclusive_does_not_overwrite_existing_destination() {
+        let root = std::env::temp_dir().join(format!("falcon-dm-copy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.bin");
+        let destination = root.join("destination.bin");
+        std::fs::write(&source, b"source").unwrap();
+        std::fs::write(&destination, b"existing").unwrap();
+        assert!(copy_file_exclusive(&source, &destination).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
