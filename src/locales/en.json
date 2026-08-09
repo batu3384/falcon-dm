@@ -116,6 +116,8 @@
     "selected": "selected",
     "clear_selection": "Clear selection",
     "batch_deleted": "Deleted {{count}} downloads",
+    "batch_result": "{{success}} succeeded, {{failed}} failed{{names}}",
+    "confirm_batch_delete": "Delete {{count}} selected downloads?",
     "speed_limit_set": "Speed limit: {{limit}} KB/s",
     "skip_to_content": "Skip to content"
   },

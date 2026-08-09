@@ -116,6 +116,8 @@
     "selected": "seçili",
     "clear_selection": "Seçimi temizle",
     "batch_deleted": "{{count}} indirme silindi",
+    "batch_result": "{{success}} başarılı, {{failed}} başarısız{{names}}",
+    "confirm_batch_delete": "{{count}} seçili indirme silinsin mi?",
     "speed_limit_set": "Hız limiti: {{limit}} KB/s",
     "skip_to_content": "İçeriğe geç"
   },

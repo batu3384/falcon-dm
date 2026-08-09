@@ -20,6 +20,8 @@ interface ToolbarProps {
   onSearchChange: (q: string) => void;
   onPauseAll: () => void;
   onResumeAll: () => void;
+  canPauseAll?: boolean;
+  canResumeAll?: boolean;
   clipboardMonitor?: boolean;
   onToggleClipboard?: () => void;
   onOpenSettings: () => void;
@@ -36,6 +38,8 @@ export default function Toolbar({
   onSearchChange,
   onPauseAll,
   onResumeAll,
+  canPauseAll = true,
+  canResumeAll = true,
   clipboardMonitor,
   onToggleClipboard,
   onOpenSettings,
@@ -75,6 +79,7 @@ export default function Toolbar({
             type="button"
             className="icon-btn"
             onClick={onResumeAll}
+            disabled={!canResumeAll}
             title={t('toolbar.resume_all')}
             aria-label={t('toolbar.resume_all')}
           >
@@ -84,6 +89,7 @@ export default function Toolbar({
             type="button"
             className="icon-btn"
             onClick={onPauseAll}
+            disabled={!canPauseAll}
             title={t('toolbar.pause_all')}
             aria-label={t('toolbar.pause_all')}
           >

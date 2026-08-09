@@ -54,11 +54,9 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       if (get().requestSequence !== sequence) return;
       set((state) => {
         const liveIds = new Set(data.map((download) => download.id));
-        const selectedIds = new Set(
-          [...state.selectedIds].filter((id) => liveIds.has(id)),
-        );
+        const selectedIds = new Set([...state.selectedIds].filter((id) => liveIds.has(id)));
         const selectedDownload = state.selectedDownload
-          ? data.find((download) => download.id === state.selectedDownload?.id) ?? null
+          ? (data.find((download) => download.id === state.selectedDownload?.id) ?? null)
           : null;
         return {
           downloads: data,

@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import type { DownloadModel } from '../types';
 import { formatBytes, progressPercent, fileFullPath } from '../types';
+import { getDownloadCapabilities } from '../lib/downloadCapabilities';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useToastStore } from '../store/toast';
 import * as api from '../api/commands';
@@ -41,13 +42,17 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
   const isDownloading = download.status === 'Downloading';
   const isCompleted = download.status === 'Completed';
   const isFailed = download.status === 'Failed';
+  const capabilities = getDownloadCapabilities(download.status);
   const pct = progressPercent(download);
 
-  const handleCopyUrl = () => {
-    navigator.clipboard.writeText(download.url).then(() => {
+  const handleCopyUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(download.url);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    });
+    } catch (e) {
+      showToast('error', api.extractTauriError(e));
+    }
   };
 
   const handleOpenFolder = () => {
@@ -203,17 +208,17 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
           )}
 
           <div className="action-col">
-            {isFailed && (
+            {capabilities.resume && (
               <button
                 className="btn-primary"
                 onClick={() =>
                   api
                     .resumeDownload(download.id)
                     .then(() => onRefresh?.())
-                    .catch(() => showToast('error', t('inspector.remove_error')))
+                    .catch((e) => showToast('error', api.extractTauriError(e)))
                 }
               >
-                <RotateCcw size={14} /> {t('inspector.retry')}
+                <RotateCcw size={14} /> {isFailed ? t('inspector.retry') : t('downloadItem.resume')}
               </button>
             )}
             {isCompleted && (
@@ -227,13 +232,15 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
             <button className="btn-secondary" onClick={handleCopyUrl}>
               <Copy size={14} /> {copied ? t('inspector.copied') : t('inspector.copy_link')}
             </button>
-            <button
-              className="btn-ghost"
-              onClick={() => setConfirmRemove(true)}
-              style={{ color: 'var(--danger)' }}
-            >
-              <Trash2 size={14} /> {t('inspector.remove')}
-            </button>
+            {capabilities.remove && (
+              <button
+                className="btn-ghost"
+                onClick={() => setConfirmRemove(true)}
+                style={{ color: 'var(--danger)' }}
+              >
+                <Trash2 size={14} /> {t('inspector.remove')}
+              </button>
+            )}
           </div>
 
           <div>

@@ -33,11 +33,13 @@ import { SettingsModal } from './components/SettingsModal';
 import { LogPanel } from './components/LogPanel';
 import { StatsPanel } from './components/StatsPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ConfirmDialog } from './components/ConfirmDialog';
 import { useDownloadsStore } from './store/downloads';
 import { useToastStore } from './store/toast';
 import { onDownloadAdded, onDownloadProgress, onPairRequest } from './api/events';
 import * as api from './api/commands';
 import { applyTheme, watchSystemTheme } from './types';
+import { getDownloadCapabilities } from './lib/downloadCapabilities';
 
 const URL_RE = /^https?:\/\/\S+/i;
 
@@ -77,6 +79,7 @@ function App() {
   const [schedulerOpen, setSchedulerOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
+  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
 
   // Keep inspector in sync with live list (was a useEffect in App before).
   useEffect(() => {
@@ -160,52 +163,64 @@ function App() {
     [downloads],
   );
 
+  const runBatchAction = useCallback(
+    async (targets: typeof downloads, action: 'pause' | 'resume' | 'delete') => {
+      if (!targets.length) return;
+      const results = await Promise.allSettled(
+        targets.map((download) => {
+          if (action === 'delete') return api.removeDownload(download.id);
+          if (action === 'pause') return api.pauseDownload(download.id);
+          return api.resumeDownload(download.id);
+        }),
+      );
+      const succeeded = results.filter((result) => result.status === 'fulfilled');
+      const failures = results.flatMap((result, index) =>
+        result.status === 'rejected'
+          ? [{ download: targets[index], error: api.extractTauriError(result.reason) }]
+          : [],
+      );
+      await fetchDownloads();
+      const failedNames = failures
+        .map(({ download, error }) => `${download.filename} (${error})`)
+        .join(', ');
+      showToast(
+        failures.length ? 'error' : 'info',
+        t('app.batch_result', {
+          success: succeeded.length,
+          failed: failures.length,
+          names: failedNames ? `: ${failedNames}` : '',
+        }),
+      );
+    },
+    [fetchDownloads, showToast, t],
+  );
+
   const handlePauseAll = useCallback(async () => {
-    const active = downloads.filter((d) => d.status === 'Downloading' || d.status === 'Merging');
-    await Promise.all(
-      active.map((d) =>
-        api.pauseDownload(d.id).catch((e) => showToast('error', api.extractTauriError(e))),
-      ),
+    await runBatchAction(
+      downloads.filter((download) => getDownloadCapabilities(download.status).pause),
+      'pause',
     );
-    fetchDownloads();
-    showToast('info', t('app.paused_count', { count: active.length }));
-  }, [downloads, fetchDownloads, showToast, t]);
+  }, [downloads, runBatchAction]);
 
   const handleResumeAll = useCallback(async () => {
-    const paused = downloads.filter((d) => d.status === 'Paused' || d.status === 'Failed');
-    await Promise.all(
-      paused.map((d) =>
-        api.resumeDownload(d.id).catch((e) => showToast('error', api.extractTauriError(e))),
-      ),
+    await runBatchAction(
+      downloads.filter((download) => getDownloadCapabilities(download.status).resume),
+      'resume',
     );
-    fetchDownloads();
-    showToast('info', t('app.resumed_count', { count: paused.length }));
-  }, [downloads, fetchDownloads, showToast, t]);
+  }, [downloads, runBatchAction]);
 
   const handleBatchAction = useCallback(
     async (action: 'pause' | 'resume' | 'delete') => {
-      const targets = downloads.filter((d) => selectedIds.has(d.id));
+      const targets = downloads.filter((download) => {
+        if (!selectedIds.has(download.id)) return false;
+        const capabilities = getDownloadCapabilities(download.status);
+        return action === 'delete' ? capabilities.remove : capabilities[action];
+      });
       if (!targets.length) return;
-      for (const d of targets) {
-        try {
-          if (action === 'delete') await api.removeDownload(d.id);
-          else if (action === 'pause') await api.pauseDownload(d.id);
-          else await api.resumeDownload(d.id);
-        } catch (e) {
-          showToast('error', api.extractTauriError(e));
-        }
-      }
-      fetchDownloads();
+      await runBatchAction(targets, action);
       clearSelection();
-      const msg =
-        action === 'delete'
-          ? t('app.batch_deleted', { count: targets.length })
-          : action === 'pause'
-            ? t('app.paused_count', { count: targets.length })
-            : t('app.resumed_count', { count: targets.length });
-      showToast('info', msg);
     },
-    [downloads, selectedIds, fetchDownloads, clearSelection, showToast, t],
+    [downloads, selectedIds, runBatchAction, clearSelection],
   );
 
   // Read settings on mount for speed limit state
@@ -329,6 +344,16 @@ function App() {
   );
 
   const toasts = useToastStore((s) => s.toasts);
+  const selectedDownloads = useMemo(
+    () => downloads.filter((download) => selectedIds.has(download.id)),
+    [downloads, selectedIds],
+  );
+  const canBatchPause = selectedDownloads.some(
+    (download) => getDownloadCapabilities(download.status).pause,
+  );
+  const canBatchResume = selectedDownloads.some(
+    (download) => getDownloadCapabilities(download.status).resume,
+  );
 
   return (
     <div
@@ -368,6 +393,12 @@ function App() {
             onSearchChange={setSearchQuery}
             onPauseAll={handlePauseAll}
             onResumeAll={handleResumeAll}
+            canPauseAll={downloads.some(
+              (download) => getDownloadCapabilities(download.status).pause,
+            )}
+            canResumeAll={downloads.some(
+              (download) => getDownloadCapabilities(download.status).resume,
+            )}
             clipboardMonitor={clipboardMonitor}
             onToggleClipboard={() => setClipboardMonitor((v) => !v)}
             onOpenSettings={() => setSettingsOpen(true)}
@@ -388,6 +419,7 @@ function App() {
                   type="button"
                   className="btn-secondary"
                   onClick={() => handleBatchAction('pause')}
+                  disabled={!canBatchPause}
                 >
                   <Pause size={14} /> {t('toolbar.pause_all')}
                 </button>
@@ -395,6 +427,7 @@ function App() {
                   type="button"
                   className="btn-secondary"
                   onClick={() => handleBatchAction('resume')}
+                  disabled={!canBatchResume}
                 >
                   <Play size={14} /> {t('toolbar.resume_all')}
                 </button>
@@ -402,7 +435,7 @@ function App() {
                   type="button"
                   className="btn-secondary"
                   style={{ color: 'var(--danger)' }}
-                  onClick={() => handleBatchAction('delete')}
+                  onClick={() => setConfirmBatchDelete(true)}
                 >
                   <Trash2 size={14} /> {t('downloadItem.delete')}
                 </button>
@@ -484,13 +517,27 @@ function App() {
       )}
 
       {paletteOpen && (
-        <CommandPalette onClose={() => setPaletteOpen(false)} actions={paletteActions} />
+        <CommandPalette
+          onClose={() => setPaletteOpen(false)}
+          actions={paletteActions}
+          onError={(e) => showToast('error', api.extractTauriError(e))}
+        />
       )}
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       <SchedulerModal isOpen={schedulerOpen} onClose={() => setSchedulerOpen(false)} />
       {logsOpen && <LogPanel onClose={() => setLogsOpen(false)} />}
       {statsOpen && <StatsPanel onClose={() => setStatsOpen(false)} />}
+      {confirmBatchDelete && (
+        <ConfirmDialog
+          message={t('app.confirm_batch_delete', { count: selectedIds.size })}
+          onConfirm={() => {
+            setConfirmBatchDelete(false);
+            void handleBatchAction('delete');
+          }}
+          onCancel={() => setConfirmBatchDelete(false)}
+        />
+      )}
     </div>
   );
 }

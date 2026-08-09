@@ -22,6 +22,7 @@ import SpeedGraph from './SpeedGraph';
 import { ConfirmDialog } from './ConfirmDialog';
 import type { DownloadModel } from '../types';
 import { formatBytes, calculateETA, progressPercent, fileExtension, fileFullPath } from '../types';
+import { getDownloadCapabilities } from '../lib/downloadCapabilities';
 import { useToastStore } from '../store/toast';
 import * as api from '../api/commands';
 
@@ -61,6 +62,7 @@ function DownloadItemInner({
   const isDownloading = item.status === 'Downloading';
   const isCompleted = item.status === 'Completed';
   const isFailed = item.status === 'Failed';
+  const capabilities = getDownloadCapabilities(item.status);
   const remainingBytes = item.total_size - item.downloaded_size;
   const etaText = isDownloading ? calculateETA(remainingBytes, item.speed) : '';
   const ext = fileExtension(item.filename);
@@ -143,6 +145,15 @@ function DownloadItemInner({
     call(() => api.removeDownload(item.id), t('downloadItem.action_failed'));
   };
 
+  const copyText = async (value: string, successMessage?: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      if (successMessage) showToast('success', successMessage);
+    } catch (e) {
+      showToast('error', api.extractTauriError(e));
+    }
+  };
+
   return (
     <>
       <div
@@ -211,7 +222,7 @@ function DownloadItemInner({
         </div>
 
         <div className="dl-actions">
-          {isDownloading ? (
+          {capabilities.pause ? (
             <button
               type="button"
               className="icon-btn"
@@ -224,7 +235,7 @@ function DownloadItemInner({
             >
               <Pause size={14} />
             </button>
-          ) : !isCompleted ? (
+          ) : capabilities.resume ? (
             <button
               type="button"
               className="icon-btn"
@@ -283,24 +294,26 @@ function DownloadItemInner({
             </>
           )}
 
-          <button
-            type="button"
-            className="icon-btn danger"
-            onClick={(e) => {
-              stop(e);
-              setConfirmRemove(true);
-            }}
-            title={t('downloadItem.delete')}
-            aria-label={t('downloadItem.delete')}
-          >
-            <Trash2 size={14} />
-          </button>
+          {capabilities.remove && (
+            <button
+              type="button"
+              className="icon-btn danger"
+              onClick={(e) => {
+                stop(e);
+                setConfirmRemove(true);
+              }}
+              title={t('downloadItem.delete')}
+              aria-label={t('downloadItem.delete')}
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
         </div>
       </div>
 
       {menu && (
         <div className="ctx-menu" style={{ left: menu.x, top: menu.y }} role="menu" tabIndex={-1}>
-          {isDownloading ? (
+          {capabilities.pause ? (
             <button
               type="button"
               role="menuitem"
@@ -310,7 +323,7 @@ function DownloadItemInner({
             >
               {t('downloadItem.pause')}
             </button>
-          ) : !isCompleted ? (
+          ) : capabilities.resume ? (
             <button
               type="button"
               role="menuitem"
@@ -332,21 +345,13 @@ function DownloadItemInner({
           >
             {t('downloadItem.open_folder')}
           </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => navigator.clipboard.writeText(item.url)}
-          >
+          <button type="button" role="menuitem" onClick={() => copyText(item.url)}>
             <Copy size={12} /> {t('downloadItem.copy_url')}
           </button>
           <button
             type="button"
             role="menuitem"
-            onClick={() => {
-              const curl = api.buildCurlCommand(item);
-              navigator.clipboard.writeText(curl);
-              showToast('success', t('downloadItem.curl_copied'));
-            }}
+            onClick={() => copyText(api.buildCurlCommand(item), t('downloadItem.curl_copied'))}
           >
             <Terminal size={12} /> {t('downloadItem.copy_curl')}
           </button>
@@ -363,10 +368,26 @@ function DownloadItemInner({
               >
                 {t('downloadItem.open_file')}
               </button>
-              <button type="button" role="menuitem" onClick={() => setMoveOpen(true)}>
-                {t('downloadItem.move_rename')}
-              </button>
             </>
+          )}
+          {capabilities.archive && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() =>
+                call(
+                  () => api.archiveDownload(item.id, !item.archived),
+                  t('downloadItem.action_failed'),
+                )
+              }
+            >
+              {item.archived ? t('downloadItem.unarchive') : t('downloadItem.archive')}
+            </button>
+          )}
+          {capabilities.move && (
+            <button type="button" role="menuitem" onClick={() => setMoveOpen(true)}>
+              {t('downloadItem.move_rename')}
+            </button>
           )}
           <button
             type="button"
@@ -387,26 +408,16 @@ function DownloadItemInner({
           >
             <RotateCcw size={12} /> {t('downloadItem.redownload')}
           </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() =>
-              call(
-                () => api.archiveDownload(item.id, !item.archived),
-                t('downloadItem.action_failed'),
-              )
-            }
-          >
-            {item.archived ? t('downloadItem.unarchive') : t('downloadItem.archive')}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="danger"
-            onClick={() => setConfirmRemove(true)}
-          >
-            {t('downloadItem.delete')}
-          </button>
+          {capabilities.remove && (
+            <button
+              type="button"
+              role="menuitem"
+              className="danger"
+              onClick={() => setConfirmRemove(true)}
+            >
+              {t('downloadItem.delete')}
+            </button>
+          )}
         </div>
       )}
 

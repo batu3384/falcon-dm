@@ -7,19 +7,21 @@ export interface PaletteAction {
   id: string;
   label: string;
   icon: React.ComponentType<{ size?: number; strokeWidth?: number }>;
-  run: () => void;
+  run: () => void | Promise<void>;
   keywords?: string;
 }
 
 interface CommandPaletteProps {
   onClose: () => void;
   actions: PaletteAction[];
+  onError?: (error: unknown) => void;
 }
 
-export function CommandPalette({ onClose, actions }: CommandPaletteProps) {
+export function CommandPalette({ onClose, actions, onError }: CommandPaletteProps) {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
+  const [running, setRunning] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   useModalA11y(panelRef, onClose);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -40,6 +42,18 @@ export function CommandPalette({ onClose, actions }: CommandPaletteProps) {
     setActiveIndex(0);
   }, [query]);
 
+  const runAction = async (action: PaletteAction | undefined) => {
+    if (!action || running) return;
+    try {
+      setRunning(true);
+      await action.run();
+      onClose();
+    } catch (error) {
+      setRunning(false);
+      onError?.(error);
+    }
+  };
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -49,7 +63,7 @@ export function CommandPalette({ onClose, actions }: CommandPaletteProps) {
       setActiveIndex((i) => Math.max(i - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      filtered[activeIndex]?.run();
+      void runAction(filtered[activeIndex]);
     }
   };
 
@@ -115,10 +129,11 @@ export function CommandPalette({ onClose, actions }: CommandPaletteProps) {
                   id={`palette-opt-${action.id}`}
                   type="button"
                   className={`cmd-item ${i === activeIndex ? 'active' : ''}`}
-                  onClick={() => action.run()}
+                  onClick={() => void runAction(action)}
                   onMouseEnter={() => setActiveIndex(i)}
                   role="option"
                   aria-selected={i === activeIndex}
+                  disabled={running}
                 >
                   <Icon size={15} strokeWidth={1.75} />
                   <span>{action.label}</span>
