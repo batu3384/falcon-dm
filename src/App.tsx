@@ -49,9 +49,11 @@ function App() {
   const {
     downloads,
     loading,
+    error,
     selectedDownload,
     selectedIds,
     fetchDownloads,
+    retryFetch,
     applyProgress,
     addDownload,
     selectDownload,
@@ -119,7 +121,7 @@ function App() {
   // ponytail: refetch with the right archived flag when the sidebar category
   // switches to/from "Archived" (archived rows are excluded by default).
   useEffect(() => {
-    fetchDownloads(activeCategory === 'Archived' ? true : undefined);
+    fetchDownloads(activeCategory === 'Archived');
   }, [activeCategory, fetchDownloads]);
 
   // Clipboard URL monitor
@@ -422,7 +424,9 @@ function App() {
                 selectedId={selectedDownload?.id ?? null}
                 onSelectDownload={selectDownload}
                 onRefresh={fetchDownloads}
+                onRetry={retryFetch}
                 loading={loading}
+                error={error}
                 batchSelectedIds={selectedIds}
               />
             </ErrorBoundary>

@@ -1,6 +1,13 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useDownloadsStore } from './downloads';
 import type { DownloadModel } from '../types';
+import { getDownloads } from '../api/commands';
+
+vi.mock('../api/commands', () => ({
+  getDownloads: vi.fn(),
+}));
+
+const mockedGetDownloads = vi.mocked(getDownloads);
 
 // ponytail: the downloads store drives the entire list UI. Test the optimistic
 // update paths (add, progress, select) so a regression can't desync the list
@@ -28,8 +35,13 @@ const baseDownload: DownloadModel = {
 
 describe('useDownloadsStore', () => {
   beforeEach(() => {
+    mockedGetDownloads.mockReset();
     useDownloadsStore.setState({
       downloads: [],
+      loading: true,
+      error: null,
+      archived: false,
+      requestSequence: 0,
       selectedDownload: null,
       selectedIds: new Set(),
       lastSelectId: null,
@@ -112,5 +124,62 @@ describe('useDownloadsStore', () => {
     useDownloadsStore.setState({ downloads: [] });
     useDownloadsStore.getState().syncSelectedFromList();
     expect(useDownloadsStore.getState().selectedDownload).toBeNull();
+  });
+
+  it('ignores an older response after a newer filter request', async () => {
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((next) => {
+        resolve = next;
+      });
+      return { promise, resolve };
+    }
+
+    const first = deferred<DownloadModel[]>();
+    const second = deferred<DownloadModel[]>();
+    mockedGetDownloads.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+    const a = useDownloadsStore.getState().fetchDownloads(false);
+    const b = useDownloadsStore.getState().fetchDownloads(true);
+    second.resolve([{ ...baseDownload, archived: true }]);
+    first.resolve([baseDownload]);
+    await Promise.all([a, b]);
+
+    expect(useDownloadsStore.getState().downloads[0].archived).toBe(true);
+  });
+
+  it('retry preserves archived query', async () => {
+    mockedGetDownloads.mockResolvedValueOnce([{ ...baseDownload, archived: true }]);
+    await useDownloadsStore.getState().fetchDownloads(true);
+    mockedGetDownloads.mockResolvedValueOnce([{ ...baseDownload, archived: true }]);
+
+    await useDownloadsStore.getState().retryFetch();
+
+    expect(mockedGetDownloads).toHaveBeenLastCalledWith({ archived: true });
+  });
+
+  it('stores fetch errors and clears them after a successful retry', async () => {
+    mockedGetDownloads.mockRejectedValueOnce(new Error('offline'));
+    await useDownloadsStore.getState().fetchDownloads();
+    expect(useDownloadsStore.getState().error).toBe('offline');
+
+    mockedGetDownloads.mockResolvedValueOnce([baseDownload]);
+    await useDownloadsStore.getState().retryFetch();
+    expect(useDownloadsStore.getState().error).toBeNull();
+  });
+
+  it('keeps existing rows visible while polling', async () => {
+    useDownloadsStore.getState().addDownload(baseDownload);
+    let resolve!: (value: DownloadModel[]) => void;
+    mockedGetDownloads.mockReturnValueOnce(
+      new Promise<DownloadModel[]>((next) => {
+        resolve = next;
+      }),
+    );
+
+    const refresh = useDownloadsStore.getState().fetchDownloads();
+    expect(useDownloadsStore.getState().loading).toBe(false);
+    resolve([baseDownload]);
+    await refresh;
   });
 });

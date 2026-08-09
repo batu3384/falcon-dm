@@ -10,11 +10,15 @@ import { getDownloads } from '../api/commands';
 interface DownloadsState {
   downloads: DownloadModel[];
   loading: boolean;
+  error: string | null;
+  archived: boolean;
+  requestSequence: number;
   selectedDownload: DownloadModel | null;
   selectedIds: Set<number>;
   lastSelectId: number | null;
 
   fetchDownloads: (archived?: boolean) => Promise<void>;
+  retryFetch: () => Promise<void>;
   setLoading: (v: boolean) => void;
   applyProgress: (p: ProgressPayload) => void;
   addDownload: (d: DownloadModel) => void;
@@ -26,21 +30,55 @@ interface DownloadsState {
 export const useDownloadsStore = create<DownloadsState>((set, get) => ({
   downloads: [],
   loading: true,
+  error: null,
+  archived: false,
+  requestSequence: 0,
   selectedDownload: null,
   selectedIds: new Set(),
   lastSelectId: null,
 
   fetchDownloads: async (archived?: boolean) => {
+    const currentArchived = archived ?? get().archived;
+    const sequence = get().requestSequence + 1;
+    const hasExistingRows = get().downloads.length > 0;
+    set({
+      archived: currentArchived,
+      loading: !hasExistingRows,
+      error: null,
+      requestSequence: sequence,
+    });
     try {
       // ponytail: pass archived flag through so the "Archived" view fetches
       // archived rows (hidden by default in getDownloads).
-      const data = await getDownloads(archived === undefined ? undefined : { archived });
-      set({ downloads: data, loading: false });
+      const data = await getDownloads({ archived: currentArchived });
+      if (get().requestSequence !== sequence) return;
+      set((state) => {
+        const liveIds = new Set(data.map((download) => download.id));
+        const selectedIds = new Set(
+          [...state.selectedIds].filter((id) => liveIds.has(id)),
+        );
+        const selectedDownload = state.selectedDownload
+          ? data.find((download) => download.id === state.selectedDownload?.id) ?? null
+          : null;
+        return {
+          downloads: data,
+          loading: false,
+          error: null,
+          selectedIds,
+          selectedDownload,
+        };
+      });
     } catch (e) {
       console.error('Failed to fetch downloads', e);
-      set({ loading: false });
+      if (get().requestSequence !== sequence) return;
+      set({
+        loading: false,
+        error: e instanceof Error ? e.message : String(e),
+      });
     }
   },
+
+  retryFetch: () => get().fetchDownloads(get().archived),
 
   setLoading: (v) => set({ loading: v }),
 

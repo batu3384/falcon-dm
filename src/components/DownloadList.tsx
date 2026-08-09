@@ -1,6 +1,6 @@
 import { useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Inbox } from 'lucide-react';
+import { AlertCircle, Inbox } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import DownloadItem from './DownloadItem';
 import type { DownloadModel } from '../types';
@@ -12,8 +12,10 @@ interface DownloadListProps {
   selectedId: number | null;
   onSelectDownload: (d: DownloadModel | null, mods?: { meta?: boolean; shift?: boolean }) => void;
   onRefresh: () => void;
+  onRetry?: () => void;
   onAddClick?: () => void;
   loading?: boolean;
+  error?: string | null;
   batchSelectedIds?: Set<number>;
 }
 
@@ -28,8 +30,10 @@ export default function DownloadList({
   selectedId,
   onSelectDownload,
   onRefresh,
+  onRetry,
   onAddClick,
   loading = false,
+  error = null,
   batchSelectedIds,
 }: DownloadListProps) {
   const { t } = useTranslation();
@@ -97,6 +101,24 @@ export default function DownloadList({
       </div>
 
       <div className="dl-list" role="list" ref={scrollRef} style={{ overflowY: 'auto', flex: 1 }}>
+        {error && downloads.length > 0 && (
+          <div
+            role="alert"
+            style={{
+              alignItems: 'center',
+              display: 'flex',
+              gap: 8,
+              justifyContent: 'space-between',
+              margin: '8px 12px',
+              padding: '8px 10px',
+            }}
+          >
+            <span title={error}>{t('downloadList.load_error_desc')}</span>
+            <button type="button" className="btn-secondary" onClick={onRetry ?? onRefresh}>
+              {t('downloadList.retry')}
+            </button>
+          </div>
+        )}
         {loading ? (
           // ponytail: shimmer skeletons mirror the real .dl-item geometry so the
           // first paint reads as "loading" instead of a frozen spinner, and the
@@ -113,6 +135,19 @@ export default function DownloadList({
                 <div className="skeleton-actions shimmer" />
               </div>
             ))}
+          </div>
+        ) : error && downloads.length === 0 ? (
+          <div className="empty-state error-state" role="alert">
+            <div className="empty-icon">
+              <AlertCircle strokeWidth={1.5} />
+            </div>
+            <div className="empty-title">{t('downloadList.load_error')}</div>
+            <div className="empty-desc" title={error}>
+              {t('downloadList.load_error_desc')}
+            </div>
+            <button type="button" className="btn-primary" onClick={onRetry ?? onRefresh}>
+              {t('downloadList.retry')}
+            </button>
           </div>
         ) : filtered.length === 0 ? (
           <div className="empty-state">

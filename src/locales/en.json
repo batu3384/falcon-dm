@@ -37,7 +37,10 @@
     "no_search_results": "No results found",
     "no_search_desc": "No downloads match your search.",
     "add_cta": "Add Download",
-    "loading": "Loading downloads…"
+    "loading": "Loading downloads…",
+    "load_error": "Downloads unavailable",
+    "load_error_desc": "Falcon DM could not load the download list.",
+    "retry": "Retry"
   },
   "downloadItem": {
     "pause": "Pause",

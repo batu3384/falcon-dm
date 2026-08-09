@@ -37,7 +37,10 @@
     "no_search_results": "Sonuç bulunamadı",
     "no_search_desc": "Aramanla eşleşen indirme yok.",
     "add_cta": "İndirme Ekle",
-    "loading": "İndirmeler yükleniyor…"
+    "loading": "İndirmeler yükleniyor…",
+    "load_error": "İndirmeler kullanılamıyor",
+    "load_error_desc": "Falcon DM indirme listesini yükleyemedi.",
+    "retry": "Tekrar Dene"
   },
   "downloadItem": {
     "pause": "Duraklat",
