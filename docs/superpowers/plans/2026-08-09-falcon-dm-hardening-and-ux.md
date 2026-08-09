@@ -607,7 +607,7 @@ rtk git commit -m "fix: keep session cookies out of frontend payloads"
   `ARIA2_SHA256` değerlerini doğrulayarak binary kopyalar.
 - CI extension smoke command: `rtk node extension/smoke-test.mjs`.
 
-- [ ] **Step 1: Sidecar checksum testini yaz**
+- [x] **Step 1: Sidecar checksum testini yaz**
 
 `provision-sidecars.sh` içindeki `verify_sha256` helper’ı ana provisioning
 akışından ayrılır; `scripts/provision-sidecars.test.sh` küçük fixture dosyası
@@ -631,7 +631,7 @@ rtk node extension/smoke-test.mjs
 Expected: Syntax ve extension contract check PASS eder; checksum değeri
 olmayan remote download CI’da fail eder.
 
-- [ ] **Step 2: Provision script’i pinle**
+- [x] **Step 2: Provision script’i pinle**
 
 Homebrew binary için `shasum -a 256` ile beklenen architecture/version hash
 kontrol edilir. x86_64 ffmpeg URL’si immutable version URL’ye ve sabit SHA-256
@@ -639,7 +639,7 @@ değerine geçirilir. `curl --fail --location --retry 3` kullanılır; indirme
 hash’i eşleşmezse binary install edilmez. macOS’ta `readlink -f` yerine
 `python3` veya `realpath` ile gerçek dosya yolu alınır.
 
-- [ ] **Step 3: CI ve release guard ekle**
+- [x] **Step 3: CI ve release guard ekle**
 
 CI frontend job’ına extension smoke ve manifest JSON validation eklenir.
 Release Node version `22` olur. Release checksum yalnız `.dmg`/`.app` değil
@@ -650,7 +650,7 @@ installer’a verir. Signed/notarized build Apple credentials varsa, unsigned
 fallback yoksa build fail eder; her architecture için checksum artifact upload
 edilir.
 
-- [ ] **Step 4: Dokümantasyonu güncelle ve commit**
+- [x] **Step 4: Dokümantasyonu güncelle ve commit**
 
 README ve extension README pairing native host install/approval, cookie
 fallback, sidecar verification ve signed/unsigned artifact davranışını mevcut

@@ -9,6 +9,18 @@ Load unpacked from this folder in Chrome/Edge.
 - YouTube quality: send JSON field `format` (yt-dlp `-f` selector). Do **not** put format in the URL. Legacy `#falconfmt=` still accepted server-side as internal storage.
 - Origin must be `chrome-extension://<id>` and that id must be allowlisted after Settings approve.
 - Native messaging host must be installed for Chrome and Edge. Missing host, timeout, or app rejection keeps native browser downloads intact.
+- Development install:
+
+  ```bash
+  cargo build --manifest-path src-tauri/Cargo.toml --bin falcon-dm-native-host
+  NATIVE_HOST_BIN="$PWD/src-tauri/target/debug/falcon-dm-native-host" \
+  CHROME_EXTENSION_ID="<chrome-id>" \
+  EDGE_EXTENSION_ID="<edge-id>" \
+  ./scripts/install-native-host.sh
+  ```
+
+  Release bundles include an architecture-specific native host and checksums.
+  Run the installer with that extracted binary path after installing the app.
 
 ## YouTube
 
@@ -20,3 +32,9 @@ Desktop app needs `yt-dlp` on PATH (or set path in Falcon Settings). Extension s
 - Content scripts are injected **on demand** via `chrome.scripting.executeScript` (popup open or media sniffed), not via an always-on `content_scripts` entry.
 - `nativeMessaging` is required for the app-authenticated pairing proof; the host communicates with Falcon DM through a local 0600 Unix socket.
 - `tabs`/`activeTab` were dropped: tab URL/title access is covered by `<all_urls>`, and `scripting` covers on-demand injection.
+
+Session cookies are accepted only on enqueue requests that need them. They are
+not returned in download list payloads, not copied into the frontend model, and
+are cleared when a download reaches a terminal state. If native messaging or
+pair approval fails, the extension leaves the browser's original download
+untouched.

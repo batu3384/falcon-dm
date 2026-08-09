@@ -92,7 +92,24 @@ Sidecars are **not** committed (`.gitignore`). Provision before first `tauri bui
 ./scripts/provision-sidecars.sh
 ```
 
-Copies `aria2c` from Homebrew and `ffmpeg` (Homebrew on arm64, evermeet.cx static on Intel) into `src-tauri/binaries/` as `aria2c-<triple>` and `ffmpeg-<triple>`. Idempotent.
+Copies `aria2c` from Homebrew and `ffmpeg` (Homebrew on arm64, pinned evermeet.cx
+binary on Intel) into `src-tauri/binaries/` as `aria2c-<triple>` and
+`ffmpeg-<triple>`. Idempotent. Homebrew verifies its bottle; Intel provisioning
+requires `FFMPEG_SHA256` and verifies the extracted binary before installation.
+`ARIA2_SHA256` can pin the copied Homebrew binary as well:
+
+```bash
+ARCH=x86_64 \
+FFMPEG_URL='https://example.invalid/immutable-ffmpeg.zip' \
+FFMPEG_SHA256='<64-hex SHA-256 of extracted ffmpeg>' \
+./scripts/provision-sidecars.sh
+```
+
+Never use an unpinned remote URL in release automation. Release jobs also
+publish architecture-specific checksums for the app, sidecars, and native host.
+Configure repository variables `FFMPEG_URL` and `FFMPEG_SHA256` before creating
+an Intel release; missing values intentionally fail the release instead of
+installing an unverifiable remote binary.
 
 ```bash
 npm install
@@ -103,9 +120,19 @@ npm run tauri build    # .app / .dmg (see release.yml for signed builds)
 ### Browser extension
 
 1. Chrome/Edge → `chrome://extensions` → **Load unpacked** → `extension/`
-2. Open Falcon DM → **Settings → Approve extension** when pair request appears
-3. YouTube: install `yt-dlp`; optional custom binary path in Settings
-4. **Wake deep link:** `falcondm://wake` only (no download params — avoids token-in-URL leaks). Extension wakes app then uses HTTP API. `tauri dev` may not register the URL scheme.
+2. Build/install native host manifests:
+
+   ```bash
+   cargo build --manifest-path src-tauri/Cargo.toml --bin falcon-dm-native-host
+   NATIVE_HOST_BIN="$PWD/src-tauri/target/debug/falcon-dm-native-host" \
+   CHROME_EXTENSION_ID="<chrome-id>" \
+   EDGE_EXTENSION_ID="<edge-id>" \
+   ./scripts/install-native-host.sh
+   ```
+
+3. Open Falcon DM → **Settings → Approve extension** when pair request appears
+4. YouTube: install `yt-dlp`; optional custom binary path in Settings
+5. **Wake deep link:** `falcondm://wake` only (no download params — avoids token-in-URL leaks). Extension wakes app then uses HTTP API. `tauri dev` may not register the URL scheme.
 
 ## Development & contributing
 
@@ -129,7 +156,9 @@ CI on `main` (protected branch) runs: Frontend lint/test/build, Rust fmt/clippy/
 - **Network boundary:** Download URLs validated (no `file://`, loopback, or private IP SSRF). Local API binds `127.0.0.1` only.
 - **Deep links:** `falcondm://wake` only — enqueue happens over authenticated HTTP, not query strings.
 - **Process isolation:** Shell use limited to declared sidecars (`aria2c`, `ffmpeg`, `yt-dlp`). aria2 PID reclaim only touches Falcon's own `aria2.pid`.
-- **Data:** No telemetry. Completed-download cookie fields cleared after success.
+- **Data:** No telemetry. Session cookies stay in backend storage, are never
+  serialized into frontend download payloads, and are cleared on terminal
+  download states. yt-dlp does not persist browser cookies.
 
 ## License
 

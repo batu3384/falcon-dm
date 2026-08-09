@@ -15,74 +15,156 @@
 # This script is idempotent — it skips binaries that already exist.
 set -euo pipefail
 
-BINARY_DIR="$(cd "$(dirname "$0")/.." && pwd)/src-tauri/binaries"
-mkdir -p "$BINARY_DIR"
+verify_sha256() {
+  local file="$1"
+  local expected="$2"
+  local actual
 
-ARCH="${ARCH:-$(uname -m)}"
-# Normalize Apple Silicon arch name
-if [[ "$ARCH" == "arm64" ]]; then
-  ARCH="aarch64"
-fi
-TARGET_TRIPLE="${ARCH}-apple-darwin"
-
-echo "Provisioning sidecars for $TARGET_TRIPLE in $BINARY_DIR"
-
-# ----- aria2c -----
-ARIA2_BIN="$BINARY_DIR/aria2c-$TARGET_TRIPLE"
-if [[ -x "$ARIA2_BIN" ]]; then
-  echo "  aria2c already present, skipping"
-else
-  echo "  aria2c missing — provisioning from Homebrew"
-  if [[ "$ARCH" == "aarch64" ]]; then
-    BREW_BIN="/opt/homebrew/bin/aria2c"
-  else
-    BREW_BIN="/usr/local/bin/aria2c"
+  [[ -f "$file" ]] || {
+    echo "checksum target does not exist: $file" >&2
+    return 1
+  }
+  [[ "$expected" =~ ^[[:xdigit:]]{64}$ ]] || {
+    echo "invalid SHA-256 value for $file" >&2
+    return 1
+  }
+  actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "SHA-256 mismatch for $file" >&2
+    echo "  expected: $expected" >&2
+    echo "  actual:   $actual" >&2
+    return 1
   fi
-  if [[ -x "$BREW_BIN" ]]; then
-    # Copy the real file (resolve symlinks) and strip signature for cross-copy
-    REAL="$(readlink -f "$BREW_BIN")"
-    cp "$REAL" "$ARIA2_BIN"
-    chmod +x "$ARIA2_BIN"
-    echo "  aria2c copied from $REAL"
-  else
-    echo "  ERROR: aria2c not found at $BREW_BIN" >&2
-    echo "  Install it:  arch -${ARCH/arm64/arm64} brew install aria2" >&2
-    echo "  (for x86_64 on Apple Silicon, install Rosetta + x86 Homebrew first)" >&2
-    exit 1
-  fi
-fi
+}
 
-# ----- ffmpeg -----
-FFMPEG_BIN="$BINARY_DIR/ffmpeg-$TARGET_TRIPLE"
-if [[ -x "$FFMPEG_BIN" ]]; then
-  echo "  ffmpeg already present, skipping"
-else
-  echo "  ffmpeg missing — provisioning"
-  if [[ "$ARCH" == "aarch64" ]]; then
-    BREW_BIN="/opt/homebrew/bin/ffmpeg"
-    if [[ -x "$BREW_BIN" ]]; then
-      REAL="$(readlink -f "$BREW_BIN")"
-      cp "$REAL" "$FFMPEG_BIN"
-      chmod +x "$FFMPEG_BIN"
-      echo "  ffmpeg copied from $REAL"
-    else
-      echo "  ERROR: ffmpeg not at $BREW_BIN" >&2; exit 1
+real_path() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$1"
+  else
+    python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+  fi
+}
+
+copy_verified() {
+  local source="$1"
+  local destination="$2"
+  local expected="${3:-}"
+
+  cp "$source" "$destination"
+  chmod +x "$destination"
+  if [[ -n "$expected" ]]; then
+    if ! verify_sha256 "$destination" "$expected"; then
+      rm -f "$destination"
+      return 1
     fi
-  else
-    # x86_64: evermeet.cx static build
-    TMP="$(mktemp -d)"
-    curl -sL -o "$TMP/ffmpeg.zip" "https://evermeet.cx/ffmpeg/getrelease/zip"
-    (cd "$TMP" && unzip -o ffmpeg.zip >/dev/null 2>&1)
-    if [[ -x "$TMP/ffmpeg" ]]; then
-      cp "$TMP/ffmpeg" "$FFMPEG_BIN"
-      chmod +x "$FFMPEG_BIN"
-      echo "  ffmpeg downloaded from evermeet.cx"
-    else
-      echo "  ERROR: failed to download ffmpeg" >&2; exit 1
-    fi
-    rm -rf "$TMP"
   fi
-fi
+}
 
-echo "Done. Sidecars for $TARGET_TRIPLE:"
-ls -la "$BINARY_DIR"/*-"$TARGET_TRIPLE"
+main() {
+  local script_root
+  script_root="$(cd "$(dirname "$0")/.." && pwd)"
+  local binary_dir="$script_root/src-tauri/binaries"
+  mkdir -p "$binary_dir"
+
+  local arch="${ARCH:-$(uname -m)}"
+  # Normalize Apple Silicon arch name
+  if [[ "$arch" == "arm64" ]]; then
+    arch="aarch64"
+  fi
+  local target_triple="${arch}-apple-darwin"
+  local aria2_sha256="${ARIA2_SHA256:-}"
+  local ffmpeg_url="${FFMPEG_URL:-}"
+  local ffmpeg_sha256="${FFMPEG_SHA256:-}"
+
+  echo "Provisioning sidecars for $target_triple in $binary_dir"
+
+  # ----- aria2c -----
+  local aria2_bin="$binary_dir/aria2c-$target_triple"
+  if [[ -x "$aria2_bin" ]]; then
+    if [[ -n "$aria2_sha256" ]]; then
+      verify_sha256 "$aria2_bin" "$aria2_sha256"
+    fi
+    echo "  aria2c already present, skipping"
+  else
+    echo "  aria2c missing — provisioning from Homebrew"
+    local brew_bin
+    if [[ "$arch" == "aarch64" ]]; then
+      brew_bin="/opt/homebrew/bin/aria2c"
+    else
+      brew_bin="/usr/local/bin/aria2c"
+    fi
+    if [[ -x "$brew_bin" ]]; then
+      # Homebrew verifies its bottle; optionally pin the copied binary too.
+      local real
+      real="$(real_path "$brew_bin")"
+      copy_verified "$real" "$aria2_bin" "$aria2_sha256"
+      echo "  aria2c copied from $real"
+    else
+      echo "  ERROR: aria2c not found at $brew_bin" >&2
+      echo "  Install it: brew install aria2" >&2
+      echo "  (for x86_64 on Apple Silicon, install Rosetta + x86 Homebrew first)" >&2
+      exit 1
+    fi
+  fi
+ 
+  # ----- ffmpeg -----
+  local ffmpeg_bin="$binary_dir/ffmpeg-$target_triple"
+  if [[ -x "$ffmpeg_bin" ]]; then
+    if [[ "$arch" == "x86_64" && -z "$ffmpeg_sha256" ]]; then
+      echo "  ERROR: FFMPEG_SHA256 is required to verify an Intel download" >&2
+      exit 1
+    fi
+    if [[ -n "$ffmpeg_sha256" ]]; then
+      verify_sha256 "$ffmpeg_bin" "$ffmpeg_sha256"
+    fi
+    echo "  ffmpeg already present, skipping"
+  else
+    echo "  ffmpeg missing — provisioning"
+    if [[ "$arch" == "aarch64" ]]; then
+      local brew_bin="/opt/homebrew/bin/ffmpeg"
+      if [[ -x "$brew_bin" ]]; then
+        local real
+        real="$(real_path "$brew_bin")"
+        copy_verified "$real" "$ffmpeg_bin" "$ffmpeg_sha256"
+        echo "  ffmpeg copied from $real"
+      else
+        echo "  ERROR: ffmpeg not at $brew_bin" >&2
+        exit 1
+      fi
+    else
+      [[ -n "$ffmpeg_url" ]] || {
+        echo "  ERROR: FFMPEG_URL is required for remote ffmpeg downloads" >&2
+        exit 1
+      }
+      [[ -n "$ffmpeg_sha256" ]] || {
+        echo "  ERROR: FFMPEG_SHA256 is required for remote ffmpeg downloads" >&2
+        exit 1
+      }
+      local tmp
+      tmp="$(mktemp -d)"
+      curl --fail --location --retry 3 --retry-delay 1 --silent --show-error \
+        --output "$tmp/ffmpeg.zip" "$ffmpeg_url"
+      (cd "$tmp" && unzip -o ffmpeg.zip >/dev/null 2>&1)
+      [[ -x "$tmp/ffmpeg" ]] || {
+        echo "  ERROR: failed to extract ffmpeg" >&2
+        exit 1
+      }
+      verify_sha256 "$tmp/ffmpeg" "$ffmpeg_sha256"
+      copy_verified "$tmp/ffmpeg" "$ffmpeg_bin"
+      rm -rf "$tmp"
+      echo "  ffmpeg downloaded from $ffmpeg_url"
+    fi
+  fi
+
+  echo "Done. Sidecars for $target_triple:"
+  ls -la "$binary_dir"/*-"$target_triple"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

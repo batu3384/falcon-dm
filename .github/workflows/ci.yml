@@ -33,6 +33,11 @@ jobs:
         run: npm run test
       - name: Type-check + build
         run: npm run build
+      - name: Extension smoke contract
+        run: node extension/smoke-test.mjs
+      - name: Extension manifest JSON
+        run: |
+          node -e 'const fs=require("fs"); const m=JSON.parse(fs.readFileSync("extension/manifest.json","utf8")); if (!m.permissions.includes("nativeMessaging")) process.exit(1); if (!m.background?.service_worker) process.exit(1);'
       - name: npm audit (production deps, high+critical fail)
         run: npm audit --omit=dev --audit-level=high
 
@@ -47,6 +52,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
+      - name: Sidecar checksum helper test
+        run: |
+          bash scripts/provision-sidecars.test.sh
+          bash -n scripts/provision-sidecars.sh
       - name: Install sidecar deps (Homebrew)
         run: brew install aria2 ffmpeg
       - name: Provision sidecars (aarch64)

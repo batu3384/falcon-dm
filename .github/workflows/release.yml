@@ -21,12 +21,17 @@ jobs:
             target: x86_64-apple-darwin
             arch: x86_64
     runs-on: ${{ matrix.runner }}
+    env:
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - uses: dtolnay/rust-toolchain@stable
@@ -44,21 +49,39 @@ jobs:
         run: ./scripts/provision-sidecars.sh
         env:
           ARCH: ${{ matrix.arch }}
+          ARIA2_SHA256: ${{ vars.ARIA2_SHA256 }}
+          FFMPEG_URL: ${{ vars.FFMPEG_URL }}
+          FFMPEG_SHA256: ${{ vars.FFMPEG_SHA256 }}
 
       - run: npm ci
 
+      - name: Build native messaging host
+        working-directory: src-tauri
+        run: cargo build --bin falcon-dm-native-host --target ${{ matrix.target }} --release
+
+      - name: Bundle native messaging host
+        run: |
+          cp "src-tauri/target/${{ matrix.target }}/release/falcon-dm-native-host" \
+            "src-tauri/binaries/falcon-dm-native-host-${{ matrix.target }}"
+          chmod +x "src-tauri/binaries/falcon-dm-native-host-${{ matrix.target }}"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("src-tauri/tauri.conf.json")
+          config = json.loads(path.read_text())
+          bins = config["bundle"]["externalBin"]
+          if "binaries/falcon-dm-native-host" not in bins:
+              bins.append("binaries/falcon-dm-native-host")
+          path.write_text(json.dumps(config, indent=2) + "\n")
+          PY
+
       # ponytail: Tauri notarization needs the signing identity + Apple ID creds.
-      # When absent (e.g. a fork without a paid developer account), we skip
-      # signing and still produce a usable dev build.
       - name: Build + sign + notarize (Tauri)
         if: ${{ env.APPLE_SIGNING_IDENTITY != '' }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Falcon DM ${{ github.ref_name }}"
@@ -74,8 +97,20 @@ jobs:
 
       - name: Compute checksum
         run: |
-          cd src-tauri/target/${{ matrix.target }}/release/bundle
-          find . -type f \( -name "*.dmg" -o -name "*.app" \) -exec shasum -a 256 {} \; >> $GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt
+          : > "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
+          bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
+          find "$bundle" -type f -name "*.dmg" -exec shasum -a 256 {} \; \
+            >> "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
+          while IFS= read -r app; do
+            ditto -c -k --sequesterRsrc --keepParent "$app" "$app.zip"
+            shasum -a 256 "$app.zip" >> "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
+          done < <(find "$bundle" -type d -name "*.app" -print)
+          find src-tauri/binaries -type f -name "*-${{ matrix.target }}" \
+            -exec shasum -a 256 {} \; \
+            >> "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
+          shasum -a 256 \
+            "src-tauri/target/${{ matrix.target }}/release/falcon-dm-native-host" \
+            >> "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
 
       - name: Upload checksum artifact
         uses: actions/upload-artifact@v4
