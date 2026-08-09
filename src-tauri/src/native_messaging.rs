@@ -174,7 +174,7 @@ mod tests {
     #[test]
     fn native_message_rejects_oversized_frame() {
         let mut input = (65_537u32).to_le_bytes().to_vec();
-        input.extend(std::iter::repeat(b'x').take(65_537));
+        input.extend(std::iter::repeat_n(b'x', 65_537));
         assert!(read_native_message(&mut input.as_slice()).is_err());
     }
 

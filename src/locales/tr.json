@@ -244,6 +244,8 @@
     "clear": "Günlükleri temizle",
     "stream": "Günlük akışı",
     "empty": "Henüz günlük kaydı yok",
+    "load_error": "Günlükler kullanılamıyor",
+    "retry": "Tekrar Dene",
     "entries": "kayıt",
     "cleared": "Günlükler temizlendi"
   },
@@ -256,6 +258,12 @@
     "failed": "Başarısız",
     "total_downloaded": "Toplam indirilen",
     "current_speed": "Anlık hız",
-    "speed_over_time": "Zamana göre hız"
+    "speed_over_time": "Zamana göre hız",
+    "load_error": "İstatistikler kullanılamıyor",
+    "retry": "Tekrar Dene",
+    "speed_graph_summary": "Anlık hız saniyede {{speed}}, eğilim {{trend}}",
+    "trend_up": "yükseliyor",
+    "trend_down": "düşüyor",
+    "trend_steady": "sabit"
   }
 }

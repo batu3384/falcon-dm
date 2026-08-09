@@ -244,6 +244,8 @@
     "clear": "Clear logs",
     "stream": "Log stream",
     "empty": "No log entries yet",
+    "load_error": "Logs unavailable",
+    "retry": "Retry",
     "entries": "entries",
     "cleared": "Logs cleared"
   },
@@ -256,6 +258,12 @@
     "failed": "Failed",
     "total_downloaded": "Total downloaded",
     "current_speed": "Current speed",
-    "speed_over_time": "Speed over time"
+    "speed_over_time": "Speed over time",
+    "load_error": "Statistics unavailable",
+    "retry": "Retry",
+    "speed_graph_summary": "Current speed {{speed}} per second, trend {{trend}}",
+    "trend_up": "rising",
+    "trend_down": "falling",
+    "trend_steady": "steady"
   }
 }

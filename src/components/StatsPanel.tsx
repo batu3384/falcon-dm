@@ -19,15 +19,20 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   useModalA11y(panelRef, onClose);
   const [stats, setStats] = useState<DownloadStats | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       try {
         const s = await api.getStats();
-        if (!cancelled) setStats(s);
-      } catch {
-        /* best-effort; next tick retries */
+        if (!cancelled) {
+          setStats(s);
+          setError(null);
+        }
+      } catch (e) {
+        if (!cancelled) setError(api.extractTauriError(e));
       }
     };
     tick();
@@ -36,7 +41,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
       cancelled = true;
       clearInterval(id);
     };
-  }, []);
+  }, [retryNonce]);
 
   const cards = [
     {
@@ -87,6 +92,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
             type="button"
             onClick={onClose}
             className="icon-btn"
+            data-modal-cancel
             aria-label={t('stats.close')}
           >
             <X size={18} />
@@ -94,56 +100,86 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
         </div>
 
         <div className="modal-body">
-          <div className="stats-grid">
-            {cards.map((c) => (
-              <div className="kpi-card" key={c.key}>
-                <div className="kpi-card-head">
-                  <c.Icon size={13} />
-                  <span className={`kpi-dot ${c.dot}`} />
-                  {c.label}
-                </div>
-                <div className="kpi-value">{c.value}</div>
+          {error && stats && (
+            <div className="diagnostic-error" role="alert">
+              <span title={error}>{t('stats.load_error')}</span>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setRetryNonce((value) => value + 1)}
+              >
+                {t('stats.retry')}
+              </button>
+            </div>
+          )}
+          {!stats && error ? (
+            <div className="empty-state" role="alert">
+              <AlertCircle size={24} />
+              <span className="empty-title">{t('stats.load_error')}</span>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => setRetryNonce((value) => value + 1)}
+              >
+                {t('stats.retry')}
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="stats-grid">
+                {cards.map((c) => (
+                  <div className="kpi-card" key={c.key}>
+                    <div className="kpi-card-head">
+                      <c.Icon size={13} />
+                      <span className={`kpi-dot ${c.dot}`} />
+                      {c.label}
+                    </div>
+                    <div className="kpi-value">{c.value}</div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
 
-          <div className="stats-totals">
-            <div className="stats-total-item">
-              <span className="stats-total-label">
-                <Database
-                  size={11}
-                  style={{ display: 'inline', verticalAlign: '-1px', marginRight: 4 }}
-                />
-                {t('stats.total_downloaded')}
-              </span>
-              <span className="stats-total-value">
-                {formatBytes(stats?.total_downloaded_bytes ?? 0)}
-              </span>
-            </div>
-            <div className="stats-total-item">
-              <span className="stats-total-label">
-                <Gauge
-                  size={11}
-                  style={{ display: 'inline', verticalAlign: '-1px', marginRight: 4 }}
-                />
-                {t('stats.current_speed')}
-              </span>
-              <span className="stats-total-value">{formatBytes(stats?.current_speed ?? 0)}/s</span>
-            </div>
-          </div>
+              <div className="stats-totals">
+                <div className="stats-total-item">
+                  <span className="stats-total-label">
+                    <Database
+                      size={11}
+                      style={{ display: 'inline', verticalAlign: '-1px', marginRight: 4 }}
+                    />
+                    {t('stats.total_downloaded')}
+                  </span>
+                  <span className="stats-total-value">
+                    {formatBytes(stats?.total_downloaded_bytes ?? 0)}
+                  </span>
+                </div>
+                <div className="stats-total-item">
+                  <span className="stats-total-label">
+                    <Gauge
+                      size={11}
+                      style={{ display: 'inline', verticalAlign: '-1px', marginRight: 4 }}
+                    />
+                    {t('stats.current_speed')}
+                  </span>
+                  <span className="stats-total-value">
+                    {formatBytes(stats?.current_speed ?? 0)}/s
+                  </span>
+                </div>
+              </div>
 
-          <div className="stats-chart">
-            <div className="stats-total-label" style={{ marginBottom: 8 }}>
-              {t('stats.speed_over_time')}
-            </div>
-            <div style={{ width: '100%', display: 'flex', justifyContent: 'center' }}>
-              <SpeedGraph speed={stats?.current_speed ?? 0} />
-            </div>
-          </div>
+              <div className="stats-chart">
+                <div className="stats-total-label" style={{ marginBottom: 8 }}>
+                  {t('stats.speed_over_time')}
+                </div>
+                <div style={{ width: '100%', display: 'flex', justifyContent: 'center' }}>
+                  <SpeedGraph speed={stats?.current_speed ?? 0} />
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="modal-foot">
-          <button type="button" className="btn-secondary" onClick={onClose}>
+          <button type="button" className="btn-secondary" data-modal-cancel onClick={onClose}>
             {t('stats.close')}
           </button>
         </div>

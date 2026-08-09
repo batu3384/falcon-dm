@@ -146,6 +146,23 @@ describe('diagnostic payload schemas', () => {
     expect(DownloadStatsSchema.parse(stats).active).toBe(1);
     expect(() => DownloadStatsSchema.parse({ ...stats, active: '1' })).toThrow();
   });
+
+  it('rejects negative stats and non-finite speed', () => {
+    const stats = {
+      active: 1,
+      queued: 2,
+      completed: 3,
+      failed: 4,
+      total_downloaded_bytes: 5,
+      current_speed: 6,
+    };
+    expect(() => DownloadStatsSchema.parse({ ...stats, active: -1 })).toThrow();
+    expect(() => DownloadStatsSchema.parse({ ...stats, current_speed: Number.NaN })).toThrow();
+  });
+
+  it('rejects malformed log entries', () => {
+    expect(() => LogArraySchema.parse([{ level: 'ERROR' }])).toThrow();
+  });
 });
 
 describe('enum exports', () => {

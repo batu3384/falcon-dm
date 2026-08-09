@@ -44,6 +44,7 @@ export function LogPanel({ onClose }: LogPanelProps) {
   useModalA11y(panelRef, onClose);
 
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState<LevelFilter>('ALL');
   const [query, setQuery] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -53,8 +54,11 @@ export function LogPanel({ onClose }: LogPanelProps) {
     try {
       const data = await api.getLogs(level === 'ALL' ? undefined : level);
       setLogs(data);
+      setError(null);
     } catch (e) {
-      showToast('error', api.extractTauriError(e));
+      const detail = api.extractTauriError(e);
+      setError(detail);
+      showToast('error', detail);
     }
   }, [level, showToast]);
 
@@ -111,7 +115,13 @@ export function LogPanel({ onClose }: LogPanelProps) {
           <h2 id="logs-title" className="modal-title">
             {t('logs.title')}
           </h2>
-          <button type="button" onClick={onClose} className="icon-btn" aria-label={t('logs.close')}>
+          <button
+            type="button"
+            onClick={onClose}
+            className="icon-btn"
+            data-modal-cancel
+            aria-label={t('logs.close')}
+          >
             <X size={18} />
           </button>
         </div>
@@ -169,7 +179,23 @@ export function LogPanel({ onClose }: LogPanelProps) {
           aria-live="polite"
           aria-label={t('logs.stream')}
         >
-          {filtered.length === 0 ? (
+          {error && logs.length > 0 && (
+            <div className="diagnostic-error" role="alert">
+              <span title={error}>{t('logs.load_error')}</span>
+              <button type="button" className="btn-secondary" onClick={refresh}>
+                {t('logs.retry')}
+              </button>
+            </div>
+          )}
+          {error && logs.length === 0 ? (
+            <div className="empty-state" role="alert">
+              <AlertCircle size={24} />
+              <span className="empty-title">{t('logs.load_error')}</span>
+              <button type="button" className="btn-primary" onClick={refresh}>
+                {t('logs.retry')}
+              </button>
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="empty-state">
               <span className="empty-title">{t('logs.empty')}</span>
             </div>
@@ -195,7 +221,7 @@ export function LogPanel({ onClose }: LogPanelProps) {
           <span className="log-count mono">
             {filtered.length} {t('logs.entries')}
           </span>
-          <button type="button" className="btn-secondary" onClick={onClose}>
+          <button type="button" className="btn-secondary" data-modal-cancel onClick={onClose}>
             {t('logs.close')}
           </button>
         </div>

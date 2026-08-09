@@ -53,11 +53,11 @@
   --surface-3: rgba(0, 0, 0, 0.04);
   --surface-hover: rgba(0, 0, 0, 0.06);
   --surface-active: rgba(0, 0, 0, 0.09);
-  --border: rgba(0, 0, 0, 0.08);
-  --border-strong: rgba(0, 0, 0, 0.14);
-  --text-1: rgba(0, 0, 0, 0.88);
-  --text-2: rgba(0, 0, 0, 0.55);
-  --text-3: rgba(0, 0, 0, 0.45);
+  --border: #d1d5db;
+  --border-strong: #9ca3af;
+  --text-1: #111827;
+  --text-2: #4b5563;
+  --text-3: #5f6b7a;
   --accent: var(--color-primary);
   --accent-hover: #1d4ed8;
   --accent-soft: rgba(37, 99, 235, 0.12);
@@ -169,6 +169,10 @@ button:focus-visible,
 .icon-btn.active {
   background: var(--accent-soft);
   color: var(--accent);
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .field-error {
@@ -661,6 +665,20 @@ select {
   text-align: center;
   line-height: 1.5;
 }
+.diagnostic-error {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 10px 12px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+}
+.diagnostic-error button {
+  flex-shrink: 0;
+}
 
 /* ===== Skeleton Loading (shimmer) ===== */
 /* ponytail: placeholder rows shown during the very first load. Mirrors .dl-item
@@ -829,6 +847,8 @@ select {
 }
 .stats-chart .sparkline {
   width: 100%;
+  max-width: none;
+  min-width: 0;
   height: 56px;
 }
 .stats-panel .modal-body {
@@ -1793,11 +1813,12 @@ select {
 
 /* ===== Sparkline ===== */
 .sparkline {
-  margin-left: 4px;
-}
-.sparkline {
   margin-left: 6px;
   flex-shrink: 0;
+  width: 100%;
+  min-width: 72px;
+  max-width: 180px;
+  height: 20px;
 }
 
 /* ===== Command Palette ===== */
@@ -1923,6 +1944,59 @@ select {
 }
 .spin {
   animation: spin 0.8s linear infinite;
+}
+
+@media (max-width: 960px) {
+  .sidebar {
+    width: 188px;
+  }
+  .inspector {
+    width: 264px;
+  }
+  .toolbar-row {
+    height: auto;
+    min-height: 46px;
+    flex-wrap: wrap;
+    padding-block: 8px;
+  }
+  .toolbar-actions {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+  .toolbar-actions:last-child {
+    flex: 1 1 220px;
+    justify-content: flex-end;
+  }
+  .search-wrap {
+    width: min(220px, 34vw);
+  }
+  .batch-bar {
+    flex-wrap: wrap;
+  }
+  .batch-count {
+    margin-right: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .sidebar {
+    width: 164px;
+  }
+  .inspector {
+    width: 240px;
+  }
+  .content-row {
+    min-width: 0;
+  }
+  .toolbar-actions:last-child {
+    justify-content: flex-start;
+  }
+  .search-wrap {
+    width: min(190px, 48vw);
+  }
+  .batch-bar {
+    overflow-x: auto;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

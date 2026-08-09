@@ -96,7 +96,7 @@ export const ExtensionStatusSchema = z.object({
 });
 
 export const LogEntrySchema = z.object({
-  ts: z.number(),
+  ts: z.number().finite().nonnegative(),
   level: z.string(),
   target: z.string(),
   message: z.string(),
@@ -105,12 +105,12 @@ export const LogEntrySchema = z.object({
 export const LogArraySchema = z.array(LogEntrySchema);
 
 export const DownloadStatsSchema = z.object({
-  active: z.number(),
-  queued: z.number(),
-  completed: z.number(),
-  failed: z.number(),
-  total_downloaded_bytes: z.number(),
-  current_speed: z.number(),
+  active: z.number().int().nonnegative(),
+  queued: z.number().int().nonnegative(),
+  completed: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  total_downloaded_bytes: z.number().finite().nonnegative(),
+  current_speed: z.number().finite().nonnegative(),
 });
 
 export type ParsedDownload = z.infer<typeof DownloadSchema>;
