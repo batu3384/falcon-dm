@@ -1,6 +1,6 @@
 use crate::storage::{models::DownloadStatus, Database};
 use crate::util::{sanitize_header_value, validate_fetch_url};
-use futures::stream::{self, StreamExt};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use m3u8_rs::Playlist;
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, REFERER, USER_AGENT};
 use reqwest::{Client, RequestBuilder};
@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -129,6 +130,13 @@ async fn read_bounded_response(
     Ok(body)
 }
 
+async fn cancellation_requested(rx: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+    if *rx.borrow() {
+        return true;
+    }
+    rx.changed().await.is_ok() && *rx.borrow()
+}
+
 fn pick_best_variant(variants: &[m3u8_rs::VariantStream]) -> Option<&m3u8_rs::VariantStream> {
     variants.iter().max_by_key(|v| v.bandwidth)
 }
@@ -138,18 +146,23 @@ pub async fn process_hls_stream(
     download_id: i64,
     url: &str,
     save_path: &str,
-    rx: tokio::sync::watch::Receiver<bool>,
+    mut rx: tokio::sync::watch::Receiver<bool>,
     headers: HlsHeaders,
     db: Option<Database>,
 ) -> Result<(), String> {
     let client = build_client(&headers)?;
     let base_url = validate_fetch_url(url)?;
 
-    let res = request_with_headers(&client, &base_url, &base_url, &headers)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let bytes = read_bounded_response(res, MAX_PLAYLIST_BYTES).await?;
+    let res = tokio::select! {
+        _ = cancellation_requested(&mut rx) => return Err("Cancelled".into()),
+        result = request_with_headers(&client, &base_url, &base_url, &headers).send() => {
+            result.map_err(|e| e.to_string())?
+        }
+    };
+    let bytes = tokio::select! {
+        _ = cancellation_requested(&mut rx) => return Err("Cancelled".into()),
+        result = read_bounded_response(res, MAX_PLAYLIST_BYTES) => result?,
+    };
 
     let playlist = match m3u8_rs::parse_playlist_res(&bytes) {
         Ok(p) => p,
@@ -174,11 +187,16 @@ pub async fn process_hls_stream(
             let variant_url = validate_fetch_url(
                 base_url.join(&variant.uri).map_err(|e| e.to_string())?.as_str(),
             )?;
-            let m_res = request_with_headers(&client, &base_url, &variant_url, &headers)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            let m_bytes = read_bounded_response(m_res, MAX_PLAYLIST_BYTES).await?;
+            let m_res = tokio::select! {
+                _ = cancellation_requested(&mut rx) => return Err("Cancelled".into()),
+                result = request_with_headers(&client, &base_url, &variant_url, &headers).send() => {
+                    result.map_err(|e| e.to_string())?
+                }
+            };
+            let m_bytes = tokio::select! {
+                _ = cancellation_requested(&mut rx) => return Err("Cancelled".into()),
+                result = read_bounded_response(m_res, MAX_PLAYLIST_BYTES) => result?,
+            };
             match m3u8_rs::parse_playlist_res(&m_bytes) {
                 Ok(Playlist::MediaPlaylist(m_pl)) => {
                     // Refine estimate: bandwidth(bps)/8 × total_duration(s).
@@ -241,7 +259,7 @@ pub async fn process_hls_stream(
         .map(|(idx, seg_url)| {
             let client = client.clone();
             let temp_dir = temp_dir.clone();
-            let rx_clone = rx.clone();
+            let mut rx_clone = rx.clone();
             let downloaded_bytes = downloaded_bytes.clone();
             let completed_segs = completed_segs.clone();
             let total_size_estimate = total_size_estimate.clone();
@@ -271,27 +289,38 @@ pub async fn process_hls_stream(
                     if *rx_clone.borrow() {
                         return Err("Cancelled".to_string());
                     }
-                    match request_with_headers(&client, &source_url, &seg_url, &headers)
-                        .send()
-                        .await
-                    {
+                    let response = tokio::select! {
+                        _ = cancellation_requested(&mut rx_clone) => {
+                            return Err("Cancelled".to_string());
+                        }
+                        result = request_with_headers(&client, &source_url, &seg_url, &headers).send() => result,
+                    };
+                    match response {
                         Ok(resp) => {
                             let status = resp.status();
                             if status.is_server_error() || status.as_u16() == 429 {
                                 last_err = Some(format!("segment HTTP {}", status.as_u16()));
                                 if attempt + 1 < SEG_MAX_ATTEMPTS {
                                     let backoff_ms = 200u64 * (1 << attempt); // 200, 400
-                                    tokio::time::sleep(std::time::Duration::from_millis(
-                                        backoff_ms,
-                                    ))
-                                    .await;
+                                    tokio::select! {
+                                        _ = cancellation_requested(&mut rx_clone) => {
+                                            return Err("Cancelled".to_string());
+                                        }
+                                        _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {}
+                                    }
                                     continue;
                                 }
                             } else if !status.is_success() {
                                 // 4xx (except 429) — permanent, don't retry.
                                 return Err(format!("segment HTTP {}", status.as_u16()));
                             } else {
-                                match read_bounded_response(resp, MAX_SEGMENT_BYTES).await {
+                                let body = tokio::select! {
+                                    _ = cancellation_requested(&mut rx_clone) => {
+                                        return Err("Cancelled".to_string());
+                                    }
+                                    result = read_bounded_response(resp, MAX_SEGMENT_BYTES) => result,
+                                };
+                                match body {
                                     Ok(b) => {
                                         bytes = b;
                                         last_err = None;
@@ -300,10 +329,12 @@ pub async fn process_hls_stream(
                                     Err(e) => {
                                         last_err = Some(e.to_string());
                                         if attempt + 1 < SEG_MAX_ATTEMPTS {
-                                            tokio::time::sleep(std::time::Duration::from_millis(
-                                                200 * (1 << attempt),
-                                            ))
-                                            .await;
+                                            tokio::select! {
+                                                _ = cancellation_requested(&mut rx_clone) => {
+                                                    return Err("Cancelled".to_string());
+                                                }
+                                                _ = tokio::time::sleep(std::time::Duration::from_millis(200 * (1 << attempt))) => {}
+                                            }
                                             continue;
                                         }
                                     }
@@ -313,10 +344,12 @@ pub async fn process_hls_stream(
                         Err(e) => {
                             last_err = Some(e.to_string());
                             if attempt + 1 < SEG_MAX_ATTEMPTS {
-                                tokio::time::sleep(std::time::Duration::from_millis(
-                                    200 * (1 << attempt),
-                                ))
-                                .await;
+                                tokio::select! {
+                                    _ = cancellation_requested(&mut rx_clone) => {
+                                        return Err("Cancelled".to_string());
+                                    }
+                                    _ = tokio::time::sleep(std::time::Duration::from_millis(200 * (1 << attempt))) => {}
+                                }
                                 continue;
                             }
                         }
@@ -364,10 +397,8 @@ pub async fn process_hls_stream(
             }
         })
         .buffer_unordered(concurrency_limit)
-        .collect::<Vec<Result<PathBuf, String>>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<PathBuf>, String>>()?;
+        .try_collect::<Vec<PathBuf>>()
+        .await?;
 
     let mut segment_paths = segment_paths;
     segment_paths.sort();
@@ -409,8 +440,11 @@ pub async fn process_hls_stream(
     // save dirs). Fall back to an explicit error instead of panicking.
     let list_path_str =
         list_path.to_str().ok_or_else(|| "HLS temp path is not valid UTF-8".to_string())?;
+    let temp_output = temp_dir.join("output.mp4");
+    let temp_output_str =
+        temp_output.to_str().ok_or_else(|| "HLS output path is not valid UTF-8".to_string())?;
 
-    let output = app_handle
+    let (mut events, child) = app_handle
         .shell()
         .sidecar("ffmpeg")
         .map_err(|e| format!("Failed to find ffmpeg sidecar: {}", e))?
@@ -425,17 +459,52 @@ pub async fn process_hls_stream(
             "copy",
             "-bsf:a",
             "aac_adtstoasc",
-            save_path,
+            temp_output_str,
         ])
-        .output()
-        .await
+        .spawn()
         .map_err(|e| format!("Failed to execute FFmpeg: {}", e))?;
 
-    if !output.status.success() {
-        return Err(format!("FFmpeg failed: {}", String::from_utf8_lossy(&output.stderr)));
+    let mut ffmpeg_stderr = Vec::new();
+    loop {
+        tokio::select! {
+            _ = cancellation_requested(&mut rx) => {
+                let _ = child.kill();
+                while let Some(event) = events.recv().await {
+                    if matches!(event, CommandEvent::Terminated(_)) {
+                        break;
+                    }
+                }
+                return Err("Cancelled".into());
+            }
+            event = events.recv() => {
+                match event {
+                    Some(CommandEvent::Stderr(bytes)) => {
+                        if ffmpeg_stderr.len() < 8_000 {
+                            ffmpeg_stderr.extend_from_slice(&bytes[..bytes.len().min(8_000 - ffmpeg_stderr.len())]);
+                        }
+                    }
+                    Some(CommandEvent::Terminated(payload)) => {
+                        if payload.code != Some(0) {
+                            return Err(format!("FFmpeg failed: {}", String::from_utf8_lossy(&ffmpeg_stderr)));
+                        }
+                        break;
+                    }
+                    Some(CommandEvent::Error(error)) => return Err(format!("FFmpeg failed: {error}")),
+                    Some(CommandEvent::Stdout(_)) => {}
+                    Some(_) => {}
+                    None => return Err("FFmpeg ended without exit status".into()),
+                }
+            }
+        }
     }
 
-    crate::util::validate_completed_file(std::path::Path::new(save_path))?;
+    crate::util::validate_completed_file(&temp_output)?;
+    let destination = PathBuf::from(save_path);
+    tokio::task::spawn_blocking(move || {
+        crate::util::copy_file_exclusive(&temp_output, &destination)
+    })
+    .await
+    .map_err(|e| format!("HLS output move task failed: {e}"))??;
 
     Ok(())
 }
@@ -464,5 +533,12 @@ mod tests {
         let other_host = Url::parse("https://cdn.example.net/seg.ts").unwrap();
         assert!(cookie_header_for_target(&source, &same_host, Some("sid=abc")).is_some());
         assert!(cookie_header_for_target(&source, &other_host, Some("sid=abc")).is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_receiver_reports_cancelled_state() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tx.send(true).unwrap();
+        assert!(cancellation_requested(&mut rx).await);
     }
 }

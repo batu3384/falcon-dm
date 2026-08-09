@@ -121,7 +121,7 @@ impl QueueManager {
     }
 
     pub fn cancel_stream(&self, id: i64) -> bool {
-        if let Some(tx) = lock_or_recover(&self.active_stream_tasks).remove(&id) {
+        if let Some(tx) = lock_or_recover(&self.active_stream_tasks).get(&id) {
             let _ = tx.send(true);
             true
         } else {
@@ -244,7 +244,11 @@ impl QueueManager {
                 }
                 // Keep as Queued so schedule window reopens automatically
                 dl.status = DownloadStatus::Queued;
-                let _ = db.update_download(dl.id.unwrap(), &dl);
+                let _ = db.update_download_if_status(
+                    dl.id.unwrap(),
+                    &[DownloadStatus::Downloading, DownloadStatus::Merging],
+                    &dl,
+                );
             }
             return Ok(());
         }
@@ -263,7 +267,11 @@ impl QueueManager {
                     self.cancel_stream(dl.id.unwrap());
                 }
                 dl.status = DownloadStatus::Queued;
-                let _ = db.update_download(dl.id.unwrap(), &dl);
+                let _ = db.update_download_if_status(
+                    dl.id.unwrap(),
+                    &[DownloadStatus::Downloading, DownloadStatus::Merging],
+                    &dl,
+                );
                 active_count = active_count.saturating_sub(1);
             }
         }
@@ -305,11 +313,17 @@ impl QueueManager {
                             map.insert(dl_id, tx);
                         }
 
-                        dl.status = DownloadStatus::Downloading;
-                        if db.update_download(dl_id, &dl).is_err() {
+                        let mut claimed = dl.clone();
+                        claimed.status = DownloadStatus::Downloading;
+                        claimed.error_message = None;
+                        if !db
+                            .update_download_if_status(dl_id, &[DownloadStatus::Queued], &claimed)
+                            .unwrap_or(false)
+                        {
                             lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
                             continue;
                         }
+                        dl.status = DownloadStatus::Downloading;
 
                         let url = {
                             let (c, _) = split_falcon_format(&dl.url);
@@ -323,7 +337,11 @@ impl QueueManager {
                             if let Some(stem) = std::path::Path::new(&fname).file_stem() {
                                 fname = format!("{}.mp4", stem.to_string_lossy());
                                 dl.filename = fname.clone();
-                                let _ = db.update_download(dl_id, &dl);
+                                let _ = db.update_download_if_status(
+                                    dl_id,
+                                    &[DownloadStatus::Downloading],
+                                    &dl,
+                                );
                             }
                         }
                         final_path.push(&fname);
@@ -368,11 +386,17 @@ impl QueueManager {
                         }
 
                         // Claim in DB before spawn
-                        dl.status = DownloadStatus::Downloading;
-                        if db.update_download(dl_id, &dl).is_err() {
+                        let mut claimed = dl.clone();
+                        claimed.status = DownloadStatus::Downloading;
+                        claimed.error_message = None;
+                        if !db
+                            .update_download_if_status(dl_id, &[DownloadStatus::Queued], &claimed)
+                            .unwrap_or(false)
+                        {
                             lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
                             continue;
                         }
+                        dl.status = DownloadStatus::Downloading;
 
                         let url = dl.url.clone();
                         let save_path = dl.save_path.clone();
@@ -445,12 +469,19 @@ impl QueueManager {
                             referrer: dl.referrer.as_ref().map(|r| sanitize_header_value(r)),
                             user_agent: dl.user_agent.as_ref().map(|u| sanitize_header_value(u)),
                         };
+                        let mut claimed = false;
                         match engine.add_download(&dl.url, aria_opts).await {
-                            Ok(gid) => {
-                                dl.aria2_gid = Some(gid);
-                                dl.status = DownloadStatus::Downloading;
-                                dl.error_message = None;
-                            }
+                            Ok(gid) => match db.claim_aria2_download(dl_id, &gid) {
+                                Ok(true) => {
+                                    dl.aria2_gid = Some(gid);
+                                    dl.status = DownloadStatus::Downloading;
+                                    claimed = true;
+                                }
+                                Ok(false) | Err(_) => {
+                                    let _ = engine.remove(&gid).await;
+                                    continue;
+                                }
+                            },
                             Err(e) => {
                                 let msg = e.to_string();
                                 log::error!("Aria2 engine add_download error: {}", msg);
@@ -467,8 +498,11 @@ impl QueueManager {
                                 dl.error_message = Some(msg);
                             }
                         }
+                        if !claimed {
+                            let _ =
+                                db.update_download_if_status(dl_id, &[DownloadStatus::Queued], &dl);
+                        }
                     }
-                    let _ = db.update_download(dl_id, &dl);
                 }
             }
         }
@@ -531,32 +565,25 @@ async fn run_stream_task(
         Ok(_) => {
             let final_size =
                 tokio::fs::metadata(&save_path_str).await.map(|m| m.len()).unwrap_or(0);
-            if let Ok(mut d) = db.get_download(dl_id) {
-                d.downloaded_size = final_size;
-                d.total_size = final_size;
-                d.speed = 0.0;
-                d.status = DownloadStatus::Completed;
-                d.completed_at = Some(chrono::Utc::now().to_rfc3339());
-                d.error_message = None;
-                // Cookie TTL: wipe session cookies after completion (at-rest hygiene).
-                d.cookies = None;
-                let _ = db.update_download(dl_id, &d);
+            if db.finish_stream_if_active(dl_id, final_size).unwrap_or(false) {
+                let _ = db.clear_session_cookies(dl_id);
+                let _ = app_handle.emit(
+                    "download-progress",
+                    serde_json::json!({
+                        "id": dl_id,
+                        "downloaded_size": final_size,
+                        "total_size": final_size,
+                        "speed": 0.0,
+                        "status": "Completed",
+                        "connections": 0
+                    }),
+                );
             }
-            let _ = app_handle.emit(
-                "download-progress",
-                serde_json::json!({
-                    "id": dl_id,
-                    "downloaded_size": final_size,
-                    "total_size": final_size,
-                    "speed": 0.0,
-                    "status": "Completed",
-                    "connections": 0
-                }),
-            );
         }
         Err(e) => {
             if e == "Cancelled" {
-                let _ = db.update_download_progress(dl_id, 0, 0.0, &DownloadStatus::Paused);
+                let _ = db.pause_stream_if_active(dl_id);
+                let _ = db.clear_session_cookies(dl_id);
             } else {
                 log::error!("stream task {dl_id} error: {e}");
                 // ponytail: classify transient vs fatal. Transient errors (rate
@@ -577,7 +604,16 @@ async fn run_stream_task(
                     d.speed = 0.0;
                     d.status =
                         if is_transient { DownloadStatus::Queued } else { DownloadStatus::Failed };
-                    let _ = db.update_download(dl_id, &d);
+                    if db
+                        .update_download_if_status(
+                            dl_id,
+                            &[DownloadStatus::Downloading, DownloadStatus::Merging],
+                            &d,
+                        )
+                        .unwrap_or(false)
+                    {
+                        let _ = db.clear_session_cookies(dl_id);
+                    }
                 }
             }
         }
@@ -600,6 +636,17 @@ mod tests {
     fn test_cancel_stream_missing() {
         let qm = QueueManager::new();
         assert!(!qm.cancel_stream(999));
+    }
+
+    #[test]
+    fn cancel_stream_keeps_active_claim_until_worker_cleanup() {
+        let qm = QueueManager::new();
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        qm.active_stream_tasks.lock().unwrap().insert(7, tx);
+
+        assert!(qm.cancel_stream(7));
+        assert!(qm.active_stream_tasks.lock().unwrap().contains_key(&7));
+        assert!(*rx.borrow());
     }
 
     #[test]

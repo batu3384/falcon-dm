@@ -99,6 +99,7 @@ pub async fn process_ytdlp(
         .arg(fmt)
         .arg("--merge-output-format")
         .arg("mp4")
+        .arg("--no-overwrites")
         .arg("-o")
         .arg(tmpl.to_string_lossy().as_ref())
         .arg("--no-mtime")
@@ -172,6 +173,9 @@ pub async fn process_ytdlp(
             _ = cancel.changed() => {
                 if *cancel.borrow() {
                     let _ = child.kill().await;
+                    let out_for_cleanup = out.clone();
+                    let _ = tokio::task::spawn_blocking(move || cleanup_partial_outputs(&out_for_cleanup))
+                        .await;
                     return Err("Cancelled".into());
                 }
             }
@@ -210,14 +214,7 @@ pub async fn process_ytdlp(
         }
         // Rename to requested path if needed
         if final_path_cloned != out_cloned {
-            let _ = std::fs::remove_file(&out_cloned);
-            std::fs::rename(&final_path_cloned, &out_cloned)
-                .or_else(|_| {
-                    std::fs::copy(&final_path_cloned, &out_cloned).map(|_| {
-                        let _ = std::fs::remove_file(&final_path_cloned);
-                    })
-                })
-                .map_err(|e| e.to_string())?;
+            crate::util::copy_file_exclusive(&final_path_cloned, &out_cloned)?;
         }
         Ok(size)
     })
@@ -305,4 +302,49 @@ fn resolve_output(requested: &Path) -> Result<PathBuf, String> {
         .collect();
     candidates.sort_by_key(|p| std::cmp::Reverse(p.metadata().map(|m| m.len()).unwrap_or(0)));
     candidates.into_iter().next().ok_or_else(|| "yt-dlp output file not found".into())
+}
+
+fn cleanup_partial_outputs(requested: &Path) {
+    let Some(parent) = requested.parent() else {
+        return;
+    };
+    let Some(stem) = requested.file_stem().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let prefix = format!("{stem}.");
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_partial = path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".part"));
+            if is_partial {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_partial_outputs_only_removes_requested_stem() {
+        let root = std::env::temp_dir().join(format!("falcon-dm-ytdlp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let requested = root.join("video.mp4");
+        let partial = root.join("video.mp4.part");
+        let unrelated = root.join("other.mp4.part");
+        std::fs::write(&partial, b"partial").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        cleanup_partial_outputs(&requested);
+
+        assert!(!partial.exists());
+        assert!(unrelated.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

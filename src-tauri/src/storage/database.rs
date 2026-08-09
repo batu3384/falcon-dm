@@ -1,4 +1,5 @@
 use crate::storage::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
+use chrono::Utc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Row};
@@ -296,6 +297,52 @@ impl Database {
         let params_ref: Vec<&dyn rusqlite::ToSql> =
             params.iter().map(|value| value.as_ref()).collect();
         Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
+    }
+
+    pub fn claim_aria2_download(&self, id: i64, gid: &str) -> Result<bool> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let rows = conn.execute(
+            "UPDATE downloads
+             SET aria2_gid = ?1, status = 'Downloading', error_message = NULL
+             WHERE id = ?2 AND status = 'Queued' AND aria2_gid IS NULL",
+            params![gid, id],
+        )?;
+        Ok(rows == 1)
+    }
+
+    pub fn finish_stream_if_active(&self, id: i64, size: u64) -> Result<bool> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let rows = conn.execute(
+            "UPDATE downloads
+             SET downloaded_size = ?1,
+                 total_size = ?1,
+                 speed = 0.0,
+                 status = 'Completed',
+                 completed_at = ?2,
+                 error_message = NULL
+             WHERE id = ?3 AND status IN ('Downloading', 'Merging')",
+            params![size as i64, Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(rows == 1)
+    }
+
+    pub fn pause_stream_if_active(&self, id: i64) -> Result<bool> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let rows = conn.execute(
+            "UPDATE downloads SET speed = 0.0, status = 'Paused'
+             WHERE id = ?1 AND status IN ('Downloading', 'Merging')",
+            params![id],
+        )?;
+        Ok(rows == 1)
+    }
+
+    pub fn clear_session_cookies(&self, id: i64) -> Result<bool> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let rows = conn.execute(
+            "UPDATE downloads SET cookies = NULL WHERE id = ?1 AND cookies IS NOT NULL",
+            params![id],
+        )?;
+        Ok(rows == 1)
     }
 
     pub fn update_download_progress(
@@ -648,5 +695,25 @@ mod tests {
         assert!(!db
             .update_download_if_status(id, &[DownloadStatus::Completed], &download)
             .unwrap());
+    }
+
+    #[test]
+    fn aria2_claim_is_single_winner() {
+        let db = Database::in_memory().unwrap();
+        let download = create_test_download("claim.bin");
+        let id = db.insert_download(&download).unwrap();
+        assert!(db.claim_aria2_download(id, "gid-1").unwrap());
+        assert!(!db.claim_aria2_download(id, "gid-2").unwrap());
+        assert_eq!(db.get_download(id).unwrap().aria2_gid.as_deref(), Some("gid-1"));
+    }
+
+    #[test]
+    fn completed_transition_does_not_override_paused_state() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("stream.mp4");
+        download.status = DownloadStatus::Paused;
+        let id = db.insert_download(&download).unwrap();
+        assert!(!db.finish_stream_if_active(id, 100).unwrap());
+        assert_eq!(db.get_download(id).unwrap().status, DownloadStatus::Paused);
     }
 }

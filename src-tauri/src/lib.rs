@@ -367,25 +367,55 @@ async fn add_download(
 async fn pause_download(id: i64, state: State<'_, AppState>) -> Result<(), String> {
     let mut dl = state.db.get_download(id).map_err(|e| e.to_string())?;
     if let Some(gid) = &dl.aria2_gid {
-        let _ = state.engine.pause(gid).await;
+        state.engine.pause(gid).await.map_err(|e| e.to_string())?;
     }
     // Cancels HLS and yt-dlp tasks (shared watch map)
     state.queue.cancel_stream(id);
     dl.status = DownloadStatus::Paused;
-    state.db.update_download(id, &dl).map_err(|e| e.to_string())?;
+    if !state
+        .db
+        .update_download_if_status(
+            id,
+            &[
+                DownloadStatus::Queued,
+                DownloadStatus::Downloading,
+                DownloadStatus::Merging,
+                DownloadStatus::Paused,
+            ],
+            &dl,
+        )
+        .map_err(|e| e.to_string())?
+    {
+        return Err("Download state changed before pause".into());
+    }
     Ok(())
 }
 
 #[tauri::command]
 async fn resume_download(id: i64, state: State<'_, AppState>) -> Result<(), String> {
     let mut dl = state.db.get_download(id).map_err(|e| e.to_string())?;
+    if matches!(
+        dl.status,
+        DownloadStatus::Completed | DownloadStatus::Downloading | DownloadStatus::Merging
+    ) {
+        return Err("Download is already active or completed".into());
+    }
+    if dl.status == DownloadStatus::Queued {
+        return Ok(());
+    }
     if dl.status == DownloadStatus::Failed {
         dl.aria2_gid = None;
         dl.error_message = None;
     }
     dl.status = DownloadStatus::Queued;
     dl.priority = dl.priority.saturating_add(1);
-    state.db.update_download(id, &dl).map_err(|e| e.to_string())?;
+    if !state
+        .db
+        .update_download_if_status(id, &[DownloadStatus::Paused, DownloadStatus::Failed], &dl)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("Download state changed before resume".into());
+    }
     Ok(())
 }
 
@@ -1359,17 +1389,26 @@ pub fn run() {
                             }
 
                             let poll_id = dl.id.unwrap();
-                            if let Err(e) = state.db.update_download(poll_id, &dl) {
-                                log::warn!("progress poll: {poll_id} DB update failed: {e}");
+                            let committed = match state.db.update_download_if_status(
+                                poll_id,
+                                &[DownloadStatus::Downloading],
+                                &dl,
+                            ) {
+                                Ok(value) => value,
+                                Err(e) => {
+                                    log::warn!("progress poll: {poll_id} DB update failed: {e}");
+                                    false
+                                }
+                            };
+                            if !committed {
+                                continue;
+                            }
+
+                            if matches!(status_str.as_str(), "Completed" | "Failed" | "Paused") {
+                                let _ = state.db.clear_session_cookies(poll_id);
                             }
 
                             if status_str == "Completed" {
-                                // Drop cookies after completion (session hygiene)
-                                dl.cookies = None;
-                                if let Err(e) = state.db.update_download(poll_id, &dl) {
-                                    log::warn!("progress poll: cookie wipe {poll_id} failed: {e}");
-                                }
-
                                 let _ = app_handle
                                     .notification()
                                     .builder()

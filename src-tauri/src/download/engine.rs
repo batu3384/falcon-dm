@@ -193,7 +193,7 @@ impl Aria2Engine {
             "--min-split-size=1M",
             "--continue=true",
             "--auto-file-renaming=false",
-            "--allow-overwrite=true",
+            "--allow-overwrite=false",
             "--quiet=true",
             "--daemon=false",
         ]);
