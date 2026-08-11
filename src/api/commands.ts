@@ -31,12 +31,13 @@ export interface DownloadFilter {
   search?: string;
   limit?: number;
   offset?: number;
+  before_id?: number;
   archived?: boolean;
 }
 
 export async function getDownloads(filter?: DownloadFilter): Promise<DownloadModel[]> {
   const raw = await invoke<unknown>('get_downloads', {
-    filter: { limit: 500, ...filter },
+    filter: { limit: 200, offset: 0, ...filter },
   });
   return DownloadArraySchema.parse(raw) as DownloadModel[];
 }
@@ -54,6 +55,7 @@ export async function addDownload(params: {
   referrer?: string;
   userAgent?: string;
   cookies?: string;
+  cookieUrl?: string;
 }): Promise<DownloadModel> {
   // ponytail: Tauri's invoke auto-converts camelCase keys to the Rust command's
   // snake_case params, so callers pass idiomatic TS names.
@@ -128,6 +130,10 @@ export async function resetExtensionPin(): Promise<void> {
 
 export async function getPendingPair(): Promise<string | null> {
   return invoke<string | null>('get_pending_pair');
+}
+
+export async function getPendingPairs(): Promise<string[]> {
+  return invoke<string[]>('get_pending_pairs');
 }
 
 // ponytail: log panel — pulls the in-memory ring buffer the fan-out logger

@@ -135,6 +135,7 @@ export default function NewDownloadModal({
           referrer: referrer || undefined,
           userAgent: userAgent || undefined,
           cookies: cookies || undefined,
+          cookieUrl: cookies ? u : undefined,
         });
       }
       showToast('success', t('newDownloadModal.added_success'));

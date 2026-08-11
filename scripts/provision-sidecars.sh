@@ -65,6 +65,30 @@ copy_verified() {
   fi
 }
 
+verify_binary_arch() {
+  local file="$1"
+  local arch="$2"
+  local release_mode="$3"
+  local info
+
+  command -v file >/dev/null 2>&1 || {
+    [[ "$release_mode" == "1" ]] || return 0
+    echo "file utility is required to validate release sidecar architecture" >&2
+    return 1
+  }
+  info="$(file "$file")"
+  [[ "$info" == *"Mach-O"* ]] || {
+    [[ "$release_mode" == "1" ]] || return 0
+    echo "release sidecar is not a macOS Mach-O binary: $file" >&2
+    return 1
+  }
+  if [[ "$arch" == "aarch64" && "$info" != *"arm64"* ]] \
+    || [[ "$arch" == "x86_64" && "$info" != *"x86_64"* ]]; then
+    echo "sidecar architecture mismatch for $file: expected $arch ($info)" >&2
+    return 1
+  fi
+}
+
 main() {
   local script_root
   script_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -80,6 +104,24 @@ main() {
   local aria2_sha256="${ARIA2_SHA256:-}"
   local ffmpeg_url="${FFMPEG_URL:-}"
   local ffmpeg_sha256="${FFMPEG_SHA256:-}"
+  local release_mode="${RELEASE_MODE:-0}"
+
+  if [[ "$release_mode" == "1" ]]; then
+    [[ -n "$aria2_sha256" ]] || {
+      echo "  ERROR: ARIA2_SHA256 is required in release mode" >&2
+      exit 1
+    }
+    [[ -n "$ffmpeg_url" ]] || {
+      echo "  ERROR: FFMPEG_URL is required in release mode" >&2
+      exit 1
+    }
+    [[ -n "$ffmpeg_sha256" ]] || {
+      echo "  ERROR: FFMPEG_SHA256 is required in release mode" >&2
+      exit 1
+    }
+  else
+    echo "  Local provisioning mode: binaries are unsigned/unverified unless hashes are supplied."
+  fi
 
   echo "Provisioning sidecars for $target_triple in $binary_dir"
 
@@ -111,6 +153,7 @@ main() {
       exit 1
     fi
   fi
+  verify_binary_arch "$aria2_bin" "$arch" "$release_mode"
  
   # ----- ffmpeg -----
   local ffmpeg_bin="$binary_dir/ffmpeg-$target_triple"
@@ -147,6 +190,7 @@ main() {
       }
       local tmp
       tmp="$(mktemp -d)"
+      trap 'rm -rf "$tmp"' EXIT
       curl --fail --location --retry 3 --retry-delay 1 --silent --show-error \
         --output "$tmp/ffmpeg.zip" "$ffmpeg_url"
       (cd "$tmp" && unzip -o ffmpeg.zip >/dev/null 2>&1)
@@ -157,9 +201,11 @@ main() {
       verify_sha256 "$tmp/ffmpeg" "$ffmpeg_sha256"
       copy_verified "$tmp/ffmpeg" "$ffmpeg_bin"
       rm -rf "$tmp"
+      trap - EXIT
       echo "  ffmpeg downloaded from $ffmpeg_url"
     fi
   fi
+  verify_binary_arch "$ffmpeg_bin" "$arch" "$release_mode"
 
   echo "Done. Sidecars for $target_triple:"
   ls -la "$binary_dir"/*-"$target_triple"

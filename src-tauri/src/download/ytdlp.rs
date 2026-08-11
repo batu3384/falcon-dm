@@ -15,6 +15,14 @@ pub struct YtDlpHeaders {
     pub user_agent: Option<String>,
 }
 
+struct RunDirGuard(PathBuf);
+
+impl Drop for RunDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn find_ytdlp(preferred: Option<&str>) -> Result<PathBuf, String> {
     if let Some(raw) = preferred.map(str::trim).filter(|s| !s.is_empty()) {
         let p = crate::util::expand_tilde(raw);
@@ -65,7 +73,7 @@ pub async fn process_ytdlp(
     out_path: &str,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     headers: YtDlpHeaders,
-    db: Option<Database>,
+    _db: Option<Database>,
     format: Option<&str>,
 ) -> Result<(), String> {
     let preferred = crate::settings::Settings::load(&crate::util::app_data_dir()).ytdlp_path;
@@ -81,8 +89,14 @@ pub async fn process_ytdlp(
     let out = PathBuf::from(out_path);
     let dir = out.parent().ok_or_else(|| "Invalid output path".to_string())?;
     tokio::fs::create_dir_all(dir).await.map_err(|e| e.to_string())?;
+    if tokio::fs::try_exists(&out).await.map_err(|e| e.to_string())? {
+        return Err("Destination file already exists".into());
+    }
+    let run_dir = dir.join(format!(".falcon-dm-ytdlp-{download_id}-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir(&run_dir).await.map_err(|e| e.to_string())?;
+    let _run_dir_guard = RunDirGuard(run_dir.clone());
 
-    let tmpl = out.with_extension("%(ext)s");
+    let tmpl = run_dir.join("output.%(ext)s");
     let fmt = format.unwrap_or(
         "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/bv*+ba/b",
     );
@@ -173,9 +187,8 @@ pub async fn process_ytdlp(
             _ = cancel.changed() => {
                 if *cancel.borrow() {
                     let _ = child.kill().await;
-                    let out_for_cleanup = out.clone();
-                    let _ = tokio::task::spawn_blocking(move || cleanup_partial_outputs(&out_for_cleanup))
-                        .await;
+                    let run_dir_for_cleanup = run_dir.clone();
+                    let _ = tokio::task::spawn_blocking(move || cleanup_partial_outputs(&run_dir_for_cleanup)).await;
                     return Err("Cancelled".into());
                 }
             }
@@ -195,16 +208,23 @@ pub async fn process_ytdlp(
         }
     }
 
+    if *cancel.borrow() {
+        return Err("Cancelled".into());
+    }
+
     // Resolve final file (yt-dlp may change extension)
     // ponytail: resolve_output + metadata + rename are all blocking fs ops;
     // batch them onto a blocking-pool thread.
-    let out_for_resolve = out.clone();
-    let final_path = tokio::task::spawn_blocking(move || resolve_output(&out_for_resolve))
+    let run_dir_for_resolve = run_dir.clone();
+    let final_path = tokio::task::spawn_blocking(move || resolve_output(&run_dir_for_resolve))
         .await
         .map_err(|e| format!("yt-dlp output resolve task failed: {e}"))??;
 
     let final_path_cloned = final_path.clone();
     let out_cloned = out.clone();
+    if *cancel.borrow() {
+        return Err("Cancelled".into());
+    }
     let size = tokio::task::spawn_blocking(move || -> Result<u64, String> {
         let meta = std::fs::metadata(&final_path_cloned).map_err(|e| e.to_string())?;
         let size = meta.len();
@@ -220,17 +240,6 @@ pub async fn process_ytdlp(
     })
     .await
     .map_err(|e| format!("yt-dlp finalize task failed: {e}"))??;
-
-    if let Some(ref db) = db {
-        if let Ok(mut d) = db.get_download(download_id) {
-            d.downloaded_size = size;
-            d.total_size = size;
-            d.filename =
-                out.file_name().and_then(|s| s.to_str()).unwrap_or(&d.filename).to_string();
-            // keep status update to caller
-            let _ = db.update_download(download_id, &d);
-        }
-    }
 
     let _ = app_handle.emit(
         "download-progress",
@@ -283,48 +292,21 @@ fn parse_size_token(tok: &str) -> Option<u64> {
     Some((v * mult as f64) as u64)
 }
 
-fn resolve_output(requested: &Path) -> Result<PathBuf, String> {
-    if requested.exists() {
-        return Ok(requested.to_path_buf());
-    }
-    let stem = requested
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| "Missing filename".to_string())?;
-    let parent = requested.parent().ok_or_else(|| "Missing parent".to_string())?;
-    let mut candidates: Vec<_> = std::fs::read_dir(parent)
+fn resolve_output(run_dir: &Path) -> Result<PathBuf, String> {
+    let mut candidates: Vec<_> = std::fs::read_dir(run_dir)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s == stem || s.starts_with(stem))
+            p.is_file() && p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s == "output")
         })
         .collect();
     candidates.sort_by_key(|p| std::cmp::Reverse(p.metadata().map(|m| m.len()).unwrap_or(0)));
     candidates.into_iter().next().ok_or_else(|| "yt-dlp output file not found".into())
 }
 
-fn cleanup_partial_outputs(requested: &Path) {
-    let Some(parent) = requested.parent() else {
-        return;
-    };
-    let Some(stem) = requested.file_stem().and_then(|value| value.to_str()) else {
-        return;
-    };
-    let prefix = format!("{stem}.");
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let is_partial = path.is_file()
-                && path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".part"));
-            if is_partial {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
+fn cleanup_partial_outputs(run_dir: &Path) {
+    let _ = std::fs::remove_dir_all(run_dir);
 }
 
 #[cfg(test)]
@@ -334,17 +316,40 @@ mod tests {
     #[test]
     fn cleanup_partial_outputs_only_removes_requested_stem() {
         let root = std::env::temp_dir().join(format!("falcon-dm-ytdlp-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let requested = root.join("video.mp4");
-        let partial = root.join("video.mp4.part");
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let partial = run_dir.join("output.mp4.part");
         let unrelated = root.join("other.mp4.part");
         std::fs::write(&partial, b"partial").unwrap();
         std::fs::write(&unrelated, b"keep").unwrap();
 
-        cleanup_partial_outputs(&requested);
+        cleanup_partial_outputs(&run_dir);
 
-        assert!(!partial.exists());
+        assert!(!run_dir.exists());
         assert!(unrelated.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_output_only_uses_files_from_run_directory() {
+        let root =
+            std::env::temp_dir().join(format!("falcon-dm-ytdlp-run-{}", uuid::Uuid::new_v4()));
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(root.join("video.mp4"), b"stale").unwrap();
+        std::fs::write(run_dir.join("output.mp4"), b"new").unwrap();
+
+        assert_eq!(resolve_output(&run_dir).unwrap(), run_dir.join("output.mp4"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_output_rejects_a_run_without_output() {
+        let run_dir =
+            std::env::temp_dir().join(format!("falcon-dm-ytdlp-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&run_dir).unwrap();
+        assert!(resolve_output(&run_dir).is_err());
+        std::fs::remove_dir_all(run_dir).unwrap();
     }
 }

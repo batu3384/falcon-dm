@@ -1,8 +1,10 @@
 use crate::storage::{models::DownloadStatus, Database};
-use crate::util::{sanitize_header_value, validate_fetch_url};
+use crate::util::{
+    resolve_public_addresses_async, sanitize_header_value, validate_fetch_url_async,
+};
 use futures::stream::{self, StreamExt, TryStreamExt};
 use m3u8_rs::Playlist;
-use reqwest::header::{HeaderMap, HeaderValue, COOKIE, REFERER, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, COOKIE, LOCATION, REFERER, USER_AGENT};
 use reqwest::{Client, RequestBuilder};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,6 +34,7 @@ pub struct HlsHeaders {
     pub cookies: Option<String>,
     pub referrer: Option<String>,
     pub user_agent: Option<String>,
+    pub max_connections: usize,
 }
 
 const MAX_PLAYLIST_BYTES: usize = 16 * 1024 * 1024;
@@ -49,32 +52,31 @@ struct HlsProgressEvent {
     connections: u32,
 }
 
-fn build_client(headers: &HlsHeaders) -> Result<Client, String> {
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str().map(str::to_ascii_lowercase)
+            == right.host_str().map(str::to_ascii_lowercase)
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+async fn build_client(headers: &HlsHeaders, target: &Url) -> Result<Client, String> {
+    let addresses = resolve_public_addresses_async(target).await?;
     let mut map = HeaderMap::new();
-    if let Some(ref r) = headers.referrer {
-        let v = sanitize_header_value(r);
-        if !v.is_empty() {
-            map.insert(REFERER, HeaderValue::from_str(&v).map_err(|e| e.to_string())?);
-        }
-    }
     if let Some(ref ua) = headers.user_agent {
         let v = sanitize_header_value(ua);
         if !v.is_empty() {
             map.insert(USER_AGENT, HeaderValue::from_str(&v).map_err(|e| e.to_string())?);
         }
     }
-    Client::builder()
+    let mut builder = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if validate_fetch_url(attempt.url().as_str()).is_ok() {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
-        .default_headers(map)
-        .build()
-        .map_err(|e| e.to_string())
+        .redirect(reqwest::redirect::Policy::none())
+        .default_headers(map);
+    if target.host_str().and_then(|host| host.parse::<std::net::IpAddr>().ok()).is_none() {
+        let host = target.host_str().ok_or_else(|| "HLS URL has no host".to_string())?;
+        builder = builder.resolve(host, addresses[0]);
+    }
+    builder.build().map_err(|e| e.to_string())
 }
 
 fn cookie_header_for_target(
@@ -84,7 +86,12 @@ fn cookie_header_for_target(
 ) -> Option<HeaderValue> {
     let source_host = source.host_str()?.to_ascii_lowercase();
     let target_host = target.host_str()?.to_ascii_lowercase();
-    if source_host != target_host {
+    if source.scheme() != "https"
+        || target.scheme() != "https"
+        || source.scheme() != target.scheme()
+        || source_host != target_host
+        || source.port_or_known_default() != target.port_or_known_default()
+    {
         return None;
     }
     let value = sanitize_header_value(cookies?.trim());
@@ -94,17 +101,52 @@ fn cookie_header_for_target(
     HeaderValue::from_str(&value).ok()
 }
 
-fn request_with_headers(
-    client: &Client,
+async fn request_with_headers(
     source: &Url,
     target: &Url,
     headers: &HlsHeaders,
-) -> RequestBuilder {
-    let request = client.get(target.clone());
-    match cookie_header_for_target(source, target, headers.cookies.as_deref()) {
-        Some(cookie) => request.header(COOKIE, cookie),
-        None => request,
+) -> Result<RequestBuilder, String> {
+    let client = build_client(headers, target).await?;
+    let mut request = client.get(target.clone());
+    if let Some(cookie) = cookie_header_for_target(source, target, headers.cookies.as_deref()) {
+        request = request.header(COOKIE, cookie);
     }
+    if let Some(referrer) = headers.referrer.as_deref().and_then(|value| Url::parse(value).ok()) {
+        if same_origin(&referrer, target) {
+            let value = sanitize_header_value(referrer.as_str());
+            if !value.is_empty() {
+                request = request.header(REFERER, value);
+            }
+        }
+    }
+    Ok(request)
+}
+
+async fn send_hls_request(
+    source: &Url,
+    target: &Url,
+    headers: &HlsHeaders,
+) -> Result<reqwest::Response, String> {
+    let mut current = target.clone();
+    for redirect_count in 0..=5 {
+        let request = request_with_headers(source, &current, headers).await?;
+        let response = request.send().await.map_err(|e| e.to_string())?;
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        if redirect_count == 5 {
+            return Err("Too many HLS redirects".into());
+        }
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| "HLS redirect has no valid location".to_string())?;
+        current =
+            validate_fetch_url_async(current.join(location).map_err(|e| e.to_string())?.as_str())
+                .await?;
+    }
+    Err("HLS response unavailable".into())
 }
 
 async fn read_bounded_response(
@@ -150,13 +192,12 @@ pub async fn process_hls_stream(
     headers: HlsHeaders,
     db: Option<Database>,
 ) -> Result<(), String> {
-    let client = build_client(&headers)?;
-    let base_url = validate_fetch_url(url)?;
+    let base_url = validate_fetch_url_async(url).await?;
 
     let res = tokio::select! {
         _ = cancellation_requested(&mut rx) => return Err("Cancelled".into()),
-        result = request_with_headers(&client, &base_url, &base_url, &headers).send() => {
-            result.map_err(|e| e.to_string())?
+        result = send_hls_request(&base_url, &base_url, &headers) => {
+            result?
         }
     };
     let bytes = tokio::select! {
@@ -184,14 +225,13 @@ pub async fn process_hls_stream(
             if variant.bandwidth > 0 {
                 estimated_total_bytes = variant.bandwidth.checked_div(8);
             }
-            let variant_url = validate_fetch_url(
+            let variant_url = validate_fetch_url_async(
                 base_url.join(&variant.uri).map_err(|e| e.to_string())?.as_str(),
-            )?;
+            )
+            .await?;
             let m_res = tokio::select! {
                 _ = cancellation_requested(&mut rx) => return Err("Cancelled".into()),
-                result = request_with_headers(&client, &base_url, &variant_url, &headers).send() => {
-                    result.map_err(|e| e.to_string())?
-                }
+                result = send_hls_request(&base_url, &variant_url, &headers) => result?,
             };
             let m_bytes = tokio::select! {
                 _ = cancellation_requested(&mut rx) => return Err("Cancelled".into()),
@@ -205,9 +245,12 @@ pub async fn process_hls_stream(
                         estimated_total_bytes = Some((bw as f64 * total_dur) as u64);
                     }
                     for seg in m_pl.segments {
-                        segment_urls.push(validate_fetch_url(
-                            variant_url.join(&seg.uri).map_err(|e| e.to_string())?.as_str(),
-                        )?);
+                        segment_urls.push(
+                            validate_fetch_url_async(
+                                variant_url.join(&seg.uri).map_err(|e| e.to_string())?.as_str(),
+                            )
+                            .await?,
+                        );
                     }
                 }
                 _ => return Err("Expected MediaPlaylist in variant".into()),
@@ -215,9 +258,12 @@ pub async fn process_hls_stream(
         }
         Playlist::MediaPlaylist(pl) => {
             for seg in pl.segments {
-                segment_urls.push(validate_fetch_url(
-                    base_url.join(&seg.uri).map_err(|e| e.to_string())?.as_str(),
-                )?);
+                segment_urls.push(
+                    validate_fetch_url_async(
+                        base_url.join(&seg.uri).map_err(|e| e.to_string())?.as_str(),
+                    )
+                    .await?,
+                );
             }
         }
     }
@@ -247,7 +293,7 @@ pub async fn process_hls_stream(
 
     let _guard = TempDirGuard { path: temp_dir.clone() };
 
-    let concurrency_limit = 10;
+    let concurrency_limit = headers.max_connections.clamp(1, 16);
     let downloaded_bytes = Arc::new(AtomicU64::new(0));
     let completed_segs = Arc::new(AtomicU64::new(0));
     // ponytail: running max of total_size estimate. We never shrink it below the
@@ -257,7 +303,6 @@ pub async fn process_hls_stream(
 
     let segment_paths: Vec<PathBuf> = stream::iter(segment_urls.into_iter().enumerate())
         .map(|(idx, seg_url)| {
-            let client = client.clone();
             let temp_dir = temp_dir.clone();
             let mut rx_clone = rx.clone();
             let downloaded_bytes = downloaded_bytes.clone();
@@ -293,7 +338,7 @@ pub async fn process_hls_stream(
                         _ = cancellation_requested(&mut rx_clone) => {
                             return Err("Cancelled".to_string());
                         }
-                        result = request_with_headers(&client, &source_url, &seg_url, &headers).send() => result,
+                        result = send_hls_request(&source_url, &seg_url, &headers) => result,
                     };
                     match response {
                         Ok(resp) => {
@@ -498,7 +543,13 @@ pub async fn process_hls_stream(
         }
     }
 
+    if *rx.borrow() {
+        return Err("Cancelled".into());
+    }
     crate::util::validate_completed_file(&temp_output)?;
+    if *rx.borrow() {
+        return Err("Cancelled".into());
+    }
     let destination = PathBuf::from(save_path);
     tokio::task::spawn_blocking(move || {
         crate::util::copy_file_exclusive(&temp_output, &destination)
@@ -533,6 +584,15 @@ mod tests {
         let other_host = Url::parse("https://cdn.example.net/seg.ts").unwrap();
         assert!(cookie_header_for_target(&source, &same_host, Some("sid=abc")).is_some());
         assert!(cookie_header_for_target(&source, &other_host, Some("sid=abc")).is_none());
+    }
+
+    #[test]
+    fn cookies_are_not_downgraded_or_sent_to_another_port() {
+        let source = Url::parse("https://media.example.com/master.m3u8").unwrap();
+        let http_target = Url::parse("http://media.example.com/seg.ts").unwrap();
+        let other_port = Url::parse("https://media.example.com:8443/seg.ts").unwrap();
+        assert!(cookie_header_for_target(&source, &http_target, Some("sid=abc")).is_none());
+        assert!(cookie_header_for_target(&source, &other_port, Some("sid=abc")).is_none());
     }
 
     #[tokio::test]

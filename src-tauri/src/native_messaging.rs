@@ -7,6 +7,10 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub const MAX_NATIVE_MESSAGE_BYTES: usize = 64 * 1024;
+pub const MAX_PAIR_PROOFS: usize = 1024;
+const MAX_PAIR_CLIENTS: usize = 16;
+const PAIRING_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CHALLENGE_BYTES: usize = 256;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct NativePairRequest {
@@ -38,11 +42,32 @@ pub struct PairProofStore {
     entries: Mutex<HashMap<(String, String), StoredProof>>,
 }
 
+pub fn validate_native_pair_request(request: &NativePairRequest) -> Result<(), String> {
+    if request.extension_id.len() != 32
+        || !request.extension_id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+    {
+        return Err("invalid extension id".into());
+    }
+    if request.challenge.is_empty() || request.challenge.len() > MAX_CHALLENGE_BYTES {
+        return Err("invalid pairing challenge".into());
+    }
+    Ok(())
+}
+
 impl PairProofStore {
     pub fn issue(&self, challenge: &str, extension_id: &str) -> String {
         let proof = Uuid::new_v4().to_string();
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         Self::purge_expired(&mut entries);
+        if entries.len() >= MAX_PAIR_PROOFS {
+            if let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, stored)| stored.expires_at)
+                .map(|(key, _)| key.clone())
+            {
+                entries.remove(&oldest);
+            }
+        }
         entries.insert(
             (challenge.to_string(), extension_id.to_string()),
             StoredProof {
@@ -51,6 +76,14 @@ impl PairProofStore {
             },
         );
         proof
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
 
     pub fn consume(&self, challenge: &str, extension_id: &str, proof: &str) -> bool {
@@ -109,19 +142,33 @@ pub fn start_pairing_server(
     use tokio::net::UnixListener;
 
     let path = socket_path(data_dir);
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).map_err(|e| e.to_string())?;
+    let listener = match UnixListener::bind(&path) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+                return Err("native pairing server is already running".into());
+            }
+            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+            UnixListener::bind(&path).map_err(|e| e.to_string())?
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| e.to_string())?;
 
+    let clients = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_PAIR_CLIENTS));
     tauri::async_runtime::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 break;
             };
             let store = store.clone();
+            let clients = clients.clone();
+            let Ok(permit) = clients.try_acquire_owned() else {
+                continue;
+            };
             tokio::spawn(async move {
-                let result = async {
+                let result = tokio::time::timeout(PAIRING_IO_TIMEOUT, async {
                     let length = stream.read_u32_le().await.map_err(|e| e.to_string())? as usize;
                     if length > MAX_NATIVE_MESSAGE_BYTES {
                         return Err("native message is too large".to_string());
@@ -130,6 +177,7 @@ pub fn start_pairing_server(
                     stream.read_exact(&mut bytes).await.map_err(|e| e.to_string())?;
                     let request: NativePairRequest =
                         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                    validate_native_pair_request(&request)?;
                     let proof = store.issue(&request.challenge, &request.extension_id);
                     let response = serde_json::to_vec(&NativePairResponse {
                         ok: true,
@@ -140,8 +188,11 @@ pub fn start_pairing_server(
                     stream.write_u32_le(response.len() as u32).await.map_err(|e| e.to_string())?;
                     stream.write_all(&response).await.map_err(|e| e.to_string())?;
                     Ok::<(), String>(())
-                }
-                .await;
+                })
+                .await
+                .map_err(|_| "native pairing timed out".to_string())
+                .and_then(|result| result);
+                drop(permit);
                 if let Err(error) = result {
                     log::warn!("native pairing request failed: {error}");
                 }
@@ -185,5 +236,31 @@ mod tests {
         assert!(store.consume("challenge-1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &proof));
         assert!(!store.consume("challenge-1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &proof));
         assert!(!store.consume("challenge-1", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &proof));
+    }
+
+    #[test]
+    fn native_pair_requests_are_bounded() {
+        assert!(validate_native_pair_request(&NativePairRequest {
+            extension_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            challenge: "challenge".into(),
+        })
+        .is_ok());
+        assert!(validate_native_pair_request(&NativePairRequest {
+            extension_id: "short".into(),
+            challenge: "challenge".into(),
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn proof_store_evicts_oldest_expiry_at_capacity() {
+        let store = PairProofStore::default();
+        for index in 0..MAX_PAIR_PROOFS {
+            store.issue(&format!("challenge-{index}"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        }
+        assert_eq!(store.len(), MAX_PAIR_PROOFS);
+        store.issue("newest", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(store.len(), MAX_PAIR_PROOFS);
+        assert!(!store.consume("challenge-0", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""));
     }
 }

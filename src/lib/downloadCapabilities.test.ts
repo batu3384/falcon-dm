@@ -21,4 +21,13 @@ describe('getDownloadCapabilities', () => {
     expect(getDownloadCapabilities('Queued').resume).toBe(false);
     expect(getDownloadCapabilities('Merging').resume).toBe(false);
   });
+
+  it('allows archive only for terminal rows', () => {
+    expect(getDownloadCapabilities('Completed').archive).toBe(true);
+    expect(getDownloadCapabilities('Failed').archive).toBe(true);
+    expect(getDownloadCapabilities('Queued').archive).toBe(false);
+    expect(getDownloadCapabilities('Downloading').archive).toBe(false);
+    expect(getDownloadCapabilities('Paused').archive).toBe(false);
+    expect(getDownloadCapabilities('Merging').archive).toBe(false);
+  });
 });

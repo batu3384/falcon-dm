@@ -41,6 +41,10 @@ describe('useDownloadsStore', () => {
       loading: true,
       error: null,
       archived: false,
+      search: '',
+      loadedPages: 1,
+      hasMore: false,
+      loadingMore: false,
       requestSequence: 0,
       selectedDownload: null,
       selectedIds: new Set(),
@@ -158,6 +162,17 @@ describe('useDownloadsStore', () => {
     expect(mockedGetDownloads).toHaveBeenLastCalledWith({ archived: true });
   });
 
+  it('sends search to backend so unloaded pages remain searchable', async () => {
+    mockedGetDownloads.mockResolvedValueOnce([baseDownload]);
+
+    await useDownloadsStore.getState().fetchDownloads(false, 'example');
+
+    expect(mockedGetDownloads).toHaveBeenCalledWith({
+      archived: false,
+      search: 'example',
+    });
+  });
+
   it('stores fetch errors and clears them after a successful retry', async () => {
     mockedGetDownloads.mockRejectedValueOnce(new Error('offline'));
     await useDownloadsStore.getState().fetchDownloads();
@@ -181,5 +196,27 @@ describe('useDownloadsStore', () => {
     expect(useDownloadsStore.getState().loading).toBe(false);
     resolve([baseDownload]);
     await refresh;
+  });
+
+  it('loads the next page without dropping current selection', async () => {
+    useDownloadsStore.setState({
+      downloads: [baseDownload],
+      selectedDownload: baseDownload,
+      selectedIds: new Set([baseDownload.id]),
+      archived: false,
+      loadedPages: 1,
+      hasMore: true,
+    });
+    mockedGetDownloads.mockResolvedValueOnce([{ ...baseDownload, id: 2, filename: 'b.mp4' }]);
+
+    await useDownloadsStore.getState().loadMoreDownloads();
+
+    expect(mockedGetDownloads).toHaveBeenCalledWith({
+      archived: false,
+      limit: 200,
+      before_id: 1,
+    });
+    expect(useDownloadsStore.getState().downloads.map((download) => download.id)).toEqual([1, 2]);
+    expect(useDownloadsStore.getState().selectedIds.has(1)).toBe(true);
   });
 });

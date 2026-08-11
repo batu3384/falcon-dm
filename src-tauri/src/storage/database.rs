@@ -239,65 +239,189 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_download_if_status(
+    pub fn set_status_if_current(
         &self,
         id: i64,
         expected: &[DownloadStatus],
-        download: &Download,
+        status: &DownloadStatus,
     ) -> Result<bool> {
         if expected.is_empty() {
             return Ok(false);
         }
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
-        let placeholders = (0..expected.len()).map(|i| format!("?{}", i + 20)).collect::<Vec<_>>();
+        let placeholders =
+            (0..expected.len()).map(|index| format!("?{}", index + 3)).collect::<Vec<_>>();
         let sql = format!(
-            "UPDATE downloads SET
-                url = ?1,
-                filename = ?2,
-                save_path = ?3,
-                total_size = ?4,
-                downloaded_size = ?5,
-                status = ?6,
-                category = ?7,
-                speed = ?8,
-                segments = ?9,
-                priority = ?10,
-                created_at = ?11,
-                completed_at = ?12,
-                error_message = ?13,
-                referrer = ?14,
-                user_agent = ?15,
-                cookies = ?16,
-                aria2_gid = ?17,
-                archived = ?18
-            WHERE id = ?19 AND status IN ({})",
+            "UPDATE downloads SET status = ?1
+             WHERE id = ?2 AND status IN ({})",
+            placeholders.join(", ")
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(status.as_str().to_string()), Box::new(id)];
+        params.extend(
+            expected
+                .iter()
+                .map(|value| Box::new(value.as_str().to_string()) as Box<dyn rusqlite::ToSql>),
+        );
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|value| value.as_ref()).collect();
+        Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
+    }
+
+    pub fn set_status_error_if_current(
+        &self,
+        id: i64,
+        expected: &[DownloadStatus],
+        status: &DownloadStatus,
+        error_message: Option<&str>,
+        speed: Option<f64>,
+    ) -> Result<bool> {
+        if expected.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let placeholders =
+            (0..expected.len()).map(|index| format!("?{}", index + 5)).collect::<Vec<_>>();
+        let sql = format!(
+            "UPDATE downloads SET status = ?1, error_message = ?2, speed = COALESCE(?3, speed)
+             WHERE id = ?4 AND status IN ({})",
             placeholders.join(", ")
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-            Box::new(download.url.clone()),
-            Box::new(download.filename.clone()),
-            Box::new(download.save_path.clone()),
-            Box::new(download.total_size as i64),
-            Box::new(download.downloaded_size as i64),
-            Box::new(download.status.as_str().to_string()),
-            Box::new(download.category.as_str().to_string()),
-            Box::new(download.speed),
-            Box::new(download.segments as i64),
-            Box::new(download.priority as i64),
-            Box::new(download.created_at.clone()),
-            Box::new(download.completed_at.clone()),
-            Box::new(download.error_message.clone()),
-            Box::new(download.referrer.clone()),
-            Box::new(download.user_agent.clone()),
-            Box::new(download.cookies.clone()),
-            Box::new(download.aria2_gid.clone()),
-            Box::new(download.archived as i64),
+            Box::new(status.as_str().to_string()),
+            Box::new(error_message.map(str::to_string)),
+            Box::new(speed),
             Box::new(id),
         ];
         params.extend(
             expected
                 .iter()
-                .map(|status| Box::new(status.as_str().to_string()) as Box<dyn rusqlite::ToSql>),
+                .map(|value| Box::new(value.as_str().to_string()) as Box<dyn rusqlite::ToSql>),
+        );
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|value| value.as_ref()).collect();
+        Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
+    }
+
+    pub fn update_progress_if_current(
+        &self,
+        id: i64,
+        expected: &[DownloadStatus],
+        downloaded_size: u64,
+        total_size: u64,
+        speed: f64,
+        status: &DownloadStatus,
+        completed_at: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<bool> {
+        if expected.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let placeholders =
+            (0..expected.len()).map(|index| format!("?{}", index + 8)).collect::<Vec<_>>();
+        let sql = format!(
+            "UPDATE downloads SET downloaded_size = ?1, total_size = ?2, speed = ?3,
+             status = ?4, completed_at = ?5, error_message = ?6
+             WHERE id = ?7 AND status IN ({})",
+            placeholders.join(", ")
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(downloaded_size as i64),
+            Box::new(total_size as i64),
+            Box::new(speed),
+            Box::new(status.as_str().to_string()),
+            Box::new(completed_at.map(str::to_string)),
+            Box::new(error_message.map(str::to_string)),
+            Box::new(id),
+        ];
+        params.extend(
+            expected
+                .iter()
+                .map(|value| Box::new(value.as_str().to_string()) as Box<dyn rusqlite::ToSql>),
+        );
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|value| value.as_ref()).collect();
+        Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
+    }
+
+    pub fn resume_if_current(&self, id: i64, expected: &[DownloadStatus]) -> Result<bool> {
+        if expected.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let placeholders =
+            (0..expected.len()).map(|index| format!("?{}", index + 2)).collect::<Vec<_>>();
+        let sql = format!(
+            "UPDATE downloads
+             SET status = 'Queued', priority = priority + 1, aria2_gid = NULL,
+                 completed_at = NULL, error_message = NULL, speed = 0.0
+             WHERE id = ?1 AND status IN ({})",
+            placeholders.join(", ")
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(id)];
+        params.extend(
+            expected
+                .iter()
+                .map(|value| Box::new(value.as_str().to_string()) as Box<dyn rusqlite::ToSql>),
+        );
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|value| value.as_ref()).collect();
+        Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
+    }
+
+    pub fn set_filename_if_current(
+        &self,
+        id: i64,
+        expected: &[DownloadStatus],
+        filename: &str,
+    ) -> Result<bool> {
+        if expected.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let placeholders =
+            (0..expected.len()).map(|index| format!("?{}", index + 3)).collect::<Vec<_>>();
+        let sql = format!(
+            "UPDATE downloads SET filename = ?1
+             WHERE id = ?2 AND status IN ({})",
+            placeholders.join(", ")
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(filename.to_string()), Box::new(id)];
+        params.extend(
+            expected
+                .iter()
+                .map(|value| Box::new(value.as_str().to_string()) as Box<dyn rusqlite::ToSql>),
+        );
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|value| value.as_ref()).collect();
+        Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
+    }
+
+    pub fn set_archived_if_status(
+        &self,
+        id: i64,
+        archived: bool,
+        allowed: &[DownloadStatus],
+    ) -> Result<bool> {
+        if allowed.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let placeholders =
+            (0..allowed.len()).map(|index| format!("?{}", index + 3)).collect::<Vec<_>>();
+        let sql = format!(
+            "UPDATE downloads SET archived = ?1
+             WHERE id = ?2 AND status IN ({})",
+            placeholders.join(", ")
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(archived as i64), Box::new(id)];
+        params.extend(
+            allowed
+                .iter()
+                .map(|value| Box::new(value.as_str().to_string()) as Box<dyn rusqlite::ToSql>),
         );
         let params_ref: Vec<&dyn rusqlite::ToSql> =
             params.iter().map(|value| value.as_ref()).collect();
@@ -313,6 +437,43 @@ impl Database {
             params![gid, id],
         )?;
         Ok(rows == 1)
+    }
+
+    pub fn adjust_priority(&self, id: i64, increase: bool) -> Result<bool> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let rows = conn.execute(
+            "UPDATE downloads
+             SET priority = CASE
+                 WHEN ?1 = 1 THEN MIN(priority + 1, 4294967295)
+                 ELSE MAX(priority - 1, 0)
+             END
+             WHERE id = ?2",
+            params![increase as i64, id],
+        )?;
+        Ok(rows == 1)
+    }
+
+    pub fn clear_aria2_gid_if_current(&self, id: i64, expected: &[DownloadStatus]) -> Result<bool> {
+        if expected.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let placeholders =
+            (0..expected.len()).map(|index| format!("?{}", index + 2)).collect::<Vec<_>>();
+        let sql = format!(
+            "UPDATE downloads SET aria2_gid = NULL
+             WHERE id = ?1 AND status IN ({})",
+            placeholders.join(", ")
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(id)];
+        params.extend(
+            expected
+                .iter()
+                .map(|value| Box::new(value.as_str().to_string()) as Box<dyn rusqlite::ToSql>),
+        );
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|value| value.as_ref()).collect();
+        Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
     }
 
     pub fn finish_stream_if_active(&self, id: i64, size: u64) -> Result<bool> {
@@ -356,16 +517,14 @@ impl Database {
         downloaded_size: u64,
         speed: f64,
         status: &DownloadStatus,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let rows = conn.execute(
-            "UPDATE downloads SET downloaded_size = ?1, speed = ?2, status = ?3 WHERE id = ?4",
+            "UPDATE downloads SET downloaded_size = ?1, speed = ?2, status = ?3
+             WHERE id = ?4 AND status IN ('Downloading', 'Merging')",
             params![downloaded_size as i64, speed, status.as_str(), id],
         )?;
-        if rows == 0 {
-            return Err(DatabaseError::NotFound(id));
-        }
-        Ok(())
+        Ok(rows == 1)
     }
 
     pub fn get_downloads(&self, filter: &DownloadFilter) -> Result<Vec<Download>> {
@@ -397,12 +556,17 @@ impl Database {
             }
         }
 
+        if let Some(before_id) = filter.before_id {
+            sql.push_str(" AND id < ?");
+            params.push(Box::new(before_id));
+        }
+
         // ponytail: archived filter. Default (None) hides archived rows so the
         // active list never shows them; the "Archived" view passes Some(true).
         match filter.archived {
             None => sql.push_str(" AND (archived = 0 OR archived IS NULL)"),
             Some(true) => sql.push_str(" AND archived = 1"),
-            Some(false) => {} // explicit non-archived, already covered by default
+            Some(false) => sql.push_str(" AND (archived = 0 OR archived IS NULL)"),
         }
 
         sql.push_str(" ORDER BY id DESC");
@@ -552,6 +716,8 @@ mod tests {
         assert_eq!(fetched.status, DownloadStatus::Queued);
 
         // Update progress
+        db.set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Downloading)
+            .unwrap();
         db.update_download_progress(id, 512 * 1024, 1024.5, &DownloadStatus::Downloading)
             .expect("Update progress failed");
         let updated_progress = db.get_download(id).expect("Get after progress update failed");
@@ -586,7 +752,11 @@ mod tests {
         let id2 = db.insert_download(&d2).unwrap();
         let _id3 = db.insert_download(&d3).unwrap();
 
+        db.set_status_if_current(id1, &[DownloadStatus::Queued], &DownloadStatus::Downloading)
+            .unwrap();
         db.update_download_progress(id1, 100, 50.0, &DownloadStatus::Downloading).unwrap();
+        db.set_status_if_current(id2, &[DownloadStatus::Queued], &DownloadStatus::Downloading)
+            .unwrap();
         db.update_download_progress(id2, 100, 0.0, &DownloadStatus::Paused).unwrap();
 
         // Filter by category
@@ -676,6 +846,44 @@ mod tests {
         assert_eq!(all.len(), 10);
     }
 
+    #[test]
+    fn cursor_pagination_ignores_rows_inserted_after_first_page() {
+        let db = Database::in_memory().expect("Failed to create in-memory db");
+        for i in 0..6u32 {
+            db.insert_download(&create_test_download(&format!("cursor{i}.zip"))).unwrap();
+        }
+        let first =
+            db.get_downloads(&DownloadFilter { limit: Some(3), ..Default::default() }).unwrap();
+        let cursor = first.last().and_then(|download| download.id).unwrap();
+        db.insert_download(&create_test_download("newest.zip")).unwrap();
+
+        let second = db
+            .get_downloads(&DownloadFilter {
+                limit: Some(3),
+                before_id: Some(cursor),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(second.len(), 3);
+        assert!(second.iter().all(|download| download.id.unwrap() < cursor));
+    }
+
+    #[test]
+    fn priority_update_does_not_overwrite_worker_fields() {
+        let db = Database::in_memory().unwrap();
+        let id = db.insert_download(&create_test_download("priority.zip")).unwrap();
+        db.set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Downloading)
+            .unwrap();
+        db.update_download_progress(id, 512, 42.0, &DownloadStatus::Downloading).unwrap();
+
+        assert!(db.adjust_priority(id, true).unwrap());
+        let updated = db.get_download(id).unwrap();
+        assert_eq!(updated.priority, 2);
+        assert_eq!(updated.status, DownloadStatus::Downloading);
+        assert_eq!(updated.downloaded_size, 512);
+        assert_eq!(updated.speed, 42.0);
+    }
+
     // ponytail: verify the versioned migration actually advanced user_version.
     // Without this, a regression to the old CREATE-IF-NOT-EXISTS approach would
     // silently make future migrations no-ops on existing databases.
@@ -704,14 +912,66 @@ mod tests {
     }
 
     #[test]
-    fn update_if_status_rejects_active_download() {
+    fn status_transition_rejects_wrong_current_state() {
         let db = Database::in_memory().expect("Failed to create in-memory db");
         let mut download = create_test_download("active.mp4");
         download.status = DownloadStatus::Downloading;
         let id = db.insert_download(&download).unwrap();
         assert!(!db
-            .update_download_if_status(id, &[DownloadStatus::Completed], &download)
+            .set_status_if_current(id, &[DownloadStatus::Completed], &DownloadStatus::Paused)
             .unwrap());
+    }
+
+    #[test]
+    fn explicit_non_archived_filter_excludes_archived_rows() {
+        let db = Database::in_memory().unwrap();
+        let visible_id = db.insert_download(&create_test_download("visible.mp4")).unwrap();
+        let mut archived = create_test_download("archived.mp4");
+        archived.archived = true;
+        let archived_id = db.insert_download(&archived).unwrap();
+
+        let visible = db
+            .get_downloads(&DownloadFilter { archived: Some(false), ..Default::default() })
+            .unwrap();
+        let archived_rows = db
+            .get_downloads(&DownloadFilter { archived: Some(true), ..Default::default() })
+            .unwrap();
+        assert_eq!(visible.iter().map(|row| row.id).collect::<Vec<_>>(), vec![Some(visible_id)]);
+        assert_eq!(
+            archived_rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![Some(archived_id)]
+        );
+    }
+
+    #[test]
+    fn status_transition_does_not_overwrite_user_fields() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("state.mp4");
+        download.status = DownloadStatus::Downloading;
+        download.priority = 9;
+        download.cookies = Some("sid=secret".into());
+        download.archived = true;
+        let id = db.insert_download(&download).unwrap();
+
+        assert!(db
+            .set_status_if_current(id, &[DownloadStatus::Downloading], &DownloadStatus::Paused)
+            .unwrap());
+        let updated = db.get_download(id).unwrap();
+        assert_eq!(updated.status, DownloadStatus::Paused);
+        assert_eq!(updated.priority, 9);
+        assert_eq!(updated.cookies.as_deref(), Some("sid=secret"));
+        assert!(updated.archived);
+    }
+
+    #[test]
+    fn legacy_aria2_gid_can_be_cleared_atomically() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("legacy.mp4");
+        download.aria2_gid = Some("gid-1".into());
+        let id = db.insert_download(&download).unwrap();
+
+        assert!(db.clear_aria2_gid_if_current(id, &[DownloadStatus::Queued]).unwrap());
+        assert!(db.get_download(id).unwrap().aria2_gid.is_none());
     }
 
     #[test]

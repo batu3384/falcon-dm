@@ -2,18 +2,17 @@ use crate::util::LEGACY_DEFAULT_API_TOKEN;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use url::Url;
 use uuid::Uuid;
 
-// ponytail: per-site download profile. Matched against a URL via simple
-// substring (case-insensitive). When a download's URL contains the pattern,
-// the profile's headers/subdir override the request defaults — so users can
-// set a specific UA + referer + cookies + save folder for a host without
-// re-entering them each time. Keep it opt-in and simple; no regex engine.
+// ponytail: per-site download profile. Matched against parsed URL origin
+// boundaries, so an attacker-controlled hostname cannot inherit another
+// site's cookies or headers.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DownloadProfile {
     /// Human label shown in Settings.
     pub name: String,
-    /// Case-insensitive substring matched against the download URL (e.g. "example.com").
+    /// Host or origin pattern (e.g. "example.com" or "https://example.com:8443").
     pub url_pattern: String,
     #[serde(default)]
     pub user_agent: Option<String>,
@@ -27,11 +26,35 @@ pub struct DownloadProfile {
 }
 
 impl DownloadProfile {
-    /// True if `url` contains the profile's pattern (case-insensitive). Empty
-    /// patterns never match (a blank profile is inert).
+    /// Match exact hostname; explicit scheme/port in the pattern also match.
     pub fn matches(&self, url: &str) -> bool {
-        let p = self.url_pattern.trim().to_lowercase();
-        !p.is_empty() && url.to_lowercase().contains(&p)
+        let raw_pattern = self.url_pattern.trim();
+        if raw_pattern.is_empty() {
+            return false;
+        }
+        let explicit_scheme = raw_pattern.contains("://");
+        let pattern_url = if explicit_scheme {
+            Url::parse(raw_pattern).ok()
+        } else {
+            Url::parse(&format!("https://{raw_pattern}")).ok()
+        };
+        let target = Url::parse(url).ok();
+        let (Some(pattern), Some(target)) = (pattern_url, target) else {
+            return false;
+        };
+        if !matches!(target.scheme(), "http" | "https") {
+            return false;
+        }
+        if self.cookies.as_deref().is_some_and(|cookies| !cookies.trim().is_empty())
+            && target.scheme() != "https"
+        {
+            return false;
+        }
+        pattern.host_str().is_some()
+            && pattern.host_str().map(str::to_ascii_lowercase)
+                == target.host_str().map(str::to_ascii_lowercase)
+            && (!explicit_scheme || pattern.scheme() == target.scheme())
+            && (pattern.port().is_none() || pattern.port() == target.port())
     }
 }
 
@@ -153,10 +176,45 @@ impl Settings {
         self.category_paths.get(category).cloned()
     }
 
-    /// ponytail: first profile whose url_pattern matches `url` (case-insensitive
-    /// substring). Profiles are tried in declaration order so the user controls
+    /// ponytail: first profile whose origin matches. Profiles are tried in
+    /// declaration order so the user controls
     /// precedence by reordering them in Settings.
     pub fn profile_for_url(&self, url: &str) -> Option<&DownloadProfile> {
         self.download_profiles.iter().find(|p| p.matches(url))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_matching_uses_hostname_boundaries() {
+        let profile = DownloadProfile { url_pattern: "example.com".into(), ..Default::default() };
+        assert!(profile.matches("https://example.com/video.mp4"));
+        assert!(!profile.matches("https://example.com.evil.test/video.mp4"));
+        assert!(!profile.matches("https://attacker.example.com/video.mp4"));
+    }
+
+    #[test]
+    fn cookie_profiles_never_match_plain_http() {
+        let profile = DownloadProfile {
+            url_pattern: "example.com".into(),
+            cookies: Some("sid=secret".into()),
+            ..Default::default()
+        };
+        assert!(profile.matches("https://example.com/video.mp4"));
+        assert!(!profile.matches("http://example.com/video.mp4"));
+    }
+
+    #[test]
+    fn explicit_profile_origin_matches_scheme_and_port() {
+        let profile = DownloadProfile {
+            url_pattern: "https://example.com:8443".into(),
+            ..Default::default()
+        };
+        assert!(profile.matches("https://example.com:8443/video.mp4"));
+        assert!(!profile.matches("http://example.com:8443/video.mp4"));
+        assert!(!profile.matches("https://example.com/video.mp4"));
     }
 }

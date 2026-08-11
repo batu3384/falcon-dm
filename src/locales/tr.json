@@ -119,6 +119,8 @@
     "batch_result": "{{success}} başarılı, {{failed}} başarısız{{names}}",
     "confirm_batch_delete": "{{count}} seçili indirme silinsin mi?",
     "speed_limit_set": "Hız limiti: {{limit}} KB/s",
+    "load_more": "Daha fazla yükle",
+    "loading_more": "Yükleniyor…",
     "skip_to_content": "İçeriğe geç"
   },
   "newDownloadModal": {

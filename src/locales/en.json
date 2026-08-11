@@ -119,6 +119,8 @@
     "batch_result": "{{success}} succeeded, {{failed}} failed{{names}}",
     "confirm_batch_delete": "Delete {{count}} selected downloads?",
     "speed_limit_set": "Speed limit: {{limit}} KB/s",
+    "load_more": "Load more",
+    "loading_more": "Loading more…",
     "skip_to_content": "Skip to content"
   },
   "newDownloadModal": {

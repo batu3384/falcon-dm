@@ -54,7 +54,10 @@ function App() {
     error,
     selectedDownload,
     selectedIds,
+    hasMore,
+    loadingMore,
     fetchDownloads,
+    loadMoreDownloads,
     retryFetch,
     applyProgress,
     addDownload,
@@ -390,7 +393,10 @@ function App() {
           <Toolbar
             onAddClick={() => setIsModalOpen(true)}
             searchQuery={searchQuery}
-            onSearchChange={setSearchQuery}
+            onSearchChange={(value) => {
+              setSearchQuery(value);
+              void fetchDownloads(undefined, value);
+            }}
             onPauseAll={handlePauseAll}
             onResumeAll={handleResumeAll}
             canPauseAll={downloads.some(
@@ -463,6 +469,18 @@ function App() {
                 batchSelectedIds={selectedIds}
               />
             </ErrorBoundary>
+
+            {hasMore && (
+              <button
+                type="button"
+                className="btn-secondary load-more-btn"
+                onClick={() => void loadMoreDownloads()}
+                disabled={loadingMore}
+                aria-busy={loadingMore}
+              >
+                {loadingMore ? t('app.loading_more') : t('app.load_more')}
+              </button>
+            )}
 
             {selectedDownload && (
               <ErrorBoundary label="InspectorPanel">

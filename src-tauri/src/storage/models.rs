@@ -147,6 +147,9 @@ pub struct DownloadFilter {
     /// Page offset applied at the DB boundary.
     #[serde(default)]
     pub offset: Option<i64>,
+    /// Cursor for stable pagination while new rows are inserted.
+    #[serde(default)]
+    pub before_id: Option<i64>,
     /// ponytail: archived filter. None = exclude archived (default, hides them
     /// from the active list); Some(true) = only archived; Some(false) =
     /// explicit non-archived (same as None but future-proof).

@@ -7,7 +7,7 @@ pub mod util;
 
 use chrono::Utc;
 use download::engine::Aria2Engine;
-use download::queue::{QueueManager, ScheduleOptions};
+use download::queue::{validate_schedule, QueueManager, ScheduleOptions};
 use futures::FutureExt;
 use native_messaging::{PairProofStore, PairRequest};
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use util::{
     app_data_dir, default_download_dir, full_file_path, is_hls_url, is_junk_media_url,
     lock_or_recover, normalize_media_url, resolve_download_filename, resolve_download_target,
     resolve_save_dir, sanitize_filename, sanitize_header_value, validate_completed_file,
-    validate_download_url, validate_open_path, LEGACY_DEFAULT_API_TOKEN,
+    validate_fetch_url_async, validate_open_path, LEGACY_DEFAULT_API_TOKEN,
 };
 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
@@ -56,6 +56,8 @@ fn token_matches(provided: &str, expected: &str) -> bool {
     p.ct_eq(e).into()
 }
 
+const MAX_PENDING_PAIR_REQUESTS: usize = 32;
+
 fn extension_id_from_origin(origin: &str) -> Option<&str> {
     origin
         .strip_prefix("chrome-extension://")
@@ -65,6 +67,23 @@ fn extension_id_from_origin(origin: &str) -> Option<&str> {
 
 fn is_valid_extension_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
+fn cookie_url_matches_download(download_url: &str, cookie_url: Option<&str>) -> bool {
+    let Some(cookie_url) = cookie_url else {
+        return false;
+    };
+    let Ok(download) = url::Url::parse(download_url) else {
+        return false;
+    };
+    let Ok(cookie_source) = url::Url::parse(cookie_url) else {
+        return false;
+    };
+    matches!(download.scheme(), "https")
+        && download.scheme() == cookie_source.scheme()
+        && download.host_str().map(str::to_ascii_lowercase)
+            == cookie_source.host_str().map(str::to_ascii_lowercase)
+        && download.port_or_known_default() == cookie_source.port_or_known_default()
 }
 
 #[derive(Clone, Serialize)]
@@ -83,8 +102,8 @@ pub struct AppState {
     pub queue: QueueManager,
     pub api_token: Arc<Mutex<String>>,
     pub rate_bucket: Arc<Mutex<VecDeque<Instant>>>,
-    /// Extension ID waiting for user approval (pair consent).
-    pub pending_pair_id: Arc<Mutex<Option<String>>>,
+    /// Extension IDs waiting for user approval (pair consent).
+    pub pending_pair_ids: Arc<Mutex<VecDeque<String>>>,
     pub pair_proofs: Arc<PairProofStore>,
 }
 
@@ -127,13 +146,17 @@ struct ExternalDownloadPayload {
     referrer: Option<String>,
     user_agent: Option<String>,
     cookies: Option<String>,
+    cookie_url: Option<String>,
     title: Option<String>,
     /// yt-dlp `-f` selector (preferred over `#falconfmt=` fragment).
     format: Option<String>,
 }
 
-fn enqueue_download(app: &AppHandle, payload: ExternalDownloadPayload) -> Result<i64, String> {
-    if validate_download_url(&payload.url).is_err() {
+async fn enqueue_download(
+    app: &AppHandle,
+    payload: ExternalDownloadPayload,
+) -> Result<i64, String> {
+    if validate_fetch_url_async(&payload.url).await.is_err() {
         return Err("invalid url".into());
     }
     if is_junk_media_url(&payload.url) {
@@ -184,7 +207,11 @@ fn enqueue_download(app: &AppHandle, payload: ExternalDownloadPayload) -> Result
             payload.referrer.as_deref().or(prof_referrer.as_deref()),
         ),
         user_agent: payload.user_agent.clone().or(prof_ua).map(|s| sanitize_header_value(&s)),
-        cookies: payload.cookies.clone().or(prof_cookies).map(|s| sanitize_header_value(&s)),
+        cookies: payload
+            .cookies
+            .filter(|_| cookie_url_matches_download(&url, payload.cookie_url.as_deref()))
+            .or(prof_cookies)
+            .map(|s| sanitize_header_value(&s)),
         aria2_gid: None,
         archived: false,
     };
@@ -233,9 +260,10 @@ fn resolve_download_save_path(
         }
     };
 
-    let preferred = settings
-        .path_for_category(category.as_str())
-        .or_else(|| requested.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
+    let preferred = requested
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| settings.path_for_category(category.as_str()))
         .unwrap_or_else(|| root.to_string_lossy().to_string());
 
     match resolve_save_dir(&preferred, &root) {
@@ -328,9 +356,10 @@ async fn add_download(
     referrer: Option<String>,
     user_agent: Option<String>,
     cookies: Option<String>,
+    cookie_url: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Download, String> {
-    validate_download_url(&url)?;
+    validate_fetch_url_async(&url).await?;
     let filename = sanitize_filename(&filename);
     let category = DownloadCategory::from_filename(&filename);
     let save_path = resolve_download_save_path(Some(&save_path), &category)?;
@@ -352,7 +381,9 @@ async fn add_download(
         error_message: None,
         referrer: referrer.map(|s| sanitize_header_value(&s)),
         user_agent: user_agent.map(|s| sanitize_header_value(&s)),
-        cookies: cookies.map(|s| sanitize_header_value(&s)),
+        cookies: cookies
+            .filter(|_| cookie_url_matches_download(&url, cookie_url.as_deref()))
+            .map(|s| sanitize_header_value(&s)),
         aria2_gid: None,
         archived: false,
     };
@@ -365,16 +396,17 @@ async fn add_download(
 
 #[tauri::command]
 async fn pause_download(id: i64, state: State<'_, AppState>) -> Result<(), String> {
-    let mut dl = state.db.get_download(id).map_err(|e| e.to_string())?;
+    let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
     if let Some(gid) = &dl.aria2_gid {
         state.engine.pause(gid).await.map_err(|e| e.to_string())?;
     }
     // Cancels HLS and yt-dlp tasks (shared watch map)
-    state.queue.cancel_stream(id);
-    dl.status = DownloadStatus::Paused;
+    if !state.queue.cancel_and_wait_stream(id).await {
+        return Err("Download is still stopping; try pausing it again shortly".into());
+    }
     if !state
         .db
-        .update_download_if_status(
+        .set_status_error_if_current(
             id,
             &[
                 DownloadStatus::Queued,
@@ -382,7 +414,9 @@ async fn pause_download(id: i64, state: State<'_, AppState>) -> Result<(), Strin
                 DownloadStatus::Merging,
                 DownloadStatus::Paused,
             ],
-            &dl,
+            &DownloadStatus::Paused,
+            None,
+            Some(0.0),
         )
         .map_err(|e| e.to_string())?
     {
@@ -393,7 +427,7 @@ async fn pause_download(id: i64, state: State<'_, AppState>) -> Result<(), Strin
 
 #[tauri::command]
 async fn resume_download(id: i64, state: State<'_, AppState>) -> Result<(), String> {
-    let mut dl = state.db.get_download(id).map_err(|e| e.to_string())?;
+    let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
     if matches!(
         dl.status,
         DownloadStatus::Completed | DownloadStatus::Downloading | DownloadStatus::Merging
@@ -403,15 +437,9 @@ async fn resume_download(id: i64, state: State<'_, AppState>) -> Result<(), Stri
     if dl.status == DownloadStatus::Queued {
         return Ok(());
     }
-    if dl.status == DownloadStatus::Failed {
-        dl.aria2_gid = None;
-        dl.error_message = None;
-    }
-    dl.status = DownloadStatus::Queued;
-    dl.priority = dl.priority.saturating_add(1);
     if !state
         .db
-        .update_download_if_status(id, &[DownloadStatus::Paused, DownloadStatus::Failed], &dl)
+        .resume_if_current(id, &[DownloadStatus::Paused, DownloadStatus::Failed])
         .map_err(|e| e.to_string())?
     {
         return Err("Download state changed before resume".into());
@@ -429,7 +457,9 @@ async fn remove_download(
     if let Some(gid) = &dl.aria2_gid {
         let _ = state.engine.remove(gid).await;
     }
-    state.queue.cancel_stream(id);
+    if !state.queue.cancel_and_wait_stream(id).await {
+        return Err("Download is still stopping; try removing it again shortly".into());
+    }
     // ponytail: optionally delete the downloaded file from disk (default: keep,
     // preserving the user's data). Best-effort — a missing/unwritable file must
     // not block DB row removal.
@@ -452,9 +482,9 @@ async fn get_downloads(
     offset: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<Vec<Download>, String> {
-    // ponytail: default page size 500 at the command boundary; internal callers use the filter directly.
-    filter.limit = Some(limit.unwrap_or(500));
-    filter.offset = Some(offset.unwrap_or(0));
+    // Explicit pagination boundary: callers may request at most one page.
+    filter.limit = Some(limit.or(filter.limit).unwrap_or(200).clamp(1, 200));
+    filter.offset = Some(offset.or(filter.offset).unwrap_or(0).max(0));
     state.db.get_downloads(&filter).map_err(|e| e.to_string())
 }
 
@@ -478,16 +508,15 @@ fn set_schedule(
     active: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.queue.set_schedule(ScheduleOptions {
-        start_time: start_time.clone(),
-        stop_time: stop_time.clone(),
-        active,
-    });
+    let options =
+        ScheduleOptions { start_time: start_time.clone(), stop_time: stop_time.clone(), active };
+    validate_schedule(&options)?;
     let mut settings = Settings::load(&app_data_dir());
     settings.schedule_active = active;
     settings.schedule_start = start_time;
     settings.schedule_stop = stop_time;
     settings.save(&app_data_dir())?;
+    state.queue.set_schedule(options);
     Ok(())
 }
 
@@ -539,14 +568,11 @@ async fn change_priority(
     increase: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-    if increase {
-        dl.priority = dl.priority.saturating_add(1);
-    } else if dl.priority > 0 {
-        dl.priority -= 1;
+    if state.db.adjust_priority(id, increase).map_err(|e| e.to_string())? {
+        Ok(())
+    } else {
+        Err("Download not found".into())
     }
-    state.db.update_download(id, &dl).map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -573,7 +599,7 @@ fn get_extension_status(state: State<'_, AppState>) -> Result<ExtensionStatus, S
     Ok(ExtensionStatus {
         has_token,
         approved_extension_ids: approved,
-        pending_pair_id: lock_or_recover(&state.pending_pair_id).clone(),
+        pending_pair_id: lock_or_recover(&state.pending_pair_ids).front().cloned(),
     })
 }
 
@@ -581,13 +607,18 @@ fn get_extension_status(state: State<'_, AppState>) -> Result<ExtensionStatus, S
 fn reset_extension_pin(state: State<'_, AppState>) -> Result<(), String> {
     let mut settings = Settings::load(&app_data_dir());
     settings.allowed_extension_ids.clear();
-    *lock_or_recover(&state.pending_pair_id) = None;
+    lock_or_recover(&state.pending_pair_ids).clear();
     settings.save(&app_data_dir())
 }
 
 #[tauri::command]
 fn get_pending_pair(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    Ok(lock_or_recover(&state.pending_pair_id).clone())
+    Ok(lock_or_recover(&state.pending_pair_ids).front().cloned())
+}
+
+#[tauri::command]
+fn get_pending_pairs(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(lock_or_recover(&state.pending_pair_ids).iter().cloned().collect())
 }
 
 /// ponytail: surface the in-memory log ring buffer to the frontend "Logs" panel.
@@ -728,10 +759,12 @@ async fn archive_download(
     archived: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-    dl.archived = archived;
-    state.db.update_download(id, &dl).map_err(|e| e.to_string())?;
-    Ok(())
+    let terminal = [DownloadStatus::Completed, DownloadStatus::Failed];
+    if state.db.set_archived_if_status(id, archived, &terminal).map_err(|e| e.to_string())? {
+        Ok(())
+    } else {
+        Err("Only completed or failed downloads can be archived".into())
+    }
 }
 
 #[tauri::command]
@@ -745,7 +778,7 @@ fn approve_extension_pair(extension_id: String, state: State<'_, AppState>) -> R
         settings.allowed_extension_ids.push(id.to_string());
     }
     settings.save(&app_data_dir())?;
-    *lock_or_recover(&state.pending_pair_id) = None;
+    lock_or_recover(&state.pending_pair_ids).retain(|pending| pending != id);
     Ok(())
 }
 
@@ -756,6 +789,7 @@ async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Result
 
     state.queue.set_concurrent_downloads(settings.max_concurrent_downloads as usize);
     state.queue.set_max_connections(settings.max_connections_per_server as usize);
+    state.queue.set_http_options(settings.proxy.clone(), settings.speed_limit_kbps);
     *lock_or_recover(&state.api_token) = {
         let t = settings.api_token.trim();
         if t.is_empty() || t == LEGACY_DEFAULT_API_TOKEN {
@@ -784,6 +818,7 @@ struct AddDownloadRequest {
     referrer: Option<String>,
     user_agent: Option<String>,
     cookies: Option<String>,
+    cookie_url: Option<String>,
     format: Option<String>,
 }
 
@@ -795,21 +830,18 @@ async fn handle_api_add(
     let state = app.state::<AppState>();
     check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))?;
 
-    if validate_download_url(&payload.url).is_err() {
-        return Ok(Json(serde_json::json!({ "success": false, "error": "invalid url" })));
-    }
-
     let ext = ExternalDownloadPayload {
         url: payload.url,
         filename: Some(payload.filename),
         referrer: payload.referrer,
         user_agent: payload.user_agent,
         cookies: payload.cookies,
+        cookie_url: payload.cookie_url,
         title: None,
         format: payload.format,
     };
 
-    match enqueue_download(&app, ext) {
+    match enqueue_download(&app, ext).await {
         Ok(id) => Ok(Json(serde_json::json!({ "success": true, "id": id }))),
         Err(e) => Ok(Json(serde_json::json!({ "success": false, "error": e }))),
     }
@@ -822,6 +854,7 @@ pub struct InterceptRequest {
     pub media_type: Option<String>,
     pub title: Option<String>,
     pub cookies: Option<String>,
+    pub cookie_url: Option<String>,
     pub user_agent: Option<String>,
     pub referer: Option<String>,
     pub filename: Option<String>,
@@ -836,21 +869,18 @@ async fn handle_intercept(
     let state = app.state::<AppState>();
     check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))?;
 
-    if validate_download_url(&payload.url).is_err() {
-        return Ok(Json(serde_json::json!({ "success": false, "error": "invalid url" })));
-    }
-
     let ext = ExternalDownloadPayload {
         url: payload.url,
         filename: payload.filename,
         referrer: payload.referer.or(payload.page_url.clone()),
         user_agent: payload.user_agent,
         cookies: payload.cookies,
+        cookie_url: payload.cookie_url,
         title: payload.title,
         format: payload.format,
     };
 
-    match enqueue_download(&app, ext) {
+    match enqueue_download(&app, ext).await {
         Ok(id) => Ok(Json(serde_json::json!({ "success": true, "id": id }))),
         Err(e) => Ok(Json(serde_json::json!({ "success": false, "error": e }))),
     }
@@ -870,7 +900,13 @@ async fn handle_pair(
     let Some(id) = extension_id_from_origin(origin) else {
         return StatusCode::FORBIDDEN.into_response();
     };
-    if id != payload.extension_id || !is_valid_extension_id(id) {
+    if id != payload.extension_id
+        || !is_valid_extension_id(id)
+        || payload.challenge.is_empty()
+        || payload.challenge.len() > 256
+        || payload.proof.is_empty()
+        || payload.proof.len() > 128
+    {
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -897,7 +933,13 @@ async fn handle_pair(
     }
 
     // Pending consent — UI must approve
-    *lock_or_recover(&state.pending_pair_id) = Some(id.to_string());
+    let mut pending = lock_or_recover(&state.pending_pair_ids);
+    if !pending.iter().any(|pending_id| pending_id == id) {
+        if pending.len() >= MAX_PENDING_PAIR_REQUESTS {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        pending.push_back(id.to_string());
+    }
     let _ = app.emit("pair-request", serde_json::json!({ "extension_id": id }));
 
     (
@@ -967,6 +1009,29 @@ fn restore_orphan_downloads(db: &Database) {
     }
 }
 
+fn cleanup_stale_http_parts(db: &Database) {
+    let mut downloads = Vec::new();
+    for archived in [None, Some(true)] {
+        if let Ok(mut rows) = db.get_downloads(&DownloadFilter { archived, ..Default::default() }) {
+            downloads.append(&mut rows);
+        }
+    }
+    for download in downloads {
+        let Some(id) = download.id else {
+            continue;
+        };
+        let destination = full_file_path(&download.save_path, &download.filename);
+        let Some(parent) = destination.parent() else {
+            continue;
+        };
+        let Some(name) = destination.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let temp = parent.join(format!(".{name}.{id}.falcon.part"));
+        let _ = std::fs::remove_file(temp);
+    }
+}
+
 /// Remove leftover `*.falcondm-temp` dirs (crash recovery) under `root`.
 /// ponytail: HLS temp dirs now live under `<data_dir>/downloads_temp/`, so this
 /// sweep actually finds crash leftovers (previously it scanned the data_dir root
@@ -988,6 +1053,36 @@ fn cleanup_stale_temp_dirs(root: &std::path::Path) {
     }
 }
 
+fn cleanup_stale_ytdlp_dirs(root: &std::path::Path) {
+    let mut candidates = vec![(root.to_path_buf(), 0usize)];
+    while let Some((parent, depth)) = candidates.pop() {
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let is_stale = path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+                name.strip_prefix(".falcon-dm-ytdlp-")
+                    .and_then(|suffix| suffix.split_once('-'))
+                    .and_then(|(id, run)| {
+                        id.parse::<i64>().ok().and_then(|_| uuid::Uuid::parse_str(run).ok())
+                    })
+                    .is_some()
+            });
+            if is_stale {
+                let _ = std::fs::remove_dir_all(path);
+            } else if depth < 8 {
+                // ponytail: bound startup filesystem work; deeper custom roots
+                // need explicit cleanup rather than an unbounded recursive walk.
+                candidates.push((path, depth + 1));
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // ponytail: install the fan-out logger: records go to stderr (RUST_LOG-aware,
@@ -1000,17 +1095,30 @@ pub fn run() {
     cleanup_stale_temp_dirs(&data_dir);
     let db = Database::init(&data_dir).expect("Failed to init DB");
     restore_orphan_downloads(&db);
+    cleanup_stale_http_parts(&db);
 
     let settings = Settings::load(&data_dir);
+    let download_root = if settings.default_download_path.trim().is_empty() {
+        util::default_download_dir()
+    } else {
+        util::expand_tilde(&settings.default_download_path)
+    };
+    cleanup_stale_ytdlp_dirs(&download_root);
     let engine = Aria2Engine::new();
     let queue = QueueManager::new();
     queue.set_concurrent_downloads(settings.max_concurrent_downloads as usize);
     queue.set_max_connections(settings.max_connections_per_server as usize);
-    queue.set_schedule(ScheduleOptions {
+    queue.set_http_options(settings.proxy.clone(), settings.speed_limit_kbps);
+    let initial_schedule = ScheduleOptions {
         start_time: settings.schedule_start.clone(),
         stop_time: settings.schedule_stop.clone(),
         active: settings.schedule_active,
-    });
+    };
+    if validate_schedule(&initial_schedule).is_ok() {
+        queue.set_schedule(initial_schedule);
+    } else {
+        log::warn!("Ignoring invalid persisted scheduler configuration");
+    }
 
     let app_state = AppState {
         db,
@@ -1018,7 +1126,7 @@ pub fn run() {
         queue,
         api_token: Arc::new(Mutex::new(settings.api_token.clone())),
         rate_bucket: Arc::new(Mutex::new(VecDeque::new())),
-        pending_pair_id: Arc::new(Mutex::new(None)),
+        pending_pair_ids: Arc::new(Mutex::new(VecDeque::new())),
         pair_proofs: Arc::new(PairProofStore::default()),
     };
 
@@ -1118,29 +1226,38 @@ pub fn run() {
                         let app_h = app.clone();
                         tauri::async_runtime::spawn(async move {
                             let state = app_h.state::<AppState>();
-                            if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
+                            let mut downloads = state.db.get_downloads(&DownloadFilter {
                                 status: Some(DownloadStatus::Downloading),
                                 ..Default::default()
+                            });
+                            if let Ok(mut merging) = state.db.get_downloads(&DownloadFilter {
+                                status: Some(DownloadStatus::Merging),
+                                ..Default::default()
                             }) {
-                                for mut dl in downloads {
+                                if let Ok(ref mut active) = downloads {
+                                    active.append(&mut merging);
+                                }
+                            }
+                            if let Ok(downloads) = downloads {
+                                for dl in downloads {
                                     if let Some(gid) = &dl.aria2_gid {
                                         let _ = state.engine.pause(gid).await;
                                     }
-                                    if is_hls_url(&dl.url) {
-                                        if let Some(id) = dl.id {
-                                            state.queue.cancel_stream(id);
+                                    if let Some(id) = dl.id {
+                                        if !state.queue.cancel_and_wait_stream(id).await {
+                                            log::warn!("tray pause timed out for download {id}");
+                                            continue;
                                         }
                                     }
-                                    dl.status = DownloadStatus::Paused;
                                     let id = dl.id.unwrap();
-                                    match state.db.update_download_if_status(
+                                    match state.db.set_status_error_if_current(
                                         id,
                                         &[DownloadStatus::Downloading, DownloadStatus::Merging],
-                                        &dl,
+                                        &DownloadStatus::Paused,
+                                        None,
+                                        Some(0.0),
                                     ) {
-                                        Ok(true) => {
-                                            let _ = state.db.clear_session_cookies(id);
-                                        }
+                                        Ok(true) => {}
                                         Ok(false) => {}
                                         Err(e) => {
                                             log::warn!("tray pause-all: {id} DB update failed: {e}");
@@ -1158,13 +1275,16 @@ pub fn run() {
                                 status: Some(DownloadStatus::Paused),
                                 ..Default::default()
                             }) {
-                                for mut dl in downloads {
+                                for dl in downloads {
                                     // Respect queue concurrency — mark Queued, let tick start
-                                    dl.status = DownloadStatus::Queued;
                                     let id = dl.id.unwrap();
                                     if let Err(e) = state
                                         .db
-                                        .update_download_if_status(id, &[DownloadStatus::Paused], &dl)
+                                        .set_status_if_current(
+                                            id,
+                                            &[DownloadStatus::Paused],
+                                            &DownloadStatus::Queued,
+                                        )
                                     {
                                         log::warn!("tray resume-all: {id} DB update failed: {e}");
                                     }
@@ -1384,8 +1504,6 @@ pub fn run() {
                                 continue;
                             }
 
-                            dl.speed = speed;
-
                             if dl.downloaded_size >= dl.total_size
                                 && dl.total_size > 0
                                 && status_str == "Downloading"
@@ -1400,10 +1518,15 @@ pub fn run() {
                             }
 
                             let poll_id = dl.id.unwrap();
-                            let committed = match state.db.update_download_if_status(
+                            let committed = match state.db.update_progress_if_current(
                                 poll_id,
                                 &[DownloadStatus::Downloading],
-                                &dl,
+                                dl.downloaded_size,
+                                dl.total_size.max(dl.downloaded_size),
+                                speed,
+                                &dl.status,
+                                dl.completed_at.as_deref(),
+                                dl.error_message.as_deref(),
                             ) {
                                 Ok(value) => value,
                                 Err(e) => {
@@ -1415,7 +1538,7 @@ pub fn run() {
                                 continue;
                             }
 
-                            if matches!(status_str.as_str(), "Completed" | "Failed" | "Paused") {
+                            if matches!(status_str.as_str(), "Completed" | "Failed") {
                                 let _ = state.db.clear_session_cookies(poll_id);
                             }
 
@@ -1471,6 +1594,7 @@ pub fn run() {
             get_extension_status,
             reset_extension_pin,
             get_pending_pair,
+            get_pending_pairs,
             approve_extension_pair,
             get_logs,
             clear_logs,
@@ -1505,5 +1629,25 @@ mod tests {
         assert!(extension_id_from_origin("https://example.com").is_none());
         assert!(!is_valid_extension_id("short"));
         assert!(!is_valid_extension_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
+    }
+
+    #[test]
+    fn extension_cookie_url_must_match_download_origin() {
+        assert!(cookie_url_matches_download(
+            "https://cdn.example.com/video.mp4",
+            Some("https://cdn.example.com/video.mp4")
+        ));
+        assert!(!cookie_url_matches_download(
+            "https://cdn.example.com/video.mp4",
+            Some("https://page.example.com/watch")
+        ));
+        assert!(!cookie_url_matches_download(
+            "http://cdn.example.com/video.mp4",
+            Some("https://cdn.example.com/video.mp4")
+        ));
+        assert!(!cookie_url_matches_download(
+            "http://cdn.example.com/video.mp4",
+            Some("http://cdn.example.com/video.mp4")
+        ));
     }
 }

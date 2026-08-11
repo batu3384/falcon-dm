@@ -39,6 +39,8 @@ assert(background.includes("withTimeout"), "bounded request timeout");
 assert(background.includes('suggest({ cancel: false })'), "download fallback");
 assert(background.includes("Promise.allSettled"), "batch partial results");
 assert(background.includes("getCookiesHeader"), "target cookie lookup");
+assert(!background.includes("getCookiesHeader(it.url, request.page_url)"), "no page cookie fallback");
+assert(background.includes("cookie_url"), "cookie origin contract");
 assert(background.includes("results"), "batch result contract");
 assert(background.includes("format"), "YouTube format field");
 assert(background.includes("chrome.tabs.onUpdated"), "tab navigation cleanup");

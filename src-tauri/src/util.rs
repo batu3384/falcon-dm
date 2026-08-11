@@ -1,3 +1,4 @@
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 
 /// Legacy insecure default — never accept as live token after first boot.
@@ -61,23 +62,49 @@ fn is_blocked_download_host(host: &str) -> bool {
     false
 }
 
-/// DNS-rebinding guard: resolve `host` and reject if any address is private/loopback.
-/// Fail-safe: resolution failure or zero answers → blocked (reject).
-fn host_resolves_to_blocked(host: &str, port: u16) -> bool {
-    use std::net::ToSocketAddrs;
-    match (host, port).to_socket_addrs() {
-        Ok(addrs) => {
-            let mut any = false;
-            for a in addrs {
-                if is_blocked_ip(a.ip()) {
-                    return true;
-                }
-                any = true;
-            }
-            !any
-        }
-        Err(_) => true,
+/// Resolve a download host once and retain only public addresses.
+///
+/// Callers that perform the actual network request should pin this result in
+/// their client; validating and resolving in separate layers leaves a DNS
+/// rebinding window.
+pub fn resolve_public_addresses(url: &url::Url) -> Result<Vec<SocketAddr>, String> {
+    let host = url.host_str().ok_or_else(|| "URL has no host".to_string())?;
+    let port = url.port_or_known_default().ok_or_else(|| "URL has no port".to_string())?;
+    let addrs = if let Ok(ip) = host.parse() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        (host, port)
+            .to_socket_addrs()
+            .map_err(|e| format!("Host resolution failed: {e}"))?
+            .collect()
+    };
+    let public = addrs.into_iter().filter(|addr| !is_blocked_ip(addr.ip())).collect::<Vec<_>>();
+    if public.is_empty() {
+        return Err("Host resolves to a blocked address".into());
     }
+    Ok(public)
+}
+
+pub async fn resolve_public_addresses_async(url: &url::Url) -> Result<Vec<SocketAddr>, String> {
+    let host = url.host_str().ok_or_else(|| "URL has no host".to_string())?;
+    let port = url.port_or_known_default().ok_or_else(|| "URL has no port".to_string())?;
+    let addrs = if let Ok(ip) = host.parse() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::lookup_host((host, port)),
+        )
+        .await
+        .map_err(|_| "Host resolution timed out".to_string())?
+        .map_err(|e| format!("Host resolution failed: {e}"))?
+        .collect()
+    };
+    let public = addrs.into_iter().filter(|addr| !is_blocked_ip(addr.ip())).collect::<Vec<_>>();
+    if public.is_empty() {
+        return Err("Host resolves to a blocked address".into());
+    }
+    Ok(public)
 }
 
 /// Allow only http(s) and magnet URLs. Block loopback/private hosts (SSRF).
@@ -86,23 +113,14 @@ pub fn validate_download_url(url: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("URL is empty".into());
     }
-    if trimmed.starts_with("magnet:") {
-        return Ok(());
-    }
     let parsed = url::Url::parse(trimmed).map_err(|e| format!("Invalid URL: {e}"))?;
     match parsed.scheme() {
         "http" | "https" => {
-            if let Some(host) = parsed.host_str() {
-                if is_blocked_download_host(host) {
-                    return Err("Private/loopback hosts are not allowed".into());
-                }
-                // ponytail: blocking system DNS here is acceptable for validation cadence;
-                // a TOCTOU race remains (re-resolved at fetch), but this blocks obvious rebinding cases.
-                let port = parsed.port_or_known_default().unwrap_or(80);
-                if host_resolves_to_blocked(host, port) {
-                    return Err("Host resolves to a blocked address (DNS-rebinding)".into());
-                }
+            let host = parsed.host_str().ok_or_else(|| "URL has no host".to_string())?;
+            if is_blocked_download_host(host) {
+                return Err("Private/loopback hosts are not allowed".into());
             }
+            resolve_public_addresses(&parsed)?;
             Ok(())
         }
         other => Err(format!("Unsupported URL scheme: {other}")),
@@ -117,6 +135,24 @@ pub fn validate_fetch_url(raw: &str) -> Result<url::Url, String> {
     }
     validate_download_url(parsed.as_str())?;
     Ok(parsed)
+}
+
+pub async fn validate_fetch_url_async(raw: &str) -> Result<url::Url, String> {
+    let raw = raw.to_string();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+        let parsed = url::Url::parse(raw.trim()).map_err(|e| format!("Invalid URL: {e}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(format!("Unsupported fetch URL scheme: {}", parsed.scheme()));
+        }
+        let host = parsed.host_str().ok_or_else(|| "URL has no host".to_string())?;
+        if is_blocked_download_host(host) {
+            return Err("Private/loopback hosts are not allowed".into());
+        }
+        resolve_public_addresses_async(&parsed).await?;
+        Ok(parsed)
+    })
+    .await
+    .map_err(|_| "URL validation timed out".to_string())?
 }
 
 /// Reject path traversal and absolute paths in filenames.
@@ -416,13 +452,15 @@ pub fn attach_falcon_format(url: &str, format: Option<&str>) -> String {
 
 /// Prefer canonical watch URL for yt-dlp (CDN links 403 outside browser).
 pub fn youtube_page_url_for_download(url: &str, referrer: Option<&str>) -> Option<String> {
-    let (clean, _) = split_falcon_format(url);
+    let (clean, selected_format) = split_falcon_format(url);
     if is_youtube_watch_url(&clean) {
-        return Some(url.to_string()); // keep falconfmt fragment if present
+        return Some(attach_falcon_format(&clean, selected_format.as_deref()));
     }
     if let Some(r) = referrer {
-        if is_youtube_watch_url(r) {
-            return Some(r.to_string());
+        let (referrer_clean, referrer_format) = split_falcon_format(r);
+        if is_youtube_watch_url(&referrer_clean) {
+            let format = selected_format.as_deref().or(referrer_format.as_deref());
+            return Some(attach_falcon_format(&referrer_clean, format));
         }
     }
     // googlevideo: build watch URL from id= even without referrer
@@ -430,12 +468,17 @@ pub fn youtube_page_url_for_download(url: &str, referrer: Option<&str>) -> Optio
         if let Ok(u) = url::Url::parse(&clean) {
             for (k, v) in u.query_pairs() {
                 if k == "id" && !v.is_empty() && v.len() >= 6 {
-                    return Some(format!("https://www.youtube.com/watch?v={v}"));
+                    return Some(attach_falcon_format(
+                        &format!("https://www.youtube.com/watch?v={v}"),
+                        selected_format.as_deref(),
+                    ));
                 }
             }
         }
         if let Some(r) = referrer.filter(|s| s.contains("youtube.com") || s.contains("youtu.be")) {
-            return Some(r.to_string());
+            let (referrer_clean, referrer_format) = split_falcon_format(r);
+            let format = selected_format.as_deref().or(referrer_format.as_deref());
+            return Some(attach_falcon_format(&referrer_clean, format));
         }
     }
     None
@@ -593,12 +636,18 @@ mod tests {
     #[test]
     fn test_validate_url() {
         assert!(validate_download_url("https://example.com/a").is_ok());
-        assert!(validate_download_url("magnet:?xt=urn:btih:abc").is_ok());
+        assert!(validate_download_url("magnet:?xt=urn:btih:abc").is_err());
         assert!(validate_download_url("file:///etc/passwd").is_err());
         assert!(validate_download_url("javascript:alert(1)").is_err());
         assert!(validate_download_url("http://127.0.0.1/secret").is_err());
         assert!(validate_download_url("http://localhost/x").is_err());
         assert!(validate_download_url("http://192.168.1.1/a").is_err());
+    }
+
+    #[test]
+    fn public_resolution_rejects_private_addresses() {
+        let private = url::Url::parse("https://127.0.0.1/file").unwrap();
+        assert!(resolve_public_addresses(&private).is_err());
     }
 
     #[test]
@@ -635,7 +684,8 @@ mod tests {
     fn test_dns_rebinding_fail_safe() {
         // .invalid is reserved (RFC 6761) to never resolve → fail-safe reject,
         // deterministically whether DNS is up or fully offline.
-        assert!(host_resolves_to_blocked("nonexistent-falcon-12345.invalid", 80));
+        let url = url::Url::parse("https://nonexistent-falcon-12345.invalid/file").unwrap();
+        assert!(resolve_public_addresses(&url).is_err());
     }
 
     #[test]
@@ -644,6 +694,15 @@ mod tests {
             "https://rr1---sn-abc.googlevideo.com/videoplayback?id=5-u7nkMiwtQ&mime=video%2Fmp4";
         let watch = youtube_page_url_for_download(cdn, None).unwrap();
         assert!(watch.contains("watch?v=5-u7nkMiwtQ"));
+    }
+
+    #[test]
+    fn youtube_page_url_preserves_selected_format() {
+        let cdn =
+            "https://rr1---sn-abc.googlevideo.com/videoplayback?id=abc#falconfmt=best%5Bheight%3C%3D720%5D";
+        let watch = youtube_page_url_for_download(cdn, Some("https://www.youtube.com/watch?v=abc"))
+            .unwrap();
+        assert!(watch.contains("#falconfmt=best%5Bheight%3C%3D720%5D"));
     }
 
     #[test]

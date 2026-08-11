@@ -445,19 +445,18 @@ async function postFalcon(path, body) {
   return data;
 }
 
-async function getCookiesHeader(url, fallbackUrl = "") {
-  for (const target of [url, fallbackUrl]) {
-    if (!target) continue;
-    try {
-      const cookies = await withTimeout(
-        chrome.cookies.getAll({ url: target }),
-        3000,
-        "Cookie lookup"
-      );
-      if (cookies.length) {
-        return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-      }
-    } catch (_) {}
+async function getCookiesHeader(url) {
+  if (!url) return "";
+  try {
+    const cookies = await withTimeout(
+      chrome.cookies.getAll({ url }),
+      3000,
+      "Cookie lookup"
+    );
+    if (cookies.length) {
+      return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+    }
+  } catch (_) {
   }
   return "";
 }
@@ -594,6 +593,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
         referrer: item.referrer || "",
         user_agent: navigator.userAgent,
         cookies: cookiesHeader,
+        cookie_url: item.url,
       });
       suggest({ cancel: true });
       notify("Falcon DM", msg("sentToApp", "Download sent to Falcon DM"));
@@ -619,6 +619,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         referrer: info.pageUrl || "",
         user_agent: navigator.userAgent,
         cookies: cookiesHeader,
+        cookie_url: url,
       });
       notify("Falcon DM", msg("sentToApp", "Download sent to Falcon DM"));
     } catch (e) {
@@ -717,6 +718,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           referrer: rawUrl,
           user_agent: navigator.userAgent,
           cookies,
+          cookie_url: rawUrl,
         });
         sendResponse({ success: true });
       } catch (e) {
@@ -742,14 +744,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     const finish = async (extraUrls) => {
-      const cookieString = await getCookiesHeader(pageUrl);
       const merged = [...new Set([...(urls || []), ...(extraUrls || [])])];
       sendResponse({
         url: merged[merged.length - 1] || null,
         urls: merged,
         metaMap,
         title,
-        cookies: cookieString,
+        cookies: "",
         userAgent: navigator.userAgent,
       });
     };
@@ -844,19 +845,23 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         ? self.FalconMedia.normalizeMediaUrl(rawUrl)
         : rawUrl;
 
-    sendToFalcon("/api/intercept", {
-      url,
-      page_url: request.page_url,
-      title: request.title || "",
-      cookies: request.cookies || "",
-      user_agent: request.user_agent || navigator.userAgent,
-      referer: request.page_url,
-      filename: request.filename || null,
-      media_type: request.media_type || "application/octet-stream",
-      format: request.format || null,
-    })
-      .then((data) => sendResponse({ success: true, data }))
-      .catch((err) => sendResponse({ success: false, error: err.message }));
+    (async () => {
+      const cookies = await getCookiesHeader(url);
+      sendToFalcon("/api/intercept", {
+        url,
+        page_url: request.page_url,
+        title: request.title || "",
+        cookies,
+        cookie_url: url,
+        user_agent: request.user_agent || navigator.userAgent,
+        referer: request.page_url,
+        filename: request.filename || null,
+        media_type: request.media_type || "application/octet-stream",
+        format: request.format || null,
+      })
+        .then((data) => sendResponse({ success: true, data }))
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+    })().catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
   }
 
@@ -866,13 +871,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const settled = await Promise.allSettled(
         items.map(async (it) => {
           try {
-            const cookies = await getCookiesHeader(it.url, request.page_url);
+            const cookies = await getCookiesHeader(it.url);
             const data = await sendToFalcon("/api/add", {
               url: it.url,
               filename: it.filename || it.url.split("/").pop().split("?")[0] || "download",
               referrer: request.page_url || "",
               user_agent: navigator.userAgent,
               cookies,
+              cookie_url: it.url,
             });
             return {
               url: it.url,

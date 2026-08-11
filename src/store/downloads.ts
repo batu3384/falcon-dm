@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import type { DownloadModel, ProgressPayload } from '../types';
 import { getDownloads } from '../api/commands';
 
+export const DOWNLOAD_PAGE_SIZE = 200;
+
 // ponytail: downloads store absorbs the download list + selection state that
 // used to live as 4 separate useStates in App.tsx and was prop-drilled into
 // DownloadList, InspectorPanel, StatusBar, Sidebar. Components now subscribe
@@ -12,12 +14,17 @@ interface DownloadsState {
   loading: boolean;
   error: string | null;
   archived: boolean;
+  search: string;
+  loadedPages: number;
+  hasMore: boolean;
+  loadingMore: boolean;
   requestSequence: number;
   selectedDownload: DownloadModel | null;
   selectedIds: Set<number>;
   lastSelectId: number | null;
 
-  fetchDownloads: (archived?: boolean) => Promise<void>;
+  fetchDownloads: (archived?: boolean, search?: string) => Promise<void>;
+  loadMoreDownloads: () => Promise<void>;
   retryFetch: () => Promise<void>;
   setLoading: (v: boolean) => void;
   applyProgress: (p: ProgressPayload) => void;
@@ -32,25 +39,55 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
   loading: true,
   error: null,
   archived: false,
+  search: '',
+  loadedPages: 1,
+  hasMore: false,
+  loadingMore: false,
   requestSequence: 0,
   selectedDownload: null,
   selectedIds: new Set(),
   lastSelectId: null,
 
-  fetchDownloads: async (archived?: boolean) => {
-    const currentArchived = archived ?? get().archived;
+  fetchDownloads: async (archived?: boolean, search?: string) => {
+    const previousArchived = get().archived;
+    const currentArchived = archived ?? previousArchived;
+    const currentSearch = search ?? get().search;
+    const archiveChanged = archived !== undefined && archived !== previousArchived;
+    const searchChanged = search !== undefined && search !== get().search;
+    const pagesToFetch = archiveChanged || searchChanged ? 1 : Math.max(1, get().loadedPages);
     const sequence = get().requestSequence + 1;
     const hasExistingRows = get().downloads.length > 0;
     set({
       archived: currentArchived,
+      search: currentSearch,
+      loadedPages: pagesToFetch,
+      loadingMore: false,
       loading: !hasExistingRows,
       error: null,
       requestSequence: sequence,
     });
     try {
-      // ponytail: pass archived flag through so the "Archived" view fetches
-      // archived rows (hidden by default in getDownloads).
-      const data = await getDownloads({ archived: currentArchived });
+      const pages: DownloadModel[][] = [];
+      let beforeId: number | undefined;
+      for (let page = 0; page < pagesToFetch; page += 1) {
+        const filter =
+          pagesToFetch === 1 && page === 0
+            ? { archived: currentArchived }
+            : {
+                archived: currentArchived,
+                limit: DOWNLOAD_PAGE_SIZE,
+                ...(beforeId === undefined ? {} : { before_id: beforeId }),
+              };
+        const requestFilter = currentSearch.trim()
+          ? { ...filter, search: currentSearch.trim() }
+          : filter;
+        const rows = await getDownloads(requestFilter);
+        pages.push(rows);
+        const lastRow = rows[rows.length - 1];
+        beforeId = lastRow?.id;
+        if (rows.length < DOWNLOAD_PAGE_SIZE) break;
+      }
+      const data = pages.flat();
       if (get().requestSequence !== sequence) return;
       set((state) => {
         const liveIds = new Set(data.map((download) => download.id));
@@ -62,6 +99,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
           downloads: data,
           loading: false,
           error: null,
+          hasMore: pages[pages.length - 1]?.length === DOWNLOAD_PAGE_SIZE,
           selectedIds,
           selectedDownload,
         };
@@ -76,7 +114,41 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     }
   },
 
-  retryFetch: () => get().fetchDownloads(get().archived),
+  loadMoreDownloads: async () => {
+    const state = get();
+    if (state.loadingMore || !state.hasMore) return;
+    const sequence = state.requestSequence + 1;
+    set({ loadingMore: true, error: null, requestSequence: sequence });
+    try {
+      const rows = await getDownloads({
+        archived: state.archived,
+        ...(state.search.trim() ? { search: state.search.trim() } : {}),
+        limit: DOWNLOAD_PAGE_SIZE,
+        before_id: state.downloads[state.downloads.length - 1]?.id,
+      });
+      if (get().requestSequence !== sequence) return;
+      set((current) => {
+        const existingIds = new Set(current.downloads.map((download) => download.id));
+        return {
+          downloads: [
+            ...current.downloads,
+            ...rows.filter((download) => !existingIds.has(download.id)),
+          ],
+          loadedPages: current.loadedPages + 1,
+          hasMore: rows.length === DOWNLOAD_PAGE_SIZE,
+          loadingMore: false,
+        };
+      });
+    } catch (e) {
+      if (get().requestSequence !== sequence) return;
+      set({
+        loadingMore: false,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  },
+
+  retryFetch: () => get().fetchDownloads(get().archived, get().search),
 
   setLoading: (v) => set({ loading: v }),
 

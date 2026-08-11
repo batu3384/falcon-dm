@@ -33,7 +33,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
     download_profiles: [],
   });
   const [saveError, setSaveError] = useState('');
-  const [pendingPair, setPendingPair] = useState<string | null>(null);
+  const [pendingPairs, setPendingPairs] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const dirtyRef = useRef(false);
@@ -59,14 +59,16 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
       })
       .catch((e) => console.error('Failed to load settings:', e));
     api
-      .getPendingPair()
-      .then(setPendingPair)
+      .getPendingPairs()
+      .then(setPendingPairs)
       .catch(() => {});
   }, []);
 
   useEffect(() => {
     const unlisten = onPairRequest((extensionId) => {
-      setPendingPair(extensionId);
+      setPendingPairs((current) =>
+        current.includes(extensionId) ? current : [...current, extensionId],
+      );
     });
     return () => {
       unlisten.then((f) => f());
@@ -100,7 +102,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
   const handleRelinkExtension = async () => {
     try {
       await api.resetExtensionPin();
-      setPendingPair(null);
+      setPendingPairs([]);
       showToast('success', t('settings.extension_reset'));
     } catch (e) {
       console.error(e);
@@ -108,11 +110,10 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
     }
   };
 
-  const handleApprovePair = async () => {
-    if (!pendingPair) return;
+  const handleApprovePair = async (extensionId: string) => {
     try {
-      await api.approveExtensionPair(pendingPair);
-      setPendingPair(null);
+      await api.approveExtensionPair(extensionId);
+      setPendingPairs(await api.getPendingPairs());
       const s = await api.getSettings();
       if (!dirtyRef.current) setSettingsState(s);
       showToast('success', t('settings.pair_approved'));
@@ -260,15 +261,21 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
               <div className="field">
                 <label className="field-label">{t('settings.extension')}</label>
                 <p className="field-hint">{t('settings.extension_hint')}</p>
-                {pendingPair ? (
-                  <div className="input-action" style={{ marginBottom: 8 }}>
-                    <code className="field-hint" style={{ flex: 1 }}>
-                      {pendingPair}
-                    </code>
-                    <button type="button" className="btn-primary" onClick={handleApprovePair}>
-                      {t('settings.pair_approve')}
-                    </button>
-                  </div>
+                {pendingPairs.length > 0 ? (
+                  pendingPairs.map((extensionId) => (
+                    <div className="input-action" style={{ marginBottom: 8 }} key={extensionId}>
+                      <code className="field-hint" style={{ flex: 1 }}>
+                        {extensionId}
+                      </code>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={() => handleApprovePair(extensionId)}
+                      >
+                        {t('settings.pair_approve')}
+                      </button>
+                    </div>
+                  ))
                 ) : (
                   <p className="field-hint">{t('settings.pair_none')}</p>
                 )}

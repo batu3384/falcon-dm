@@ -3,6 +3,7 @@ use falcon_dm_lib::native_messaging::{
     MAX_NATIVE_MESSAGE_BYTES,
 };
 use std::io::{self, Write};
+use std::time::Duration;
 
 #[cfg(unix)]
 fn run() -> Result<(), String> {
@@ -17,6 +18,10 @@ fn run() -> Result<(), String> {
         .ok_or_else(|| "application data directory is unavailable".to_string())?
         .join("com.falcondm.app");
     let mut socket = UnixStream::connect(socket_path(&data_dir)).map_err(|e| e.to_string())?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .and_then(|_| socket.set_write_timeout(Some(Duration::from_secs(5))))
+        .map_err(|e| e.to_string())?;
     let request_bytes = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     write_native_message(&mut socket, &request_bytes)?;
 

@@ -41,7 +41,7 @@
 
 | Area | What you get |
 |------|----------------|
-| **HTTP / magnet** | aria2 sidecar, resume, priority queue, speed limit, scheduler |
+| **HTTP(S)** | DNS-pinned streaming, bounded redirects, atomic completion, priority queue, scheduler |
 | **HLS (m3u8)** | Parallel segment fetch, ffmpeg mux |
 | **YouTube** | Watch URL + <code>yt-dlp</code> (quality via API <code>format</code> field) |
 | **Browser extension** | Download hijack, video quality picker, link grabber (batch ≤20) |
@@ -50,9 +50,9 @@
 
 ## Core Architecture
 
-### Download engine (aria2c sidecar)
+### Download engine
 
-HTTP and magnet traffic goes through a bundled `aria2c` binary (provisioned per architecture — see below). The Rust host drives aria2 over JSON-RPC on a local port with up to 16 connections per server.
+Ordinary HTTP(S) traffic uses the Rust DNS-pinned streaming path. The bundled `aria2c` binary remains available for legacy session recovery and protocol-specific compatibility. Private targets, unsafe redirects, and magnet URLs are rejected.
 
 ### Stream pipeline (HLS + YouTube)
 
@@ -86,7 +86,7 @@ Requests require `X-Falcon-Token` and a `chrome-extension://` (or Firefox/Edge) 
 
 ## Compilation & bootstrapping
 
-Sidecars are **not** committed (`.gitignore`). Provision before first `tauri build`:
+Sidecars are **not** committed (`.gitignore`). Local provisioning is explicitly unsigned/unverified unless hashes are supplied:
 
 ```bash
 ./scripts/provision-sidecars.sh
@@ -94,7 +94,7 @@ Sidecars are **not** committed (`.gitignore`). Provision before first `tauri bui
 
 Copies `aria2c` from Homebrew and `ffmpeg` (Homebrew on arm64, pinned evermeet.cx
 binary on Intel) into `src-tauri/binaries/` as `aria2c-<triple>` and
-`ffmpeg-<triple>`. Idempotent. Homebrew verifies its bottle; Intel provisioning
+`ffmpeg-<triple>`. Idempotent. Homebrew verifies its bottle; remote provisioning
 requires `FFMPEG_SHA256` and verifies the extracted binary before installation.
 `ARIA2_SHA256` can pin the copied Homebrew binary as well:
 
@@ -104,6 +104,12 @@ FFMPEG_URL='https://example.invalid/immutable-ffmpeg.zip' \
 FFMPEG_SHA256='<64-hex SHA-256 of extracted ffmpeg>' \
 ./scripts/provision-sidecars.sh
 ```
+
+Release workflows set `RELEASE_MODE=1` and require `ARIA2_SHA256`, immutable
+`FFMPEG_URL`, and `FFMPEG_SHA256`; missing values fail before any binary is used.
+Signed releases also import the Apple certificate into an ephemeral runner
+keychain before Tauri build. If no signing secrets are configured, the workflow
+selects the explicit unsigned fallback.
 
 Never use an unpinned remote URL in release automation. Release jobs also
 publish architecture-specific checksums for the app, sidecars, and native host.
