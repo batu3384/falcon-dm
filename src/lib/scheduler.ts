@@ -1,3 +1,4 @@
+/** Keep overnight-range rules aligned with `validate_schedule` in queue.rs. */
 export function isValidScheduleRange(start: string, stop: string): boolean {
   const parse = (value: string) => {
     if (!/^\d{2}:\d{2}$/.test(value)) return null;

@@ -46,6 +46,30 @@ pub fn validate_schedule(opts: &ScheduleOptions) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DownloadRoute {
+    YtDlp,
+    Hls,
+    Http,
+    Aria2,
+}
+
+pub(crate) fn route_queued_download(
+    url: &str,
+    referrer: Option<&str>,
+    has_aria2_gid: bool,
+) -> DownloadRoute {
+    if youtube_page_url_for_download(url, referrer).is_some() {
+        DownloadRoute::YtDlp
+    } else if is_hls_url(url) {
+        DownloadRoute::Hls
+    } else if has_aria2_gid {
+        DownloadRoute::Aria2
+    } else {
+        DownloadRoute::Http
+    }
+}
+
 pub struct QueueManager {
     pub schedule: Arc<Mutex<ScheduleOptions>>,
     pub max_concurrent: Arc<AtomicUsize>,
@@ -150,11 +174,13 @@ impl QueueManager {
         let mut downloading = db
             .get_downloads(&DownloadFilter {
                 status: Some(DownloadStatus::Downloading),
+                limit: Some(256),
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
         if let Ok(merging) = db.get_downloads(&DownloadFilter {
             status: Some(DownloadStatus::Merging),
+            limit: Some(256),
             ..Default::default()
         }) {
             downloading.extend(merging);
@@ -205,221 +231,241 @@ impl QueueManager {
         }
 
         if active_count < max_concurrent_val {
-            if let Ok(mut queued) = db.get_downloads(&DownloadFilter {
-                status: Some(DownloadStatus::Queued),
-                ..Default::default()
-            }) {
-                queued.sort_by_key(|b| std::cmp::Reverse(b.priority));
-
-                for mut dl in queued.into_iter().take(max_concurrent_val - active_count) {
+            if let Ok(queued) = db.take_queued((max_concurrent_val - active_count) as i64) {
+                for mut dl in queued {
                     let dl_id = match dl.id {
                         Some(id) => id,
                         None => continue,
                     };
 
-                    // YouTube CDN links 403 outside browser — rewrite to watch URL + yt-dlp
-                    if let Some(watch) =
-                        youtube_page_url_for_download(&dl.url, dl.referrer.as_deref())
-                    {
-                        let (clean_url, ytdlp_fmt) = split_falcon_format(&watch);
-
-                        let (tx, rx) = tokio::sync::watch::channel(false);
-                        {
-                            let mut map = lock_or_recover(&self.active_stream_tasks);
-                            if map.contains_key(&dl_id) {
+                    match route_queued_download(
+                        &dl.url,
+                        dl.referrer.as_deref(),
+                        dl.aria2_gid.is_some(),
+                    ) {
+                        DownloadRoute::YtDlp => {
+                            let Some(watch) =
+                                youtube_page_url_for_download(&dl.url, dl.referrer.as_deref())
+                            else {
                                 continue;
+                            };
+                            let (clean_url, ytdlp_fmt) = split_falcon_format(&watch);
+
+                            let (tx, rx) = tokio::sync::watch::channel(false);
+                            {
+                                let mut map = lock_or_recover(&self.active_stream_tasks);
+                                if map.contains_key(&dl_id) {
+                                    continue;
+                                }
+                                map.insert(dl_id, tx);
                             }
-                            map.insert(dl_id, tx);
-                        }
 
-                        if !db
-                            .set_status_error_if_current(
-                                dl_id,
-                                &[DownloadStatus::Queued],
-                                &DownloadStatus::Downloading,
-                                None,
-                                None,
-                            )
-                            .unwrap_or(false)
-                        {
-                            lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
-                            continue;
-                        }
-                        dl.status = DownloadStatus::Downloading;
-
-                        let url = clean_url;
-                        let save_path = dl.save_path.clone();
-                        let mut final_path = std::path::PathBuf::from(&save_path);
-                        // Force mp4 container after merge
-                        let mut fname = dl.filename.clone();
-                        if !fname.to_lowercase().ends_with(".mp4") {
-                            if let Some(stem) = std::path::Path::new(&fname).file_stem() {
-                                fname = format!("{}.mp4", stem.to_string_lossy());
-                                let _ = db.set_filename_if_current(
+                            if !db
+                                .set_status_error_if_current(
                                     dl_id,
-                                    &[DownloadStatus::Downloading],
-                                    &fname,
-                                );
-                            }
-                        }
-                        final_path.push(&fname);
-                        let save_path_str = final_path.to_string_lossy().to_string();
-                        let ytdlp_headers = crate::download::ytdlp::YtDlpHeaders {
-                            cookies: dl.cookies.clone(),
-                            user_agent: dl.user_agent.clone(),
-                        };
-
-                        let db_clone = db.clone();
-                        let stream_tasks_clone = self.active_stream_tasks.clone();
-                        let app_handle_clone = app_handle.clone();
-
-                        tokio::spawn(async move {
-                            // ponytail: shared finalize logic — see run_stream_task.
-                            run_stream_task(
-                                &app_handle_clone,
-                                &db_clone,
-                                &stream_tasks_clone,
-                                dl_id,
-                                &save_path_str,
-                                StreamKind::YtDlp {
-                                    url,
-                                    headers: ytdlp_headers,
-                                    format: ytdlp_fmt,
-                                },
-                                rx,
-                            )
-                            .await;
-                        });
-                        continue;
-                    }
-
-                    if is_hls_url(&dl.url) {
-                        let (tx, rx) = tokio::sync::watch::channel(false);
-                        {
-                            let mut map = lock_or_recover(&self.active_stream_tasks);
-                            if map.contains_key(&dl_id) {
+                                    &[DownloadStatus::Queued],
+                                    &DownloadStatus::Downloading,
+                                    None,
+                                    None,
+                                )
+                                .unwrap_or(false)
+                            {
+                                lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
                                 continue;
                             }
-                            map.insert(dl_id, tx);
-                        }
+                            dl.status = DownloadStatus::Downloading;
 
-                        // Claim in DB before spawn
-                        if !db
-                            .set_status_error_if_current(
-                                dl_id,
-                                &[DownloadStatus::Queued],
-                                &DownloadStatus::Downloading,
-                                None,
-                                None,
-                            )
-                            .unwrap_or(false)
-                        {
-                            lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
-                            continue;
-                        }
-                        dl.status = DownloadStatus::Downloading;
-
-                        let url = dl.url.clone();
-                        let save_path = dl.save_path.clone();
-                        let mut final_path = std::path::PathBuf::from(&save_path);
-                        final_path.push(&dl.filename);
-                        let save_path_str = final_path.to_string_lossy().to_string();
-                        let hls_headers = HlsHeaders {
-                            cookies: dl.cookies.clone(),
-                            referrer: dl.referrer.clone(),
-                            user_agent: dl.user_agent.clone(),
-                            max_connections: self.max_connections.load(Ordering::SeqCst),
-                        };
-
-                        let db_clone = db.clone();
-                        let stream_tasks_clone = self.active_stream_tasks.clone();
-                        let app_handle_clone = app_handle.clone();
-
-                        tokio::spawn(async move {
-                            // ponytail: shared finalize logic — see run_stream_task.
-                            run_stream_task(
-                                &app_handle_clone,
-                                &db_clone,
-                                &stream_tasks_clone,
-                                dl_id,
-                                &save_path_str,
-                                StreamKind::Hls { url, headers: hls_headers },
-                                rx,
-                            )
-                            .await;
-                        });
-                        continue; // already updated DB
-                    } else if dl.aria2_gid.is_none() {
-                        let (tx, rx) = tokio::sync::watch::channel(false);
-                        {
-                            let mut map = lock_or_recover(&self.active_stream_tasks);
-                            if map.contains_key(&dl_id) {
-                                continue;
-                            }
-                            map.insert(dl_id, tx);
-                        }
-
-                        if !db
-                            .set_status_error_if_current(
-                                dl_id,
-                                &[DownloadStatus::Queued],
-                                &DownloadStatus::Downloading,
-                                None,
-                                None,
-                            )
-                            .unwrap_or(false)
-                        {
-                            lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
-                            continue;
-                        }
-
-                        let url = dl.url.clone();
-                        let mut final_path = std::path::PathBuf::from(&dl.save_path);
-                        final_path.push(&dl.filename);
-                        let save_path_str = final_path.to_string_lossy().to_string();
-                        let http_headers = HttpHeaders {
-                            cookies: dl.cookies.clone(),
-                            referrer: dl.referrer.clone(),
-                            user_agent: dl.user_agent.clone(),
-                            options: lock_or_recover(&self.http_options).clone(),
-                        };
-                        let db_clone = db.clone();
-                        let stream_tasks_clone = self.active_stream_tasks.clone();
-                        let app_handle_clone = app_handle.clone();
-                        tokio::spawn(async move {
-                            run_stream_task(
-                                &app_handle_clone,
-                                &db_clone,
-                                &stream_tasks_clone,
-                                dl_id,
-                                &save_path_str,
-                                StreamKind::Http { url, headers: http_headers },
-                                rx,
-                            )
-                            .await;
-                        });
-                        continue;
-                    } else if let Some(gid) = &dl.aria2_gid {
-                        match engine.resume(gid).await {
-                            Ok(()) => {
-                                if db
-                                    .set_status_if_current(
+                            let url = clean_url;
+                            let save_path = dl.save_path.clone();
+                            let mut final_path = std::path::PathBuf::from(&save_path);
+                            // Force mp4 container after merge
+                            let mut fname = dl.filename.clone();
+                            if !fname.to_lowercase().ends_with(".mp4") {
+                                if let Some(stem) = std::path::Path::new(&fname).file_stem() {
+                                    fname = format!("{}.mp4", stem.to_string_lossy());
+                                    let _ = db.set_filename_if_current(
                                         dl_id,
-                                        &[DownloadStatus::Queued],
-                                        &DownloadStatus::Downloading,
-                                    )
-                                    .unwrap_or(false)
-                                {
-                                    dl.status = DownloadStatus::Downloading;
-                                } else {
-                                    let _ = engine.pause(gid).await;
+                                        &[DownloadStatus::Downloading],
+                                        &fname,
+                                    );
                                 }
                             }
-                            Err(e) => {
-                                log::warn!("aria2 resume failed, switching to HTTP: {}", e);
-                                let _ = engine.remove(gid).await;
+                            final_path.push(&fname);
+                            let save_path_str = final_path.to_string_lossy().to_string();
+                            let ytdlp_headers = crate::download::ytdlp::YtDlpHeaders {
+                                cookies: dl.cookies.clone(),
+                                user_agent: dl.user_agent.clone(),
+                            };
+
+                            let db_clone = db.clone();
+                            let stream_tasks_clone = self.active_stream_tasks.clone();
+                            let app_handle_clone = app_handle.clone();
+
+                            tokio::spawn(async move {
+                                // ponytail: shared finalize logic — see run_stream_task.
+                                run_stream_task(
+                                    &app_handle_clone,
+                                    &db_clone,
+                                    &stream_tasks_clone,
+                                    dl_id,
+                                    &save_path_str,
+                                    StreamKind::YtDlp {
+                                        url,
+                                        headers: ytdlp_headers,
+                                        format: ytdlp_fmt,
+                                    },
+                                    rx,
+                                )
+                                .await;
+                            });
+                            continue;
+                        }
+
+                        DownloadRoute::Hls => {
+                            let (tx, rx) = tokio::sync::watch::channel(false);
+                            {
+                                let mut map = lock_or_recover(&self.active_stream_tasks);
+                                if map.contains_key(&dl_id) {
+                                    continue;
+                                }
+                                map.insert(dl_id, tx);
+                            }
+
+                            // Claim in DB before spawn
+                            if !db
+                                .set_status_error_if_current(
+                                    dl_id,
+                                    &[DownloadStatus::Queued],
+                                    &DownloadStatus::Downloading,
+                                    None,
+                                    None,
+                                )
+                                .unwrap_or(false)
+                            {
+                                lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
+                                continue;
+                            }
+                            dl.status = DownloadStatus::Downloading;
+
+                            let url = dl.url.clone();
+                            let save_path = dl.save_path.clone();
+                            let mut final_path = std::path::PathBuf::from(&save_path);
+                            final_path.push(&dl.filename);
+                            let save_path_str = final_path.to_string_lossy().to_string();
+                            let hls_headers = HlsHeaders {
+                                cookies: dl.cookies.clone(),
+                                referrer: dl.referrer.clone(),
+                                user_agent: dl.user_agent.clone(),
+                                max_connections: self.max_connections.load(Ordering::SeqCst),
+                            };
+
+                            let db_clone = db.clone();
+                            let stream_tasks_clone = self.active_stream_tasks.clone();
+                            let app_handle_clone = app_handle.clone();
+
+                            tokio::spawn(async move {
+                                // ponytail: shared finalize logic — see run_stream_task.
+                                run_stream_task(
+                                    &app_handle_clone,
+                                    &db_clone,
+                                    &stream_tasks_clone,
+                                    dl_id,
+                                    &save_path_str,
+                                    StreamKind::Hls { url, headers: hls_headers },
+                                    rx,
+                                )
+                                .await;
+                            });
+                            continue; // already updated DB
+                        }
+                        DownloadRoute::Http => {
+                            let (tx, rx) = tokio::sync::watch::channel(false);
+                            {
+                                let mut map = lock_or_recover(&self.active_stream_tasks);
+                                if map.contains_key(&dl_id) {
+                                    continue;
+                                }
+                                map.insert(dl_id, tx);
+                            }
+
+                            if !db
+                                .set_status_error_if_current(
+                                    dl_id,
+                                    &[DownloadStatus::Queued],
+                                    &DownloadStatus::Downloading,
+                                    None,
+                                    None,
+                                )
+                                .unwrap_or(false)
+                            {
+                                lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
+                                continue;
+                            }
+
+                            let url = dl.url.clone();
+                            let mut final_path = std::path::PathBuf::from(&dl.save_path);
+                            final_path.push(&dl.filename);
+                            let save_path_str = final_path.to_string_lossy().to_string();
+                            let http_headers = HttpHeaders {
+                                cookies: dl.cookies.clone(),
+                                referrer: dl.referrer.clone(),
+                                user_agent: dl.user_agent.clone(),
+                                options: lock_or_recover(&self.http_options).clone(),
+                            };
+                            let db_clone = db.clone();
+                            let stream_tasks_clone = self.active_stream_tasks.clone();
+                            let app_handle_clone = app_handle.clone();
+                            tokio::spawn(async move {
+                                run_stream_task(
+                                    &app_handle_clone,
+                                    &db_clone,
+                                    &stream_tasks_clone,
+                                    dl_id,
+                                    &save_path_str,
+                                    StreamKind::Http { url, headers: http_headers },
+                                    rx,
+                                )
+                                .await;
+                            });
+                            continue;
+                        }
+                        DownloadRoute::Aria2 => {
+                            let Some(gid) = &dl.aria2_gid else {
+                                continue;
+                            };
+                            if engine
+                                .ensure_running(&app_handle, &crate::util::app_data_dir())
+                                .await
+                                .is_err()
+                            {
+                                log::warn!("aria2 unavailable, switching {} to HTTP", dl_id);
                                 let _ =
                                     db.clear_aria2_gid_if_current(dl_id, &[DownloadStatus::Queued]);
+                                continue;
+                            }
+                            match engine.resume(gid).await {
+                                Ok(()) => {
+                                    if db
+                                        .set_status_if_current(
+                                            dl_id,
+                                            &[DownloadStatus::Queued],
+                                            &DownloadStatus::Downloading,
+                                        )
+                                        .unwrap_or(false)
+                                    {
+                                        dl.status = DownloadStatus::Downloading;
+                                    } else {
+                                        let _ = engine.pause(gid).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("aria2 resume failed, switching to HTTP: {}", e);
+                                    let _ = engine.remove(gid).await;
+                                    let _ = db.clear_aria2_gid_if_current(
+                                        dl_id,
+                                        &[DownloadStatus::Queued],
+                                    );
+                                }
                             }
                         }
                     }
@@ -618,5 +664,25 @@ mod tests {
             active: true,
         })
         .is_err());
+    }
+
+    #[test]
+    fn route_uses_path_not_query_for_hls() {
+        assert_eq!(
+            route_queued_download("https://cdn.example.com/video.mp4?x=.m3u8", None, false),
+            DownloadRoute::Http
+        );
+        assert_eq!(
+            route_queued_download("https://cdn.example.com/live.m3u8", None, false),
+            DownloadRoute::Hls
+        );
+        assert_eq!(
+            route_queued_download("https://www.youtube.com/watch?v=abc", None, false),
+            DownloadRoute::YtDlp
+        );
+        assert_eq!(
+            route_queued_download("https://cdn.example.com/a.bin", None, true),
+            DownloadRoute::Aria2
+        );
     }
 }

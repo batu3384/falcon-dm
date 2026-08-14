@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.png" width="128" alt="Falcon DM Icon" />
+  <img src="src/assets/icon.png" width="128" alt="Falcon DM Icon" />
 </p>
 
 <h1 align="center">Falcon DM</h1>
@@ -21,13 +21,13 @@
 <table align="center" border="0" cellpadding="0" cellspacing="0">
   <tr>
     <td width="50%" align="center" valign="middle">
-      <img src="assets/mascot.jpg" width="250" alt="Falcon DM Mascot" style="border-radius: 16px;" />
+      <img src="src/assets/icon.png" width="250" alt="Falcon DM" style="border-radius: 16px;" />
     </td>
     <td width="50%" valign="middle" style="padding-left: 20px;">
       <h3>Meet Falco (The Sniffer)</h3>
       <p>The mascot reflects what the stack actually does:</p>
       <ul>
-        <li><strong>Speed:</strong> Multi-connection downloads via bundled <code>aria2c</code>.</li>
+        <li><strong>Speed:</strong> DNS-pinned HTTP streaming with bounded redirects.</li>
         <li><strong>Precision:</strong> HLS segment assembly + <code>ffmpeg</code> merge.</li>
         <li><strong>Capture:</strong> Chrome MV3 extension → authenticated localhost API.</li>
       </ul>

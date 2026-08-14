@@ -1,6 +1,15 @@
 import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, Activity, Clock, CheckCircle2, AlertCircle, Gauge, Database } from 'lucide-react';
+import {
+  X,
+  Activity,
+  Clock,
+  Pause,
+  CheckCircle2,
+  AlertCircle,
+  Gauge,
+  Database,
+} from 'lucide-react';
 import { useModalA11y } from '../hooks/useModalA11y';
 import SpeedGraph from './SpeedGraph';
 import * as api from '../api/commands';
@@ -56,6 +65,13 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
       label: t('stats.queued'),
       value: stats?.queued ?? 0,
       Icon: Clock,
+      dot: 'queued',
+    },
+    {
+      key: 'paused',
+      label: t('stats.paused'),
+      value: stats?.paused ?? 0,
+      Icon: Pause,
       dot: 'queued',
     },
     {

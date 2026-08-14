@@ -43,9 +43,8 @@ export async function getDownloads(filter?: DownloadFilter): Promise<DownloadMod
 }
 
 export async function getDownload(id: number): Promise<DownloadModel> {
-  // get_download_status returns aria2 status; for a DB row we reuse get_downloads filter
-  // is not available — backend exposes no single-row getter, so callers fetch the list.
-  throw new Error(`getDownload(${id}): use getDownloads instead`);
+  const raw = await invoke<unknown>('get_download', { id });
+  return DownloadSchema.parse(raw) as DownloadModel;
 }
 
 export async function addDownload(params: {
@@ -158,6 +157,7 @@ export async function clearLogs(): Promise<void> {
 export interface DownloadStats {
   active: number;
   queued: number;
+  paused: number;
   completed: number;
   failed: number;
   total_downloaded_bytes: number;
@@ -195,12 +195,10 @@ export function buildCurlCommand(dl: {
   url: string;
   user_agent?: string | null;
   referrer?: string | null;
-  cookies?: string | null;
 }): string {
   const parts = ['curl', '-L', shquote(dl.url)];
   if (dl.user_agent) parts.push('-H', shquote(`User-Agent: ${dl.user_agent}`));
   if (dl.referrer) parts.push('-H', shquote(`Referer: ${dl.referrer}`));
-  if (dl.cookies) parts.push('-H', shquote(`Cookie: ${dl.cookies}`));
   parts.push('-o', shquote(dl.url.split('/').pop()?.split('?')[0] || 'download.bin'));
   return parts.join(' ');
 }

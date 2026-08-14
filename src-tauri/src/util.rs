@@ -5,14 +5,11 @@ use std::path::{Component, Path, PathBuf};
 pub const LEGACY_DEFAULT_API_TOKEN: &str = "falcon-dm-local-v1";
 
 pub fn is_hls_url(url: &str) -> bool {
-    let lower = url.to_lowercase();
-    if let Ok(parsed) = url::Url::parse(url) {
-        let path = parsed.path().to_lowercase();
-        if path.ends_with(".m3u8") || path.contains(".m3u8/") {
-            return true;
-        }
-    }
-    lower.contains(".m3u8")
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let path = parsed.path().to_lowercase();
+    path.ends_with(".m3u8") || path.contains(".m3u8/")
 }
 
 /// Strip CR/LF from header values to prevent header injection.
@@ -107,7 +104,7 @@ pub async fn resolve_public_addresses_async(url: &url::Url) -> Result<Vec<Socket
     Ok(public)
 }
 
-/// Allow only http(s) and magnet URLs. Block loopback/private hosts (SSRF).
+/// Allow only http(s) URLs. Block loopback/private hosts (SSRF).
 pub fn validate_download_url(url: &str) -> Result<(), String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -505,7 +502,11 @@ pub fn infer_filename_from_url(url: &str) -> Option<String> {
 /// Guess extension from URL hints (mime=, path suffix).
 pub fn guess_extension_from_url(url: &str) -> Option<String> {
     let lower = url.to_lowercase();
-    if lower.contains(".m3u8") || lower.contains("/manifest/") {
+    if is_hls_url(url)
+        || url::Url::parse(url)
+            .map(|parsed| parsed.path().to_lowercase().contains("/manifest/"))
+            .unwrap_or(false)
+    {
         return Some("mp4".into());
     }
     if let Some(m) = lower.find("mime=") {
@@ -736,7 +737,11 @@ mod tests {
     fn test_is_hls_url() {
         assert!(is_hls_url("https://cdn.example.com/live/index.m3u8"));
         assert!(is_hls_url("https://cdn.example.com/a.m3u8?token=1"));
+        assert!(is_hls_url("https://cdn.example.com/live.m3u8/extra"));
         assert!(!is_hls_url("https://cdn.example.com/video.mp4"));
+        assert!(!is_hls_url("https://cdn.example.com/video.mp4?x=.m3u8"));
+        assert!(!is_hls_url("https://cdn.example.com/video.mp4#file.m3u8"));
+        assert!(!is_hls_url("not a url"));
     }
 
     #[test]

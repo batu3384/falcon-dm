@@ -2,7 +2,7 @@
 name = "falcon-dm"
 version = "0.1.0"
 description = "A Tauri App"
-authors = ["you"]
+authors = ["Falcon DM contributors"]
 edition = "2021"
 license = "MIT"
 

@@ -1,5 +1,8 @@
 # Design System Master File
 
+> **Superseded by `design-system/falcon-dm-v2/MASTER.md`.** Keep this file as
+> the v1 snapshot; new UI work follows v2.
+
 > **LOGIC:** When building a specific page, first check `design-system/pages/[page-name].md`.
 > If that file exists, its rules **override** this Master file.
 > If not, strictly follow the rules below.

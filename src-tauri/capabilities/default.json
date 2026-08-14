@@ -42,7 +42,8 @@
             { "validator": "^-bsf:a$" },
             { "validator": "^-y$" },
             { "validator": "^(concat|0|copy|aac_adtstoasc)$" },
-            { "validator": "^/|^.*[/]list\\.txt$|^.*\\.falcondm-temp[/].*|^seg_[0-9]{5}\\.ts$|.+\\.(mp4|mkv|m4a|ts|webm)$|^[^/]+$" }
+            { "validator": "^/.*\\.falcondm-temp/list\\.txt$" },
+            { "validator": "^/.*\\.falcondm-temp/.*\\.(mp4|mkv|m4a|ts|webm|txt)$" }
           ]
         }
       ]

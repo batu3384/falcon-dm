@@ -4,8 +4,8 @@ use crate::util::{
     validate_fetch_url_async,
 };
 use futures::StreamExt;
-use reqwest::header::{COOKIE, REFERER, USER_AGENT};
-use reqwest::Client;
+use reqwest::header::{COOKIE, RANGE, REFERER, USER_AGENT};
+use reqwest::{Client, StatusCode};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -17,11 +17,16 @@ use url::Url;
 const MAX_REDIRECTS: usize = 5;
 const MAX_HTTP_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
-struct TempFileGuard(PathBuf);
+struct TempFileGuard {
+    path: PathBuf,
+    delete: bool,
+}
 
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if self.delete {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -103,6 +108,26 @@ fn temporary_path(destination: &Path, download_id: i64) -> Result<PathBuf, Strin
     Ok(parent.join(format!(".{name}.{download_id}.falcon.part")))
 }
 
+pub fn part_path_for(save_dir: &str, filename: &str, download_id: i64) -> Option<PathBuf> {
+    let destination = crate::util::full_file_path(save_dir, filename);
+    temporary_path(&destination, download_id).ok()
+}
+
+fn total_from_content_range(
+    header: Option<&reqwest::header::HeaderValue>,
+    resume_from: u64,
+    content_length: Option<u64>,
+) -> u64 {
+    if let Some(total) = header
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit('/').next())
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        return total;
+    }
+    resume_from.saturating_add(content_length.unwrap_or(0))
+}
+
 pub async fn process_http(
     app_handle: &AppHandle,
     download_id: i64,
@@ -115,22 +140,34 @@ pub async fn process_http(
     let initial = validate_fetch_url_async(url).await?;
     let destination = PathBuf::from(out_path);
     if fs::try_exists(&destination).await.map_err(|e| e.to_string())? {
-        return Err("Destination file already exists".into());
+        let dest = destination.clone();
+        match tokio::task::spawn_blocking(move || crate::util::validate_completed_file(&dest)).await
+        {
+            Ok(Ok(_)) => return Ok(()),
+            _ => {
+                let _ = fs::remove_file(&destination).await;
+            }
+        }
     }
     let parent = destination.parent().ok_or_else(|| "Invalid output path".to_string())?;
     fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
     let temp = temporary_path(&destination, download_id)?;
-    let _ = fs::remove_file(&temp).await;
+    let resume_from =
+        fs::metadata(&temp).await.ok().map(|meta| meta.len()).filter(|len| *len > 0).unwrap_or(0);
     let mut current = initial.clone();
     let mut response = None;
+    let mut restarted = false;
 
     for redirect_count in 0..=MAX_REDIRECTS {
         if *cancel.borrow() {
             return Err("Cancelled".into());
         }
         let client = pinned_client(&current, &headers.options).await?;
-        let request =
+        let mut request =
             add_request_headers(client.get(current.clone()), &initial, &current, &headers);
+        if resume_from > 0 && !restarted {
+            request = request.header(RANGE, format!("bytes={resume_from}-"));
+        }
         let candidate = tokio::select! {
             changed = cancel.changed() => {
                 let _ = changed;
@@ -157,24 +194,69 @@ pub async fn process_http(
     }
 
     let response = response.ok_or_else(|| "HTTP response unavailable".to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status().as_u16()));
+    let status = response.status();
+    if status == StatusCode::RANGE_NOT_SATISFIABLE && resume_from > 0 {
+        let temp_for_validation = temp.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::util::validate_completed_file(&temp_for_validation)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let destination_for_move = destination.clone();
+        tokio::task::spawn_blocking(move || copy_file_exclusive(&temp, &destination_for_move))
+            .await
+            .map_err(|e| e.to_string())??;
+        return Ok(());
     }
-    if response.content_length().is_some_and(|size| size > MAX_HTTP_BYTES) {
+    let resume_ok = resume_from > 0 && status == StatusCode::PARTIAL_CONTENT;
+    if resume_from > 0 && status.is_success() && !resume_ok {
+        restarted = true;
+    }
+    if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+        return Err(format!("HTTP {}", status.as_u16()));
+    }
+    let content_length = response.content_length();
+    let total = if resume_ok {
+        total_from_content_range(
+            response.headers().get(reqwest::header::CONTENT_RANGE),
+            resume_from,
+            content_length,
+        )
+    } else {
+        content_length.unwrap_or(0)
+    };
+    if total > MAX_HTTP_BYTES
+        || content_length.is_some_and(|size| {
+            let absolute = if resume_ok { resume_from.saturating_add(size) } else { size };
+            absolute > MAX_HTTP_BYTES
+        })
+    {
         return Err("HTTP response exceeds maximum download size".into());
     }
 
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .await
-        .map_err(|e| e.to_string())?;
-    let _temp_guard = TempFileGuard(temp.clone());
-    let total = response.content_length().unwrap_or(0);
+    if restarted {
+        let _ = fs::remove_file(&temp).await;
+    }
+    let mut file = if resume_ok {
+        fs::OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(&temp)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let mut guard = TempFileGuard { path: temp.clone(), delete: false };
     let mut stream = response.bytes_stream();
-    let mut downloaded = 0u64;
+    let mut downloaded = if resume_ok { resume_from } else { 0 };
     let started = Instant::now();
+    let baseline = downloaded;
     loop {
         let next_chunk = tokio::select! {
             changed = cancel.changed() => {
@@ -193,13 +275,14 @@ pub async fn process_http(
             .ok_or_else(|| "HTTP download size overflow".to_string())?;
         if downloaded > MAX_HTTP_BYTES {
             drop(file);
-            let _ = fs::remove_file(&temp).await;
+            guard.delete = true;
             return Err("HTTP response exceeds maximum download size".into());
         }
         file.write_all(&chunk).await.map_err(|e| e.to_string())?;
         if headers.options.speed_limit_kbps > 0 {
+            let written = downloaded.saturating_sub(baseline) as f64;
             let target = Duration::from_secs_f64(
-                downloaded as f64 / (headers.options.speed_limit_kbps as f64 * 1024.0),
+                written / (headers.options.speed_limit_kbps as f64 * 1024.0),
             );
             if let Some(wait) = target.checked_sub(started.elapsed()) {
                 tokio::select! {
@@ -212,7 +295,8 @@ pub async fn process_http(
                 }
             }
         }
-        let speed = downloaded as f64 / started.elapsed().as_secs_f64().max(0.001);
+        let speed =
+            downloaded.saturating_sub(baseline) as f64 / started.elapsed().as_secs_f64().max(0.001);
         if let Some(ref db) = db {
             let _ = db.update_download_progress(
                 download_id,
@@ -236,7 +320,6 @@ pub async fn process_http(
     file.sync_all().await.map_err(|e| e.to_string())?;
     drop(file);
     if *cancel.borrow() {
-        let _ = fs::remove_file(&temp).await;
         return Err("Cancelled".into());
     }
     let temp_for_validation = temp.clone();
@@ -259,5 +342,18 @@ mod tests {
         let base = Url::parse("https://8.8.8.8/file").unwrap();
         assert!(redirect_target(&base, "http://127.0.0.1/secret").await.is_err());
         assert_eq!(redirect_target(&base, "/next").await.unwrap().as_str(), "https://8.8.8.8/next");
+    }
+
+    #[test]
+    fn content_range_total_prefers_header() {
+        let value = reqwest::header::HeaderValue::from_static("bytes 100-199/1000");
+        assert_eq!(total_from_content_range(Some(&value), 100, Some(100)), 1000);
+        assert_eq!(total_from_content_range(None, 50, Some(10)), 60);
+    }
+
+    #[test]
+    fn part_path_uses_download_id() {
+        let path = part_path_for("/tmp", "movie.mp4", 7).unwrap();
+        assert!(path.ends_with(".movie.mp4.7.falcon.part"));
     }
 }

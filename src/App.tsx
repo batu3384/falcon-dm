@@ -40,8 +40,7 @@ import { onDownloadAdded, onDownloadProgress, onPairRequest } from './api/events
 import * as api from './api/commands';
 import { applyTheme, watchSystemTheme } from './types';
 import { getDownloadCapabilities } from './lib/downloadCapabilities';
-
-const URL_RE = /^https?:\/\/\S+/i;
+import { useClipboardMonitor } from './hooks/useClipboardMonitor';
 
 function App() {
   const { t, i18n } = useTranslation();
@@ -69,11 +68,10 @@ function App() {
   // Local UI state (not shared enough to deserve a store).
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [clipboardMonitor, setClipboardMonitor] = useState(false);
   const [prefilledUrl, setPrefilledUrl] = useState('');
   const [activeCategory, setActiveCategory] = useState('All Downloads');
   const [searchQuery, setSearchQuery] = useState('');
-  const [clipboardMonitor, setClipboardMonitor] = useState(false);
-  const [lastClipboard, setLastClipboard] = useState('');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [speedLimited, setSpeedLimited] = useState(false);
@@ -130,24 +128,11 @@ function App() {
     fetchDownloads(activeCategory === 'Archived');
   }, [activeCategory, fetchDownloads]);
 
-  // Clipboard URL monitor
-  useEffect(() => {
-    if (!clipboardMonitor) return;
-    const timer = setInterval(async () => {
-      try {
-        const text = (await navigator.clipboard.readText()).trim();
-        if (!text || text === lastClipboard) return;
-        if (!URL_RE.test(text)) return;
-        setLastClipboard(text);
-        setPrefilledUrl(text);
-        setIsModalOpen(true);
-        showToast('info', t('app.clipboard_url'));
-      } catch {
-        /* clipboard permission denied — ignore */
-      }
-    }, 2000);
-    return () => clearInterval(timer);
-  }, [clipboardMonitor, lastClipboard, showToast, t]);
+  useClipboardMonitor(clipboardMonitor, (text) => {
+    setPrefilledUrl(text);
+    setIsModalOpen(true);
+    showToast('info', t('app.clipboard_url'));
+  });
 
   const categoryCounts = useMemo<Record<string, number>>(
     () => ({

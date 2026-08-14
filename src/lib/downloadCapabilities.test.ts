@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { getDownloadCapabilities } from './downloadCapabilities';
 
 describe('getDownloadCapabilities', () => {
-  it('does not expose pause or move for Merging', () => {
+  it('does not expose move for Merging but allows pause', () => {
     expect(getDownloadCapabilities('Merging')).toMatchObject({
-      pause: false,
+      pause: true,
       move: false,
     });
   });
@@ -19,6 +19,7 @@ describe('getDownloadCapabilities', () => {
     expect(getDownloadCapabilities('Paused').resume).toBe(true);
     expect(getDownloadCapabilities('Failed').resume).toBe(true);
     expect(getDownloadCapabilities('Queued').resume).toBe(false);
+    expect(getDownloadCapabilities('Queued').pause).toBe(true);
     expect(getDownloadCapabilities('Merging').resume).toBe(false);
   });
 

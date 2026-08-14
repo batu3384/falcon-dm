@@ -138,6 +138,7 @@ describe('diagnostic payload schemas', () => {
     const stats = {
       active: 1,
       queued: 2,
+      paused: 0,
       completed: 3,
       failed: 4,
       total_downloaded_bytes: 5,
@@ -151,6 +152,7 @@ describe('diagnostic payload schemas', () => {
     const stats = {
       active: 1,
       queued: 2,
+      paused: 0,
       completed: 3,
       failed: 4,
       total_downloaded_bytes: 5,

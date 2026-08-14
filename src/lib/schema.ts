@@ -107,6 +107,7 @@ export const LogArraySchema = z.array(LogEntrySchema);
 export const DownloadStatsSchema = z.object({
   active: z.number().int().nonnegative(),
   queued: z.number().int().nonnegative(),
+  paused: z.number().int().nonnegative(),
   completed: z.number().int().nonnegative(),
   failed: z.number().int().nonnegative(),
   total_downloaded_bytes: z.number().finite().nonnegative(),

@@ -504,6 +504,7 @@ pub async fn process_hls_stream(
             "copy",
             "-bsf:a",
             "aac_adtstoasc",
+            "-y",
             temp_output_str,
         ])
         .spawn()

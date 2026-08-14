@@ -409,6 +409,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
                   }
                   className="field-input"
                 />
+                <p className="field-hint">{t('settings.max_connections_hint')}</p>
               </div>
               <div className="field">
                 <label className="field-label" htmlFor="set-speed">
@@ -537,6 +538,8 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
                     />
                     <input
                       className="field-input"
+                      type="password"
+                      autoComplete="off"
                       placeholder={t('settings.profile_cookies')}
                       value={p.cookies || ''}
                       onChange={(e) => {

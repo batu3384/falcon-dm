@@ -9,12 +9,12 @@ export interface DownloadCapabilities {
 }
 
 const CAPABILITIES: Record<DownloadStatus, DownloadCapabilities> = {
-  Queued: { pause: false, resume: false, remove: true, move: false, archive: false },
+  Queued: { pause: true, resume: false, remove: true, move: false, archive: false },
   Downloading: { pause: true, resume: false, remove: true, move: false, archive: false },
   Paused: { pause: false, resume: true, remove: true, move: false, archive: false },
   Completed: { pause: false, resume: false, remove: true, move: true, archive: true },
   Failed: { pause: false, resume: true, remove: true, move: true, archive: true },
-  Merging: { pause: false, resume: false, remove: true, move: false, archive: false },
+  Merging: { pause: true, resume: false, remove: true, move: false, archive: false },
 };
 
 export function getDownloadCapabilities(status: DownloadStatus): DownloadCapabilities {
