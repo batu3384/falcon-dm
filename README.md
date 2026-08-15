@@ -21,7 +21,7 @@
 <table align="center" border="0" cellpadding="0" cellspacing="0">
   <tr>
     <td width="50%" align="center" valign="middle">
-      <img src="src/assets/icon.png" width="250" alt="Falcon DM" style="border-radius: 16px;" />
+      <img src="assets/mascot.jpg" width="250" alt="Falcon DM Mascot" style="border-radius: 16px;" />
     </td>
     <td width="50%" valign="middle" style="padding-left: 20px;">
       <h3>Meet Falco (The Sniffer)</h3>
