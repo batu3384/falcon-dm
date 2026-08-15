@@ -39,12 +39,12 @@ export async function getDownloads(filter?: DownloadFilter): Promise<DownloadMod
   const raw = await invoke<unknown>('get_downloads', {
     filter: { limit: 200, offset: 0, ...filter },
   });
-  return DownloadArraySchema.parse(raw) as DownloadModel[];
+  return DownloadArraySchema.parse(raw);
 }
 
 export async function getDownload(id: number): Promise<DownloadModel> {
   const raw = await invoke<unknown>('get_download', { id });
-  return DownloadSchema.parse(raw) as DownloadModel;
+  return DownloadSchema.parse(raw);
 }
 
 export async function addDownload(params: {
@@ -59,7 +59,7 @@ export async function addDownload(params: {
   // ponytail: Tauri's invoke auto-converts camelCase keys to the Rust command's
   // snake_case params, so callers pass idiomatic TS names.
   const raw = await invoke<unknown>('add_download', params);
-  return DownloadSchema.parse(raw) as DownloadModel;
+  return DownloadSchema.parse(raw);
 }
 
 export async function pauseDownload(id: number): Promise<void> {
@@ -88,7 +88,7 @@ export async function openFile(path: string): Promise<void> {
 
 export async function getSettings(): Promise<SettingsModel> {
   const raw = await invoke<unknown>('get_settings');
-  return SettingsSchema.parse(raw) as SettingsModel;
+  return SettingsSchema.parse(raw);
 }
 
 export async function saveSettings(settings: SettingsModel): Promise<void> {
@@ -97,7 +97,7 @@ export async function saveSettings(settings: SettingsModel): Promise<void> {
 
 export async function getSchedule(): Promise<ScheduleModel> {
   const raw = await invoke<unknown>('get_schedule');
-  return ScheduleSchema.parse(raw) as ScheduleModel;
+  return ScheduleSchema.parse(raw);
 }
 
 export async function setSchedule(params: {

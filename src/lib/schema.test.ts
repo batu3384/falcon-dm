@@ -41,6 +41,7 @@ describe('DownloadSchema', () => {
     const parsed = DownloadSchema.parse(validDownload);
     expect(parsed.id).toBe(1);
     expect(parsed.status).toBe('Downloading');
+    expect(parsed.archived).toBe(false);
   });
 
   it('does not expose cookies in download payload schema', () => {

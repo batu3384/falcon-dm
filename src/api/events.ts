@@ -8,13 +8,13 @@ import type { DownloadModel, ProgressPayload } from '../types';
 
 export async function onDownloadAdded(cb: (d: DownloadModel) => void): Promise<UnlistenFn> {
   return listen<unknown>('download-added', (event) => {
-    cb(DownloadSchema.parse(event.payload) as DownloadModel);
+    cb(DownloadSchema.parse(event.payload));
   });
 }
 
 export async function onDownloadProgress(cb: (p: ProgressPayload) => void): Promise<UnlistenFn> {
   return listen<unknown>('download-progress', (event) => {
-    cb(ProgressPayloadSchema.parse(event.payload) as ProgressPayload);
+    cb(ProgressPayloadSchema.parse(event.payload));
   });
 }
 

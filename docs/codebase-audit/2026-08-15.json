@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "skill": "codebase-audit",
+  "date": "2026-08-15",
+  "root": "/Users/batuhanyuksel/Documents/downloadmanager",
+  "verdict": "CLEAN",
+  "runtime": "static",
+  "findings": [
+    {"id": "CA-001", "severity": "Minor", "category": "Maintainability", "path": "src-tauri/src/util.rs:1"},
+    {"id": "CA-002", "severity": "Minor", "category": "Maintainability", "path": "src-tauri/src/download/queue.rs:149"},
+    {"id": "CA-003", "severity": "Minor", "category": "Maintainability", "path": "src-tauri/src/lifecycle.rs:164"},
+    {"id": "CA-004", "severity": "Minor", "category": "Maintainability", "path": "src/components/SettingsModal.tsx:17"},
+    {"id": "CA-005", "severity": "Minor", "category": "Maintainability", "path": "src/types.ts"},
+    {"id": "CA-006", "severity": "Minor", "category": "Architecture", "path": "src/lib/scheduler.ts:1"},
+    {"id": "CA-007", "severity": "Minor", "category": "Architecture", "path": "src/types.ts:47"},
+    {"id": "CA-008", "severity": "Minor", "category": "Functional", "path": "src-tauri/src/download/http.rs:33"},
+    {"id": "CA-009", "severity": "Minor", "category": "Security-arch", "path": "src-tauri/src/commands.rs:244"},
+    {"id": "CA-010", "severity": "Minor", "category": "Security-arch", "path": "src-tauri/capabilities/default.json:13"},
+    {"id": "CA-011", "severity": "Info", "category": "Security-arch", "path": "src-tauri/src/local_api.rs:123"},
+    {"id": "CA-012", "severity": "Info", "category": "Security-arch", "path": "src-tauri/src/lifecycle.rs:364"},
+    {"id": "CA-013", "severity": "Info", "category": "Docs", "path": "design-system/falcon-dm-v2/MASTER.md:3"},
+    {"id": "CA-014", "severity": "Info", "category": "Docs", "path": ".superpowers/sdd"},
+    {"id": "CA-015", "severity": "Info", "category": "Tests", "path": "package.json"},
+    {"id": "CA-016", "severity": "Info", "category": "Completeness", "path": "scripts/provision-sidecars.test.sh"},
+    {"id": "CA-017", "severity": "Info", "category": "Architecture", "path": "extension/background.js"},
+    {"id": "CA-018", "severity": "Info", "category": "Maintainability", "path": "src/App.tsx:45"},
+    {"id": "CA-019", "severity": "Info", "category": "Architecture", "path": "src/lib/schema.ts"},
+    {"id": "CA-020", "severity": "Info", "category": "Architecture", "path": "src-tauri/src/local_api.rs:78"}
+  ]
+}

@@ -249,36 +249,11 @@ impl QueueManager {
                             else {
                                 continue;
                             };
-                            let (clean_url, ytdlp_fmt) = split_falcon_format(&watch);
-
-                            let (tx, rx) = tokio::sync::watch::channel(false);
-                            {
-                                let mut map = lock_or_recover(&self.active_stream_tasks);
-                                if map.contains_key(&dl_id) {
-                                    continue;
-                                }
-                                map.insert(dl_id, tx);
-                            }
-
-                            if !db
-                                .set_status_error_if_current(
-                                    dl_id,
-                                    &[DownloadStatus::Queued],
-                                    &DownloadStatus::Downloading,
-                                    None,
-                                    None,
-                                )
-                                .unwrap_or(false)
-                            {
-                                lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
+                            let Some(rx) = self.try_claim_stream(db, dl_id) else {
                                 continue;
-                            }
+                            };
                             dl.status = DownloadStatus::Downloading;
-
-                            let url = clean_url;
-                            let save_path = dl.save_path.clone();
-                            let mut final_path = std::path::PathBuf::from(&save_path);
-                            // Force mp4 container after merge
+                            let (clean_url, ytdlp_fmt) = split_falcon_format(&watch);
                             let mut fname = dl.filename.clone();
                             if !fname.to_lowercase().ends_with(".mp4") {
                                 if let Some(stem) = std::path::Path::new(&fname).file_stem() {
@@ -290,143 +265,74 @@ impl QueueManager {
                                     );
                                 }
                             }
+                            let mut final_path = std::path::PathBuf::from(&dl.save_path);
                             final_path.push(&fname);
-                            let save_path_str = final_path.to_string_lossy().to_string();
-                            let ytdlp_headers = crate::download::ytdlp::YtDlpHeaders {
-                                cookies: dl.cookies.clone(),
-                                user_agent: dl.user_agent.clone(),
-                            };
-
-                            let db_clone = db.clone();
-                            let stream_tasks_clone = self.active_stream_tasks.clone();
-                            let app_handle_clone = app_handle.clone();
-
-                            tokio::spawn(async move {
-                                // ponytail: shared finalize logic — see run_stream_task.
-                                run_stream_task(
-                                    &app_handle_clone,
-                                    &db_clone,
-                                    &stream_tasks_clone,
-                                    dl_id,
-                                    &save_path_str,
-                                    StreamKind::YtDlp {
-                                        url,
-                                        headers: ytdlp_headers,
-                                        format: ytdlp_fmt,
+                            self.spawn_stream(
+                                db,
+                                app_handle.clone(),
+                                dl_id,
+                                final_path.to_string_lossy().to_string(),
+                                StreamKind::YtDlp {
+                                    url: clean_url,
+                                    headers: crate::download::ytdlp::YtDlpHeaders {
+                                        cookies: dl.cookies.clone(),
+                                        user_agent: dl.user_agent.clone(),
                                     },
-                                    rx,
-                                )
-                                .await;
-                            });
+                                    format: ytdlp_fmt,
+                                },
+                                rx,
+                            );
                             continue;
                         }
-
                         DownloadRoute::Hls => {
-                            let (tx, rx) = tokio::sync::watch::channel(false);
-                            {
-                                let mut map = lock_or_recover(&self.active_stream_tasks);
-                                if map.contains_key(&dl_id) {
-                                    continue;
-                                }
-                                map.insert(dl_id, tx);
-                            }
-
-                            // Claim in DB before spawn
-                            if !db
-                                .set_status_error_if_current(
-                                    dl_id,
-                                    &[DownloadStatus::Queued],
-                                    &DownloadStatus::Downloading,
-                                    None,
-                                    None,
-                                )
-                                .unwrap_or(false)
-                            {
-                                lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
+                            let Some(rx) = self.try_claim_stream(db, dl_id) else {
                                 continue;
-                            }
-                            dl.status = DownloadStatus::Downloading;
-
-                            let url = dl.url.clone();
-                            let save_path = dl.save_path.clone();
-                            let mut final_path = std::path::PathBuf::from(&save_path);
-                            final_path.push(&dl.filename);
-                            let save_path_str = final_path.to_string_lossy().to_string();
-                            let hls_headers = HlsHeaders {
-                                cookies: dl.cookies.clone(),
-                                referrer: dl.referrer.clone(),
-                                user_agent: dl.user_agent.clone(),
-                                max_connections: self.max_connections.load(Ordering::SeqCst),
                             };
-
-                            let db_clone = db.clone();
-                            let stream_tasks_clone = self.active_stream_tasks.clone();
-                            let app_handle_clone = app_handle.clone();
-
-                            tokio::spawn(async move {
-                                // ponytail: shared finalize logic — see run_stream_task.
-                                run_stream_task(
-                                    &app_handle_clone,
-                                    &db_clone,
-                                    &stream_tasks_clone,
-                                    dl_id,
-                                    &save_path_str,
-                                    StreamKind::Hls { url, headers: hls_headers },
-                                    rx,
-                                )
-                                .await;
-                            });
-                            continue; // already updated DB
-                        }
-                        DownloadRoute::Http => {
-                            let (tx, rx) = tokio::sync::watch::channel(false);
-                            {
-                                let mut map = lock_or_recover(&self.active_stream_tasks);
-                                if map.contains_key(&dl_id) {
-                                    continue;
-                                }
-                                map.insert(dl_id, tx);
-                            }
-
-                            if !db
-                                .set_status_error_if_current(
-                                    dl_id,
-                                    &[DownloadStatus::Queued],
-                                    &DownloadStatus::Downloading,
-                                    None,
-                                    None,
-                                )
-                                .unwrap_or(false)
-                            {
-                                lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
-                                continue;
-                            }
-
-                            let url = dl.url.clone();
+                            dl.status = DownloadStatus::Downloading;
                             let mut final_path = std::path::PathBuf::from(&dl.save_path);
                             final_path.push(&dl.filename);
-                            let save_path_str = final_path.to_string_lossy().to_string();
-                            let http_headers = HttpHeaders {
-                                cookies: dl.cookies.clone(),
-                                referrer: dl.referrer.clone(),
-                                user_agent: dl.user_agent.clone(),
-                                options: lock_or_recover(&self.http_options).clone(),
+                            self.spawn_stream(
+                                db,
+                                app_handle.clone(),
+                                dl_id,
+                                final_path.to_string_lossy().to_string(),
+                                StreamKind::Hls {
+                                    url: dl.url.clone(),
+                                    headers: HlsHeaders {
+                                        cookies: dl.cookies.clone(),
+                                        referrer: dl.referrer.clone(),
+                                        user_agent: dl.user_agent.clone(),
+                                        max_connections: self
+                                            .max_connections
+                                            .load(Ordering::SeqCst),
+                                    },
+                                },
+                                rx,
+                            );
+                            continue;
+                        }
+                        DownloadRoute::Http => {
+                            let Some(rx) = self.try_claim_stream(db, dl_id) else {
+                                continue;
                             };
-                            let db_clone = db.clone();
-                            let stream_tasks_clone = self.active_stream_tasks.clone();
-                            let app_handle_clone = app_handle.clone();
-                            tokio::spawn(async move {
-                                run_stream_task(
-                                    &app_handle_clone,
-                                    &db_clone,
-                                    &stream_tasks_clone,
-                                    dl_id,
-                                    &save_path_str,
-                                    StreamKind::Http { url, headers: http_headers },
-                                    rx,
-                                )
-                                .await;
-                            });
+                            let mut final_path = std::path::PathBuf::from(&dl.save_path);
+                            final_path.push(&dl.filename);
+                            self.spawn_stream(
+                                db,
+                                app_handle.clone(),
+                                dl_id,
+                                final_path.to_string_lossy().to_string(),
+                                StreamKind::Http {
+                                    url: dl.url.clone(),
+                                    headers: HttpHeaders {
+                                        cookies: dl.cookies.clone(),
+                                        referrer: dl.referrer.clone(),
+                                        user_agent: dl.user_agent.clone(),
+                                        options: lock_or_recover(&self.http_options).clone(),
+                                    },
+                                },
+                                rx,
+                            );
                             continue;
                         }
                         DownloadRoute::Aria2 => {
@@ -474,6 +380,60 @@ impl QueueManager {
         }
 
         Ok(())
+    }
+
+    fn try_claim_stream(
+        &self,
+        db: &Database,
+        dl_id: i64,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        {
+            let mut map = lock_or_recover(&self.active_stream_tasks);
+            if map.contains_key(&dl_id) {
+                return None;
+            }
+            map.insert(dl_id, tx);
+        }
+        if !db
+            .set_status_error_if_current(
+                dl_id,
+                &[DownloadStatus::Queued],
+                &DownloadStatus::Downloading,
+                None,
+                None,
+            )
+            .unwrap_or(false)
+        {
+            lock_or_recover(&self.active_stream_tasks).remove(&dl_id);
+            return None;
+        }
+        Some(rx)
+    }
+
+    fn spawn_stream(
+        &self,
+        db: &Database,
+        app_handle: tauri::AppHandle,
+        dl_id: i64,
+        save_path_str: String,
+        kind: StreamKind,
+        rx: tokio::sync::watch::Receiver<bool>,
+    ) {
+        let db_clone = db.clone();
+        let stream_tasks_clone = self.active_stream_tasks.clone();
+        tokio::spawn(async move {
+            run_stream_task(
+                &app_handle,
+                &db_clone,
+                &stream_tasks_clone,
+                dl_id,
+                &save_path_str,
+                kind,
+                rx,
+            )
+            .await;
+        });
     }
 }
 
@@ -660,6 +620,12 @@ mod tests {
         .is_err());
         assert!(validate_schedule(&ScheduleOptions {
             start_time: Some("6:00".into()),
+            stop_time: Some("07:00".into()),
+            active: true,
+        })
+        .is_err());
+        assert!(validate_schedule(&ScheduleOptions {
+            start_time: Some("24:00".into()),
             stop_time: Some("07:00".into()),
             active: true,
         })

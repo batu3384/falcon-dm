@@ -31,6 +31,7 @@ const baseDownload: DownloadModel = {
   referrer: null,
   user_agent: null,
   aria2_gid: null,
+  archived: false,
 };
 
 describe('useDownloadsStore', () => {

@@ -242,7 +242,14 @@ pub async fn change_priority(
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
-    Ok(current_settings(&state))
+    let mut settings = current_settings(&state);
+    settings.api_token.clear();
+    for profile in &mut settings.download_profiles {
+        if profile.cookies.as_deref().is_some_and(|c| !c.trim().is_empty()) {
+            profile.cookies = None;
+        }
+    }
+    Ok(settings)
 }
 
 /// Extension pairing status — exposes NO secret token to the frontend.
@@ -434,6 +441,20 @@ pub fn approve_extension_pair(
 #[tauri::command]
 pub async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Result<(), String> {
     let dir = app_data_dir();
+    let current = current_settings(&state);
+    let mut settings = settings;
+    if settings.api_token.trim().is_empty() || settings.api_token == LEGACY_DEFAULT_API_TOKEN {
+        settings.api_token = current.api_token.clone();
+    }
+    for profile in &mut settings.download_profiles {
+        if profile.cookies.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            profile.cookies = current
+                .download_profiles
+                .iter()
+                .find(|old| old.name == profile.name && old.url_pattern == profile.url_pattern)
+                .and_then(|old| old.cookies.clone());
+        }
+    }
     settings.save(&dir)?;
 
     state.queue.set_concurrent_downloads(settings.max_concurrent_downloads as usize);

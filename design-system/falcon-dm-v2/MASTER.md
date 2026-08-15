@@ -1,8 +1,7 @@
 # Design System Master File — Falcon DM
 
-> **LOGIC:** When building a specific page, first check `design-system/falcon-dm/pages/[page-name].md`.
-> If that file exists, its rules **override** this Master file.
-> If not, strictly follow the rules below.
+> **LOGIC:** This file is the v2 source of truth. There is no `pages/` overlay
+> directory. Follow the rules below for all UI work.
 
 ---
 

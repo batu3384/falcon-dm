@@ -58,9 +58,13 @@ pub(crate) async fn handle_api_add(
     AxumState(app): AxumState<AppHandle>,
     headers: HeaderMap,
     Json(payload): Json<AddDownloadRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Response {
     let state = app.state::<AppState>();
-    check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))?;
+    if let Err(status) =
+        check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))
+    {
+        return status.into_response();
+    }
 
     let ext = ExternalDownloadPayload {
         url: payload.url,
@@ -75,8 +79,13 @@ pub(crate) async fn handle_api_add(
     };
 
     match enqueue_download(&app, ext).await {
-        Ok(id) => Ok(Json(serde_json::json!({ "success": true, "id": id }))),
-        Err(e) => Ok(Json(serde_json::json!({ "success": false, "error": e }))),
+        Ok(id) => {
+            (StatusCode::OK, Json(serde_json::json!({ "success": true, "id": id }))).into_response()
+        }
+        Err(e) => {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "success": false, "error": e })))
+                .into_response()
+        }
     }
 }
 
@@ -98,9 +107,13 @@ pub(crate) async fn handle_intercept(
     AxumState(app): AxumState<AppHandle>,
     headers: HeaderMap,
     Json(payload): Json<InterceptRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Response {
     let state = app.state::<AppState>();
-    check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))?;
+    if let Err(status) =
+        check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))
+    {
+        return status.into_response();
+    }
 
     let ext = ExternalDownloadPayload {
         url: payload.url,
@@ -115,8 +128,13 @@ pub(crate) async fn handle_intercept(
     };
 
     match enqueue_download(&app, ext).await {
-        Ok(id) => Ok(Json(serde_json::json!({ "success": true, "id": id }))),
-        Err(e) => Ok(Json(serde_json::json!({ "success": false, "error": e }))),
+        Ok(id) => {
+            (StatusCode::OK, Json(serde_json::json!({ "success": true, "id": id }))).into_response()
+        }
+        Err(e) => {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "success": false, "error": e })))
+                .into_response()
+        }
     }
 }
 

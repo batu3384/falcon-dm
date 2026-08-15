@@ -160,6 +160,380 @@ fn cleanup_stale_ytdlp_dirs(root: &std::path::Path) {
     }
 }
 
+fn spawn_local_api(app_handle: tauri::AppHandle) {
+    let axum_app_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri::http::HeaderValue;
+        use tower_http::cors::{AllowOrigin, CorsLayer};
+
+        let cors = CorsLayer::new()
+            .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
+                if let Ok(origin_str) = origin.to_str() {
+                    origin_str.starts_with("chrome-extension://")
+                        || origin_str.starts_with("moz-extension://")
+                        || origin_str.starts_with("edge-extension://")
+                } else {
+                    false
+                }
+            }))
+            // ponytail: least-privilege — the API only accepts POSTs and the
+            // two headers the extension actually sends (JSON content type + our
+            // auth token). Any-method/Any-header widened the attack surface.
+            .allow_methods([Method::POST])
+            .allow_headers([header::CONTENT_TYPE, HeaderName::from_static("x-falcon-token")])
+            .allow_private_network(true);
+
+        let app = Router::new()
+            .route("/api/health", get(crate::local_api::handle_health))
+            .route("/api/pair", post(crate::local_api::handle_pair))
+            .route("/api/ping", post(crate::local_api::handle_ping))
+            .route("/api/add", post(crate::local_api::handle_api_add))
+            .route("/api/intercept", post(crate::local_api::handle_intercept))
+            .layer(from_fn_with_state(
+                axum_app_handle.clone(),
+                crate::local_api::rate_limit_middleware,
+            ))
+            .layer(cors)
+            .with_state(axum_app_handle);
+
+        match tokio::net::TcpListener::bind("127.0.0.1:14201").await {
+            Ok(listener) => {
+                log::info!("Axum HTTP server listening on {}", listener.local_addr().unwrap());
+                if let Err(e) = axum::serve(listener, app).await {
+                    log::error!("Axum server error: {}", e);
+                }
+            }
+            Err(e) => {
+                log::error!(
+                    "Failed to bind Axum server on port 14201: {}. Is another instance running?",
+                    e
+                );
+            }
+        }
+    });
+}
+
+fn spawn_progress_poll(app_handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            // ponytail: panic-guard each loop body — one panic must not freeze download management.
+            if let Err(p) = AssertUnwindSafe(async {
+                let st = app_handle.state::<AppState>();
+                st.queue.tick(&st.db, &st.engine, app_handle.clone()).await
+            })
+            .catch_unwind()
+            .await
+            {
+                log::error!("queue tick panicked, continuing: {:?}", p);
+            }
+
+            if let Err(p) = AssertUnwindSafe(async {
+                let state = app_handle.state::<AppState>();
+                if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
+                    status: Some(DownloadStatus::Downloading),
+                    limit: Some(256),
+                    ..Default::default()
+                }) {
+                    // Batch all active aria2 statuses in one RPC; fall back to per-gid tellStatus
+                    // only for gids not present (complete/error/paused don't appear in tellActive).
+                    let active_map: HashMap<String, serde_json::Value> =
+                        if state.engine.is_running() {
+                            match state.engine.get_active_statuses().await {
+                                Ok(arr) => arr
+                                    .into_iter()
+                                    .filter_map(|s| {
+                                        // extract gid as owned String first so we can move `s` next
+                                        let gid = s
+                                            .get("gid")
+                                            .and_then(|g| g.as_str())
+                                            .map(ToString::to_string)?;
+                                        Some((gid, s))
+                                    })
+                                    .collect(),
+                                Err(e) => {
+                                    let msg = e.to_string().to_lowercase();
+                                    if !(msg.contains("not running")
+                                        || msg.contains("network")
+                                        || msg.contains("timed out")
+                                        || msg.contains("connection"))
+                                    {
+                                        log::warn!("tellActive failed: {}", e);
+                                    }
+                                    HashMap::new()
+                                }
+                            }
+                        } else {
+                            HashMap::new()
+                        };
+                    for mut dl in downloads {
+                        let mut speed = 0.0;
+                        let mut status_str = "Downloading".to_string();
+                        let mut connections = 8u32;
+
+                        if let Some(gid) = &dl.aria2_gid {
+                            let status_result = if let Some(s) = active_map.get(gid) {
+                                Ok(s.clone())
+                            } else {
+                                state.engine.get_status(gid).await
+                            };
+                            match status_result {
+                                Ok(status) => {
+                                    if let Some(v) =
+                                        status.get("completedLength").and_then(|v| v.as_str())
+                                    {
+                                        dl.downloaded_size =
+                                            v.parse().unwrap_or(dl.downloaded_size);
+                                    }
+                                    if let Some(v) =
+                                        status.get("totalLength").and_then(|v| v.as_str())
+                                    {
+                                        dl.total_size = v.parse().unwrap_or(dl.total_size);
+                                    }
+                                    if let Some(v) =
+                                        status.get("downloadSpeed").and_then(|v| v.as_str())
+                                    {
+                                        speed = v.parse().unwrap_or(0.0);
+                                    }
+                                    if let Some(v) =
+                                        status.get("connections").and_then(|v| v.as_str())
+                                    {
+                                        connections = v.parse().unwrap_or(8);
+                                    }
+                                    if let Some(s) = status.get("status").and_then(|v| v.as_str()) {
+                                        match s {
+                                            "complete" => {
+                                                if let Err(e) = finalize_completed_download(&mut dl)
+                                                {
+                                                    fail_invalid_download(&mut dl, e);
+                                                    status_str = "Failed".into();
+                                                } else {
+                                                    status_str = "Completed".into();
+                                                }
+                                            }
+                                            "paused" => {
+                                                dl.status = DownloadStatus::Paused;
+                                                status_str = "Paused".into();
+                                            }
+                                            "error" => {
+                                                dl.status = DownloadStatus::Failed;
+                                                dl.error_message = status
+                                                    .get("errorMessage")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(|s| s.to_string());
+                                                status_str = "Failed".into();
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let msg = e.to_string().to_lowercase();
+                                    // Transient: aria2 restarting / RPC blip — skip this tick
+                                    if msg.contains("not running")
+                                        || msg.contains("network")
+                                        || msg.contains("timed out")
+                                        || msg.contains("connection")
+                                    {
+                                        continue;
+                                    }
+                                    dl.status = DownloadStatus::Failed;
+                                    dl.error_message = Some(e.to_string());
+                                    status_str = "Failed".into();
+                                    speed = 0.0;
+                                }
+                            }
+                        } else if is_hls_url(&dl.url) {
+                            // HLS progress is emitted by the HLS task itself
+                            continue;
+                        } else {
+                            // Non-HLS downloading without GID: wait a tick for queue to assign
+                            continue;
+                        }
+
+                        if dl.downloaded_size >= dl.total_size
+                            && dl.total_size > 0
+                            && status_str == "Downloading"
+                        {
+                            if let Err(e) = finalize_completed_download(&mut dl) {
+                                fail_invalid_download(&mut dl, e);
+                                status_str = "Failed".into();
+                            } else {
+                                status_str = "Completed".into();
+                            }
+                            speed = 0.0;
+                        }
+
+                        let poll_id = dl.id.unwrap();
+                        let committed = match state.db.update_progress_if_current(
+                            poll_id,
+                            &[DownloadStatus::Downloading],
+                            dl.downloaded_size,
+                            dl.total_size.max(dl.downloaded_size),
+                            speed,
+                            &dl.status,
+                            dl.completed_at.as_deref(),
+                            dl.error_message.as_deref(),
+                        ) {
+                            Ok(value) => value,
+                            Err(e) => {
+                                log::warn!("progress poll: {poll_id} DB update failed: {e}");
+                                false
+                            }
+                        };
+                        if !committed {
+                            continue;
+                        }
+
+                        if matches!(status_str.as_str(), "Completed" | "Failed") {
+                            let _ = state.db.clear_session_cookies(poll_id);
+                        }
+
+                        if status_str == "Completed" {
+                            let _ = app_handle
+                                .notification()
+                                .builder()
+                                .title("Download Complete")
+                                .body(&dl.filename)
+                                .show();
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                let _ = window.request_user_attention(Some(
+                                    tauri::UserAttentionType::Informational,
+                                ));
+                            }
+                        }
+
+                        let payload = ProgressPayload {
+                            id: dl.id.unwrap(),
+                            downloaded_size: dl.downloaded_size,
+                            // ponytail: guard stale/underreported total so the UI never shows >100%.
+                            total_size: dl.total_size.max(dl.downloaded_size),
+                            speed,
+                            status: status_str,
+                            connections,
+                        };
+                        let _ = app_handle.emit("download-progress", payload);
+                    }
+                }
+            })
+            .catch_unwind()
+            .await
+            {
+                log::error!("progress poll panicked, continuing: {:?}", p);
+            }
+        }
+    });
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let show_i = MenuItem::with_id(app, "show", "Show Falcon DM", true, None::<&str>)?;
+    let pause_i = MenuItem::with_id(app, "pause", "Pause All", true, None::<&str>)?;
+    let resume_i = MenuItem::with_id(app, "resume", "Resume All", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_i, &pause_i, &resume_i, &quit_i])?;
+
+    let _tray = TrayIconBuilder::new()
+        .icon(app.default_window_icon().unwrap().clone())
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "quit" => app.exit(0),
+            "show" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "pause" => {
+                let app_h = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_h.state::<AppState>();
+                    let mut downloads = state.db.get_downloads(&DownloadFilter {
+                        status: Some(DownloadStatus::Downloading),
+                        limit: Some(256),
+                        ..Default::default()
+                    });
+                    if let Ok(mut merging) = state.db.get_downloads(&DownloadFilter {
+                        status: Some(DownloadStatus::Merging),
+                        limit: Some(256),
+                        ..Default::default()
+                    }) {
+                        if let Ok(ref mut active) = downloads {
+                            active.append(&mut merging);
+                        }
+                    }
+                    if let Ok(downloads) = downloads {
+                        for dl in downloads {
+                            if let Some(gid) = &dl.aria2_gid {
+                                let _ = state.engine.pause(gid).await;
+                            }
+                            if let Some(id) = dl.id {
+                                if !state.queue.cancel_and_wait_stream(id).await {
+                                    log::warn!("tray pause timed out for download {id}");
+                                    continue;
+                                }
+                            }
+                            let id = dl.id.unwrap();
+                            match state.db.set_status_error_if_current(
+                                id,
+                                &[DownloadStatus::Downloading, DownloadStatus::Merging],
+                                &DownloadStatus::Paused,
+                                None,
+                                Some(0.0),
+                            ) {
+                                Ok(true) => {}
+                                Ok(false) => {}
+                                Err(e) => {
+                                    log::warn!("tray pause-all: {id} DB update failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            "resume" => {
+                let app_h = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_h.state::<AppState>();
+                    if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
+                        status: Some(DownloadStatus::Paused),
+                        ..Default::default()
+                    }) {
+                        for dl in downloads {
+                            // Respect queue concurrency — mark Queued, let tick start
+                            let id = dl.id.unwrap();
+                            if let Err(e) = state.db.set_status_if_current(
+                                id,
+                                &[DownloadStatus::Paused],
+                                &DownloadStatus::Queued,
+                            ) {
+                                log::warn!("tray resume-all: {id} DB update failed: {e}");
+                            }
+                        }
+                    }
+                });
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // ponytail: install the fan-out logger: records go to stderr (RUST_LOG-aware,
@@ -248,385 +622,10 @@ pub fn run() {
 
             log::info!("aria2 stays idle until a legacy GID needs recovery");
 
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let show_i = MenuItem::with_id(app, "show", "Show Falcon DM", true, None::<&str>)?;
-            let pause_i = MenuItem::with_id(app, "pause", "Pause All", true, None::<&str>)?;
-            let resume_i = MenuItem::with_id(app, "resume", "Resume All", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &pause_i, &resume_i, &quit_i])?;
+            setup_tray(app)?;
 
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => app.exit(0),
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    "pause" => {
-                        let app_h = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let state = app_h.state::<AppState>();
-                            let mut downloads = state.db.get_downloads(&DownloadFilter {
-                                status: Some(DownloadStatus::Downloading),
-                                limit: Some(256),
-                                ..Default::default()
-                            });
-                            if let Ok(mut merging) = state.db.get_downloads(&DownloadFilter {
-                                status: Some(DownloadStatus::Merging),
-                                limit: Some(256),
-                                ..Default::default()
-                            }) {
-                                if let Ok(ref mut active) = downloads {
-                                    active.append(&mut merging);
-                                }
-                            }
-                            if let Ok(downloads) = downloads {
-                                for dl in downloads {
-                                    if let Some(gid) = &dl.aria2_gid {
-                                        let _ = state.engine.pause(gid).await;
-                                    }
-                                    if let Some(id) = dl.id {
-                                        if !state.queue.cancel_and_wait_stream(id).await {
-                                            log::warn!("tray pause timed out for download {id}");
-                                            continue;
-                                        }
-                                    }
-                                    let id = dl.id.unwrap();
-                                    match state.db.set_status_error_if_current(
-                                        id,
-                                        &[DownloadStatus::Downloading, DownloadStatus::Merging],
-                                        &DownloadStatus::Paused,
-                                        None,
-                                        Some(0.0),
-                                    ) {
-                                        Ok(true) => {}
-                                        Ok(false) => {}
-                                        Err(e) => {
-                                            log::warn!("tray pause-all: {id} DB update failed: {e}");
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    }
-                    "resume" => {
-                        let app_h = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let state = app_h.state::<AppState>();
-                            if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
-                                status: Some(DownloadStatus::Paused),
-                                ..Default::default()
-                            }) {
-                                for dl in downloads {
-                                    // Respect queue concurrency — mark Queued, let tick start
-                                    let id = dl.id.unwrap();
-                                    if let Err(e) = state
-                                        .db
-                                        .set_status_if_current(
-                                            id,
-                                            &[DownloadStatus::Paused],
-                                            &DownloadStatus::Queued,
-                                        )
-                                    {
-                                        log::warn!("tray resume-all: {id} DB update failed: {e}");
-                                    }
-                                }
-                            }
-                        });
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                })
-                .build(app)?;
-
-            let axum_app_handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                use tower_http::cors::{AllowOrigin, CorsLayer};
-                use tauri::http::HeaderValue;
-
-                let cors = CorsLayer::new()
-                    .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
-                        if let Ok(origin_str) = origin.to_str() {
-                            origin_str.starts_with("chrome-extension://")
-                                || origin_str.starts_with("moz-extension://")
-                                || origin_str.starts_with("edge-extension://")
-                        } else {
-                            false
-                        }
-                    }))
-                    // ponytail: least-privilege — the API only accepts POSTs and the
-                    // two headers the extension actually sends (JSON content type + our
-                    // auth token). Any-method/Any-header widened the attack surface.
-                    .allow_methods([Method::POST])
-                    .allow_headers([
-                        header::CONTENT_TYPE,
-                        HeaderName::from_static("x-falcon-token"),
-                    ])
-                    .allow_private_network(true);
-
-                let app = Router::new()
-                    .route("/api/health", get(crate::local_api::handle_health))
-                    .route("/api/pair", post(crate::local_api::handle_pair))
-                    .route("/api/ping", post(crate::local_api::handle_ping))
-                    .route("/api/add", post(crate::local_api::handle_api_add))
-                    .route("/api/intercept", post(crate::local_api::handle_intercept))
-                    .layer(from_fn_with_state(
-                        axum_app_handle.clone(),
-                        crate::local_api::rate_limit_middleware,
-                    ))
-                    .layer(cors)
-                    .with_state(axum_app_handle);
-
-                match tokio::net::TcpListener::bind("127.0.0.1:14201").await {
-                    Ok(listener) => {
-                        log::info!(
-                            "Axum HTTP server listening on {}",
-                            listener.local_addr().unwrap()
-                        );
-                        if let Err(e) = axum::serve(listener, app).await {
-                            log::error!("Axum server error: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "Failed to bind Axum server on port 14201: {}. Is another instance running?",
-                            e
-                        );
-                    }
-                }
-            });
-
-            tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
-                loop {
-                    interval.tick().await;
-                    // ponytail: panic-guard each loop body — one panic must not freeze download management.
-                    if let Err(p) = AssertUnwindSafe(async {
-                        let st = app_handle.state::<AppState>();
-                        st.queue
-                            .tick(&st.db, &st.engine, app_handle.clone())
-                            .await
-                    })
-                    .catch_unwind()
-                    .await
-                    {
-                        log::error!("queue tick panicked, continuing: {:?}", p);
-                    }
-
-                    if let Err(p) = AssertUnwindSafe(async {
-                        let state = app_handle.state::<AppState>();
-                    if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
-                        status: Some(DownloadStatus::Downloading),
-                        limit: Some(256),
-                        ..Default::default()
-                    }) {
-                        // Batch all active aria2 statuses in one RPC; fall back to per-gid tellStatus
-                        // only for gids not present (complete/error/paused don't appear in tellActive).
-                        let active_map: HashMap<String, serde_json::Value> =
-                            if state.engine.is_running() {
-                            match state.engine.get_active_statuses().await {
-                                Ok(arr) => arr
-                                    .into_iter()
-                                    .filter_map(|s| {
-                                        // extract gid as owned String first so we can move `s` next
-                                        let gid = s
-                                            .get("gid")
-                                            .and_then(|g| g.as_str())
-                                            .map(ToString::to_string)?;
-                                        Some((gid, s))
-                                    })
-                                    .collect(),
-                                Err(e) => {
-                                    let msg = e.to_string().to_lowercase();
-                                    if !(msg.contains("not running")
-                                        || msg.contains("network")
-                                        || msg.contains("timed out")
-                                        || msg.contains("connection"))
-                                    {
-                                        log::warn!("tellActive failed: {}", e);
-                                    }
-                                    HashMap::new()
-                                }
-                            }
-                            } else {
-                                HashMap::new()
-                            };
-                        for mut dl in downloads {
-                            let mut speed = 0.0;
-                            let mut status_str = "Downloading".to_string();
-                            let mut connections = 8u32;
-
-                            if let Some(gid) = &dl.aria2_gid {
-                                let status_result = if let Some(s) = active_map.get(gid) {
-                                    Ok(s.clone())
-                                } else {
-                                    state.engine.get_status(gid).await
-                                };
-                                match status_result {
-                                    Ok(status) => {
-                                        if let Some(v) = status
-                                            .get("completedLength")
-                                            .and_then(|v| v.as_str())
-                                        {
-                                            dl.downloaded_size =
-                                                v.parse().unwrap_or(dl.downloaded_size);
-                                        }
-                                        if let Some(v) =
-                                            status.get("totalLength").and_then(|v| v.as_str())
-                                        {
-                                            dl.total_size = v.parse().unwrap_or(dl.total_size);
-                                        }
-                                        if let Some(v) =
-                                            status.get("downloadSpeed").and_then(|v| v.as_str())
-                                        {
-                                            speed = v.parse().unwrap_or(0.0);
-                                        }
-                                        if let Some(v) =
-                                            status.get("connections").and_then(|v| v.as_str())
-                                        {
-                                            connections = v.parse().unwrap_or(8);
-                                        }
-                                        if let Some(s) =
-                                            status.get("status").and_then(|v| v.as_str())
-                                        {
-                                            match s {
-                                                "complete" => {
-                                                    if let Err(e) = finalize_completed_download(&mut dl) {
-                                                        fail_invalid_download(&mut dl, e);
-                                                        status_str = "Failed".into();
-                                                    } else {
-                                                        status_str = "Completed".into();
-                                                    }
-                                                }
-                                                "paused" => {
-                                                    dl.status = DownloadStatus::Paused;
-                                                    status_str = "Paused".into();
-                                                }
-                                                "error" => {
-                                                    dl.status = DownloadStatus::Failed;
-                                                    dl.error_message = status
-                                                        .get("errorMessage")
-                                                        .and_then(|v| v.as_str())
-                                                        .map(|s| s.to_string());
-                                                    status_str = "Failed".into();
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let msg = e.to_string().to_lowercase();
-                                        // Transient: aria2 restarting / RPC blip — skip this tick
-                                        if msg.contains("not running")
-                                            || msg.contains("network")
-                                            || msg.contains("timed out")
-                                            || msg.contains("connection")
-                                        {
-                                            continue;
-                                        }
-                                        dl.status = DownloadStatus::Failed;
-                                        dl.error_message = Some(e.to_string());
-                                        status_str = "Failed".into();
-                                        speed = 0.0;
-                                    }
-                                }
-                            } else if is_hls_url(&dl.url) {
-                                // HLS progress is emitted by the HLS task itself
-                                continue;
-                            } else {
-                                // Non-HLS downloading without GID: wait a tick for queue to assign
-                                continue;
-                            }
-
-                            if dl.downloaded_size >= dl.total_size
-                                && dl.total_size > 0
-                                && status_str == "Downloading"
-                            {
-                                if let Err(e) = finalize_completed_download(&mut dl) {
-                                    fail_invalid_download(&mut dl, e);
-                                    status_str = "Failed".into();
-                                } else {
-                                    status_str = "Completed".into();
-                                }
-                                speed = 0.0;
-                            }
-
-                            let poll_id = dl.id.unwrap();
-                            let committed = match state.db.update_progress_if_current(
-                                poll_id,
-                                &[DownloadStatus::Downloading],
-                                dl.downloaded_size,
-                                dl.total_size.max(dl.downloaded_size),
-                                speed,
-                                &dl.status,
-                                dl.completed_at.as_deref(),
-                                dl.error_message.as_deref(),
-                            ) {
-                                Ok(value) => value,
-                                Err(e) => {
-                                    log::warn!("progress poll: {poll_id} DB update failed: {e}");
-                                    false
-                                }
-                            };
-                            if !committed {
-                                continue;
-                            }
-
-                            if matches!(status_str.as_str(), "Completed" | "Failed") {
-                                let _ = state.db.clear_session_cookies(poll_id);
-                            }
-
-                            if status_str == "Completed" {
-                                let _ = app_handle
-                                    .notification()
-                                    .builder()
-                                    .title("Download Complete")
-                                    .body(&dl.filename)
-                                    .show();
-                                if let Some(window) = app_handle.get_webview_window("main") {
-                                    let _ = window.request_user_attention(Some(
-                                        tauri::UserAttentionType::Informational,
-                                    ));
-                                }
-                            }
-
-                            let payload = ProgressPayload {
-                                id: dl.id.unwrap(),
-                                downloaded_size: dl.downloaded_size,
-                                // ponytail: guard stale/underreported total so the UI never shows >100%.
-                                total_size: dl.total_size.max(dl.downloaded_size),
-                                speed,
-                                status: status_str,
-                                connections,
-                            };
-                            let _ = app_handle.emit("download-progress", payload);
-                        }
-                    }
-                    })
-                    .catch_unwind()
-                    .await
-                    {
-                        log::error!("progress poll panicked, continuing: {:?}", p);
-                    }
-                }
-            });
+            spawn_local_api(app_handle.clone());
+            spawn_progress_poll(app_handle.clone());
             Ok(())
         })
         .manage(app_state)

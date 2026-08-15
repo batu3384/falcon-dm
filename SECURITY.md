@@ -44,8 +44,9 @@ The API is protected by:
 - User-explicit extension pairing (no first-wins auto-approval).
 - SSRF / DNS-rebinding guards on download URLs.
 - Path-traversal protection on save paths and filename sanitization.
-- `shell:allow-kill` only affects processes spawned by the Tauri shell plugin
-  (aria2/ffmpeg sidecars), not arbitrary PIDs.
+- `shell:allow-kill` can only signal child processes this app spawned through
+  the Tauri shell plugin (aria2c / ffmpeg sidecars). The webview cannot pick
+  an arbitrary PID; kill is scoped to those spawn handles.
 
 Known accepted risks (e.g. the TOCTOU window between URL validation and the
 fetch) are documented inline in the Rust source. Direct HTTP pause/resume uses

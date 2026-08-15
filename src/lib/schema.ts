@@ -1,11 +1,9 @@
 import { z } from 'zod';
 
-// ponytail: zod runtime validation for Tauri IPC payloads. The TS types in
-// types.ts are a compile-time contract only — they trust that the backend
-// actually sends well-formed data. If the schema drifts (a field renamed, a
-// status string changes), the UI would silently break with `undefined` values.
-// These schemas parse every invoke()/listen() result so malformed payloads
-// throw a loud, catchable error instead of corrupting UI state.
+// ponytail: zod runtime validation for Tauri IPC payloads. Model types are
+// `z.infer` of these schemas (re-exported from types.ts). If the schema drifts
+// (a field renamed, a status string changes), parse throws instead of letting
+// `undefined` corrupt UI state.
 
 export const DownloadStatusEnum = z.enum([
   'Queued',
@@ -59,6 +57,7 @@ export const ProgressPayloadSchema = z.object({
 
 export const DownloadProfileSchema = z.object({
   name: z.string(),
+  // Host or origin (example.com / https://example.com:8443). Rust matches hostname, not substring.
   url_pattern: z.string(),
   user_agent: z.string().nullable().optional(),
   referrer: z.string().nullable().optional(),
@@ -114,6 +113,13 @@ export const DownloadStatsSchema = z.object({
   current_speed: z.number().finite().nonnegative(),
 });
 
-export type ParsedDownload = z.infer<typeof DownloadSchema>;
-export type ParsedProgress = z.infer<typeof ProgressPayloadSchema>;
-export type ParsedSettings = z.infer<typeof SettingsSchema>;
+export type DownloadStatus = z.infer<typeof DownloadStatusEnum>;
+export type DownloadCategory = z.infer<typeof DownloadCategoryEnum>;
+export type DownloadModel = z.infer<typeof DownloadSchema>;
+export type ProgressPayload = z.infer<typeof ProgressPayloadSchema>;
+export type DownloadProfile = z.infer<typeof DownloadProfileSchema>;
+export type SettingsModel = z.infer<typeof SettingsSchema>;
+export type ScheduleModel = z.infer<typeof ScheduleSchema>;
+export type ParsedDownload = DownloadModel;
+export type ParsedProgress = ProgressPayload;
+export type ParsedSettings = SettingsModel;

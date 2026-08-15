@@ -4,7 +4,7 @@ import { X } from 'lucide-react';
 import { useModalA11y } from '../hooks/useModalA11y';
 import { ConfirmDialog } from './ConfirmDialog';
 import * as api from '../api/commands';
-import { isValidScheduleRange } from '../lib/scheduler';
+import { isValidSchedule } from '../lib/scheduler';
 
 interface SchedulerModalProps {
   isOpen: boolean;
@@ -46,7 +46,13 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
   const handleSave = async () => {
     setSaving(true);
     setError('');
-    if (active && !isValidScheduleRange(startTime, stopTime)) {
+    if (
+      !isValidSchedule({
+        start_time: startTime || null,
+        stop_time: stopTime || null,
+        active,
+      })
+    ) {
       setError(t('scheduler.invalid_time'));
       setSaving(false);
       return;
