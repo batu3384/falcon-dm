@@ -40,7 +40,7 @@ import { onDownloadAdded, onDownloadProgress, onPairRequest } from './api/events
 import * as api from './api/commands';
 import { applyTheme, watchSystemTheme } from './types';
 import { getDownloadCapabilities } from './lib/downloadCapabilities';
-import { useClipboardMonitor } from './hooks/useClipboardMonitor';
+import { useClipboardMonitor, URL_RE } from './hooks/useClipboardMonitor';
 
 function App() {
   const { t, i18n } = useTranslation();

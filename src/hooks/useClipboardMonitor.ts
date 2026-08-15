@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-const URL_RE = /^https?:\/\/\S+/i;
+export const URL_RE = /^https?:\/\/\S+/i;
 
 /** Poll clipboard for http(s) URLs while enabled. */
 export function useClipboardMonitor(enabled: boolean, onUrl: (url: string) => void) {
