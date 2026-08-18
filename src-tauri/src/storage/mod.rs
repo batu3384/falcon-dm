@@ -4,3 +4,4 @@ mod queries;
 
 pub use database::{Database, DatabaseError, Result};
 pub use models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
+pub use queries::InsertDownloadResult;

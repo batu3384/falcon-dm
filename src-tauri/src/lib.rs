@@ -1,5 +1,6 @@
 mod commands;
 pub mod download;
+pub mod extension_host;
 mod lifecycle;
 mod local_api;
 pub mod log_buffer;
@@ -17,6 +18,7 @@ use native_messaging::PairProofStore;
 use serde::Deserialize;
 use settings::Settings;
 use storage::models::{Download, DownloadCategory, DownloadStatus};
+use storage::InsertDownloadResult;
 use storage::Database;
 use tauri::{AppHandle, Emitter, Manager};
 use util::{
@@ -153,6 +155,8 @@ pub(crate) async fn enqueue_download(
     let prof_ua = profile.and_then(|p| p.user_agent.clone());
     let prof_cookies = profile.and_then(|p| p.cookies.clone());
 
+    let state = app.state::<AppState>();
+
     let mut dl = Download {
         id: None,
         url: url.clone(),
@@ -163,7 +167,7 @@ pub(crate) async fn enqueue_download(
         status: DownloadStatus::Queued,
         category,
         speed: 0.0,
-        segments: 16,
+        segments: settings.max_connections_per_server,
         priority: 1,
         created_at: Utc::now().to_rfc3339(),
         completed_at: None,
@@ -183,10 +187,12 @@ pub(crate) async fn enqueue_download(
         archived: false,
     };
 
-    let state = app.state::<AppState>();
-    let id = state.db.insert_download(&dl).map_err(|e| e.to_string())?;
-    dl.id = Some(id);
-    let _ = app.emit("download-added", &dl);
+    let insert_result = state.db.insert_download_deduped(&dl).map_err(|e| e.to_string())?;
+    let id = insert_result.id();
+    if matches!(insert_result, InsertDownloadResult::Created(_)) {
+        dl.id = Some(id);
+        let _ = app.emit("download-added", &dl);
+    }
     Ok(id)
 }
 

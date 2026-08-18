@@ -653,7 +653,8 @@ pub fn run() {
             crate::commands::move_download,
             crate::commands::archive_download,
             crate::commands::open_folder,
-            crate::commands::open_file
+            crate::commands::open_file,
+            crate::commands::install_native_host_manifests
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

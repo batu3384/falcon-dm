@@ -1,11 +1,25 @@
 use super::database::{Database, DatabaseError, Result};
 use super::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
 use chrono::Utc;
-use rusqlite::{params, Row};
+use rusqlite::{params, Row, TransactionBehavior};
+use rusqlite::OptionalExtension;
 
 fn like_contains_pattern(search: &str) -> String {
     let escaped = search.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
     format!("%{escaped}%")
+}
+
+pub enum InsertDownloadResult {
+    Created(i64),
+    Existing(i64),
+}
+
+impl InsertDownloadResult {
+    pub fn id(&self) -> i64 {
+        match self {
+            Self::Created(id) | Self::Existing(id) => *id,
+        }
+    }
 }
 
 impl Database {
@@ -39,6 +53,59 @@ impl Database {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn insert_download_deduped(&self, download: &Download) -> Result<InsertDownloadResult> {
+        let mut conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(DatabaseError::from)?;
+        let existing = tx
+            .query_row(
+                "SELECT id FROM downloads
+                 WHERE url = ?1
+                   AND status IN ('Queued', 'Downloading', 'Paused', 'Merging')
+                   AND archived = 0
+                 ORDER BY id DESC
+                 LIMIT 1",
+                params![download.url],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            tx.commit().map_err(DatabaseError::from)?;
+            return Ok(InsertDownloadResult::Existing(id));
+        }
+        tx.execute(
+            "INSERT INTO downloads (
+                url, filename, save_path, total_size, downloaded_size, status, category,
+                speed, segments, priority, created_at, completed_at, error_message,
+                referrer, user_agent, cookies, aria2_gid, archived
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                download.url,
+                download.filename,
+                download.save_path,
+                download.total_size as i64,
+                download.downloaded_size as i64,
+                download.status.as_str(),
+                download.category.as_str(),
+                download.speed,
+                download.segments as i64,
+                download.priority as i64,
+                download.created_at,
+                download.completed_at,
+                download.error_message,
+                download.referrer,
+                download.user_agent,
+                download.cookies,
+                download.aria2_gid,
+                download.archived as i64,
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit().map_err(DatabaseError::from)?;
+        Ok(InsertDownloadResult::Created(id))
     }
 
     pub fn update_download(&self, id: i64, download: &Download) -> Result<()> {
@@ -497,6 +564,25 @@ impl Database {
         }
 
         Ok(downloads)
+    }
+
+    pub fn find_active_download_id_by_url(&self, url: &str) -> Result<Option<i64>> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let result = conn.query_row(
+            "SELECT id FROM downloads
+             WHERE url = ?1
+               AND status IN ('Queued', 'Downloading', 'Paused', 'Merging')
+               AND (archived = 0 OR archived IS NULL)
+             ORDER BY id DESC
+             LIMIT 1",
+            params![url],
+            |row| row.get::<_, i64>(0),
+        );
+        match result {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(DatabaseError::from(err)),
+        }
     }
 
     pub fn get_download(&self, id: i64) -> Result<Download> {

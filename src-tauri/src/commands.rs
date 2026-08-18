@@ -482,3 +482,23 @@ pub async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Re
 
     Ok(())
 }
+
+#[tauri::command]
+pub fn install_native_host_manifests(
+    chrome_extension_id: String,
+    edge_extension_id: Option<String>,
+) -> Result<(), String> {
+    if !crate::extension_host::native_host_install_supported() {
+        return Err("Native host install is not supported on this platform".to_string());
+    }
+    let chrome = chrome_extension_id.trim().to_string();
+    let edge = edge_extension_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| chrome.clone());
+    let executable = crate::extension_host::resolve_native_host_binary().ok_or_else(|| {
+        "Native host binary not found. Build it with: cargo build --bin falcon-dm-native-host"
+            .to_string()
+    })?;
+    crate::extension_host::install_native_host_manifests(&executable, &chrome, &edge)
+}

@@ -148,6 +148,22 @@ impl Database {
                 "ALTER TABLE downloads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
                  CREATE INDEX IF NOT EXISTS idx_downloads_archived ON downloads(archived);",
             ),
+            M::up(
+                "DELETE FROM downloads
+                 WHERE archived = 0
+                   AND status IN ('Queued', 'Downloading', 'Paused', 'Merging')
+                   AND id NOT IN (
+                     SELECT MAX(id)
+                     FROM downloads
+                     WHERE archived = 0
+                       AND status IN ('Queued', 'Downloading', 'Paused', 'Merging')
+                     GROUP BY url
+                   );
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_active_url_unique
+                   ON downloads(url)
+                   WHERE status IN ('Queued', 'Downloading', 'Paused', 'Merging')
+                     AND archived = 0;",
+            ),
         ]);
         migrations.to_latest(&mut conn).map_err(|e| {
             DatabaseError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
@@ -532,5 +548,51 @@ mod tests {
             db.download_stats().unwrap();
         assert_eq!((active, queued, paused_count, completed, failed), (0, 0, 1, 0, 0));
         assert_eq!(bytes, 10);
+    }
+
+    #[test]
+    fn find_active_download_id_by_url_returns_latest_active_only() {
+        let db = Database::in_memory().unwrap();
+        let url = "https://cdn.example.com/shared.bin";
+
+        let mut completed = create_test_download("done.bin");
+        completed.url = url.to_string();
+        completed.status = DownloadStatus::Completed;
+        db.insert_download(&completed).unwrap();
+
+        let mut active = create_test_download("active.bin");
+        active.url = url.to_string();
+        active.status = DownloadStatus::Downloading;
+        let active_id = db.insert_download(&active).unwrap();
+
+        assert_eq!(db.find_active_download_id_by_url(url).unwrap(), Some(active_id));
+
+        let only_completed_url = "https://cdn.example.com/only-completed.bin";
+        let mut only_completed = create_test_download("only.bin");
+        only_completed.url = only_completed_url.to_string();
+        only_completed.status = DownloadStatus::Completed;
+        db.insert_download(&only_completed).unwrap();
+        assert_eq!(db.find_active_download_id_by_url(only_completed_url).unwrap(), None);
+    }
+
+    #[test]
+    fn insert_download_deduped_returns_existing_active_url() {
+        let db = Database::in_memory().unwrap();
+        let url = "https://cdn.example.com/dedup.bin";
+
+        let mut first = create_test_download("first.bin");
+        first.url = url.to_string();
+        first.status = DownloadStatus::Downloading;
+        let first_id = db.insert_download(&first).unwrap();
+
+        let mut second = create_test_download("second.bin");
+        second.url = url.to_string();
+        second.status = DownloadStatus::Queued;
+        match db.insert_download_deduped(&second).unwrap() {
+            crate::storage::InsertDownloadResult::Existing(id) => assert_eq!(id, first_id),
+            crate::storage::InsertDownloadResult::Created(_) => {
+                panic!("expected existing active download")
+            }
+        }
     }
 }
