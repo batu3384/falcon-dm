@@ -1,0 +1,86 @@
+{
+  "date": "2026-08-18",
+  "workspace": "/Users/batuhanyuksel/Documents/downloadmanager",
+  "runtime": "static",
+  "verdict": "CONCERNS",
+  "inventory": {
+    "file_count": 244,
+    "todo_count": 0,
+    "complete_todo_list": false,
+    "secret_candidates": 0,
+    "walk_complete": true
+  },
+  "counts": {
+    "critical": 0,
+    "major": 3,
+    "minor": 3,
+    "info": 2
+  },
+  "findings": [
+    {
+      "id": "CA-001",
+      "severity": "Major",
+      "category": "Functional correctness",
+      "path": "src-tauri/src/download/http.rs",
+      "line": 123,
+      "summary": "Parallel HTTP bypasses speed limit, loads full segments into RAM, no range length validation"
+    },
+    {
+      "id": "CA-002",
+      "severity": "Major",
+      "category": "Functional correctness",
+      "path": "src-tauri/src/lib.rs",
+      "line": 158,
+      "summary": "Duplicate URL guard is non-atomic (TOCTOU between check and insert)"
+    },
+    {
+      "id": "CA-003",
+      "severity": "Major",
+      "category": "Functional correctness",
+      "path": "src-tauri/src/extension_host.rs",
+      "line": 12,
+      "summary": "Native host install uses macOS-only paths on all platforms"
+    },
+    {
+      "id": "CA-004",
+      "severity": "Minor",
+      "category": "Maintainability",
+      "path": "src-tauri/src/download/http.rs",
+      "line": 1,
+      "summary": "Non-idiomatic #[path] module for http_client"
+    },
+    {
+      "id": "CA-005",
+      "severity": "Minor",
+      "category": "Maintainability",
+      "path": "src-tauri/src/download/hls.rs",
+      "line": 92,
+      "summary": "HLS retry/cancel patterns diverge from shared HTTP client layer"
+    },
+    {
+      "id": "CA-006",
+      "severity": "Minor",
+      "category": "Architecture",
+      "path": "src-tauri/src/util/net.rs",
+      "line": 95,
+      "summary": "HTTP client helpers re-bloat util/net.rs"
+    },
+    {
+      "id": "CA-007",
+      "severity": "Info",
+      "category": "Docs",
+      "path": "docs/codebase-audit/2026-08-15.md",
+      "line": 90,
+      "summary": "Prior CA-008 partially addressed by parallel HTTP work"
+    },
+    {
+      "id": "CA-008",
+      "severity": "Info",
+      "category": "Tests",
+      "path": "src-tauri/src/download/http.rs",
+      "line": 123,
+      "summary": "No integration tests for parallel HTTP merge path"
+    }
+  ],
+  "recommended_order": ["CA-001", "CA-002", "CA-003", "CA-008", "CA-004"]
+}

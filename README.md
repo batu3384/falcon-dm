@@ -41,7 +41,7 @@
 
 | Area | What you get |
 |------|----------------|
-| **HTTP(S)** | DNS-pinned streaming, bounded redirects, atomic completion, priority queue, scheduler |
+| **HTTP(S)** | Multi-connection range downloads, DNS-pinned streaming, bounded redirects, atomic completion, priority queue, scheduler |
 | **HLS (m3u8)** | Parallel segment fetch, ffmpeg mux |
 | **YouTube** | Watch URL + <code>yt-dlp</code> (quality via API <code>format</code> field) |
 | **Browser extension** | Download hijack, video quality picker, link grabber (batch ≤20) |
