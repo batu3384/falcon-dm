@@ -11,9 +11,11 @@ pub fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, 
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+mod http_client;
 mod net;
 mod path;
 
+pub use http_client::*;
 pub use net::*;
 pub use path::*;
 

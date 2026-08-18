@@ -329,6 +329,9 @@ impl QueueManager {
                                         referrer: dl.referrer.clone(),
                                         user_agent: dl.user_agent.clone(),
                                         options: lock_or_recover(&self.http_options).clone(),
+                                        max_connections: self
+                                            .max_connections
+                                            .load(Ordering::SeqCst),
                                     },
                                 },
                                 rx,

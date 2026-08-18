@@ -1,11 +1,9 @@
 use crate::storage::{models::DownloadStatus, Database};
-use crate::util::{
-    resolve_public_addresses_async, sanitize_header_value, validate_fetch_url_async,
-};
+use crate::util::{sanitize_header_value, validate_fetch_url_async, with_pinned_http_clients};
 use futures::stream::{self, StreamExt, TryStreamExt};
 use m3u8_rs::Playlist;
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, LOCATION, REFERER, USER_AGENT};
-use reqwest::{Client, RequestBuilder};
+use reqwest::RequestBuilder;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -59,8 +57,7 @@ fn same_origin(left: &Url, right: &Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
-async fn build_client(headers: &HlsHeaders, target: &Url) -> Result<Client, String> {
-    let addresses = resolve_public_addresses_async(target).await?;
+fn hls_default_headers(headers: &HlsHeaders) -> Result<HeaderMap, String> {
     let mut map = HeaderMap::new();
     if let Some(ref ua) = headers.user_agent {
         let v = sanitize_header_value(ua);
@@ -68,15 +65,73 @@ async fn build_client(headers: &HlsHeaders, target: &Url) -> Result<Client, Stri
             map.insert(USER_AGENT, HeaderValue::from_str(&v).map_err(|e| e.to_string())?);
         }
     }
-    let mut builder = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .default_headers(map);
-    if target.host_str().and_then(|host| host.parse::<std::net::IpAddr>().ok()).is_none() {
-        let host = target.host_str().ok_or_else(|| "HLS URL has no host".to_string())?;
-        builder = builder.resolve(host, addresses[0]);
+    Ok(map)
+}
+
+fn apply_hls_request_headers(
+    request: RequestBuilder,
+    source: &Url,
+    target: &Url,
+    headers: &HlsHeaders,
+) -> RequestBuilder {
+    let mut request = request;
+    if let Some(cookie) = cookie_header_for_target(source, target, headers.cookies.as_deref()) {
+        request = request.header(COOKIE, cookie);
     }
-    builder.build().map_err(|e| e.to_string())
+    if let Some(referrer) = headers.referrer.as_deref().and_then(|value| Url::parse(value).ok()) {
+        if same_origin(&referrer, target) {
+            let value = sanitize_header_value(referrer.as_str());
+            if !value.is_empty() {
+                request = request.header(REFERER, value);
+            }
+        }
+    }
+    request
+}
+
+async fn send_hls_request(
+    source: &Url,
+    target: &Url,
+    headers: &HlsHeaders,
+) -> Result<reqwest::Response, String> {
+    let default_headers = hls_default_headers(headers)?;
+    let headers = headers.clone();
+    let source = source.clone();
+    let mut current = target.clone();
+    for redirect_count in 0..=5 {
+        let response = with_pinned_http_clients(
+            &current,
+            None,
+            std::time::Duration::from_secs(30),
+            Some(default_headers.clone()),
+            |client| {
+                let source = source.clone();
+                let current = current.clone();
+                let headers = headers.clone();
+                async move {
+                    let request =
+                        apply_hls_request_headers(client.get(current.clone()), &source, &current, &headers);
+                    request.send().await.map_err(|e| e.to_string())
+                }
+            },
+        )
+        .await?;
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        if redirect_count == 5 {
+            return Err("Too many HLS redirects".into());
+        }
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| "HLS redirect has no valid location".to_string())?;
+        current =
+            validate_fetch_url_async(current.join(location).map_err(|e| e.to_string())?.as_str())
+                .await?;
+    }
+    Err("HLS response unavailable".into())
 }
 
 fn cookie_header_for_target(
@@ -99,54 +154,6 @@ fn cookie_header_for_target(
         return None;
     }
     HeaderValue::from_str(&value).ok()
-}
-
-async fn request_with_headers(
-    source: &Url,
-    target: &Url,
-    headers: &HlsHeaders,
-) -> Result<RequestBuilder, String> {
-    let client = build_client(headers, target).await?;
-    let mut request = client.get(target.clone());
-    if let Some(cookie) = cookie_header_for_target(source, target, headers.cookies.as_deref()) {
-        request = request.header(COOKIE, cookie);
-    }
-    if let Some(referrer) = headers.referrer.as_deref().and_then(|value| Url::parse(value).ok()) {
-        if same_origin(&referrer, target) {
-            let value = sanitize_header_value(referrer.as_str());
-            if !value.is_empty() {
-                request = request.header(REFERER, value);
-            }
-        }
-    }
-    Ok(request)
-}
-
-async fn send_hls_request(
-    source: &Url,
-    target: &Url,
-    headers: &HlsHeaders,
-) -> Result<reqwest::Response, String> {
-    let mut current = target.clone();
-    for redirect_count in 0..=5 {
-        let request = request_with_headers(source, &current, headers).await?;
-        let response = request.send().await.map_err(|e| e.to_string())?;
-        if !response.status().is_redirection() {
-            return Ok(response);
-        }
-        if redirect_count == 5 {
-            return Err("Too many HLS redirects".into());
-        }
-        let location = response
-            .headers()
-            .get(LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| "HLS redirect has no valid location".to_string())?;
-        current =
-            validate_fetch_url_async(current.join(location).map_err(|e| e.to_string())?.as_str())
-                .await?;
-    }
-    Err("HLS response unavailable".into())
 }
 
 async fn read_bounded_response(
