@@ -39,6 +39,8 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
   const [pendingPairs, setPendingPairs] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
+  const [extensionId, setExtensionId] = useState('');
+  const [installingNativeHost, setInstallingNativeHost] = useState(false);
   const dirtyRef = useRef(false);
 
   const updateSettings = (next: SettingsModel | ((previous: SettingsModel) => SettingsModel)) => {
@@ -58,7 +60,11 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
     api
       .getSettings()
       .then((loaded) => {
-        if (!dirtyRef.current) setSettingsState(loaded);
+        if (!dirtyRef.current) {
+          setSettingsState(loaded);
+          const suggested = loaded.allowed_extension_ids?.[0];
+          if (suggested) setExtensionId(suggested);
+        }
       })
       .catch((e) => console.error('Failed to load settings:', e));
     api
@@ -72,6 +78,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
       setPendingPairs((current) =>
         current.includes(extensionId) ? current : [...current, extensionId],
       );
+      setExtensionId((current) => current || extensionId);
     });
     return () => {
       unlisten.then((f) => f());
@@ -119,10 +126,29 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
       setPendingPairs(await api.getPendingPairs());
       const s = await api.getSettings();
       if (!dirtyRef.current) setSettingsState(s);
+      setExtensionId(extensionId);
       showToast('success', t('settings.pair_approved'));
     } catch (e) {
       console.error(e);
       showToast('error', t('settings.save_failed'));
+    }
+  };
+
+  const handleInstallNativeHost = async () => {
+    const chromeId = extensionId.trim();
+    if (chromeId.length !== 32) {
+      showToast('error', t('onboarding.native_host_invalid_id'));
+      return;
+    }
+    setInstallingNativeHost(true);
+    try {
+      await api.installNativeHostManifests(chromeId);
+      showToast('success', t('onboarding.native_host_installed'));
+    } catch (e) {
+      console.error(e);
+      showToast('error', t('onboarding.native_host_failed'));
+    } finally {
+      setInstallingNativeHost(false);
     }
   };
 
@@ -210,6 +236,10 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
               pendingPairs={pendingPairs}
               handleApprovePair={handleApprovePair}
               handleRelinkExtension={handleRelinkExtension}
+              extensionId={extensionId}
+              onExtensionIdChange={setExtensionId}
+              onInstallNativeHost={handleInstallNativeHost}
+              installingNativeHost={installingNativeHost}
             />
           )}
           {activeTab === 'network' && (

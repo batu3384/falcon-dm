@@ -189,6 +189,16 @@ export async function archiveDownload(id: number, archived: boolean): Promise<vo
   await invoke('archive_download', { id, archived });
 }
 
+export async function installNativeHostManifests(
+  chromeExtensionId: string,
+  edgeExtensionId?: string,
+): Promise<void> {
+  await invoke('install_native_host_manifests', {
+    chromeExtensionId,
+    edgeExtensionId: edgeExtensionId ?? null,
+  });
+}
+
 /// Build a cURL command string from a download's URL + headers. For the "Copy as
 /// cURL" context-menu action — lets users replicate the request in a terminal.
 export function buildCurlCommand(dl: {

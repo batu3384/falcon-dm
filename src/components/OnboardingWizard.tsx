@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { Zap, CheckCircle2, ChevronRight, ChevronLeft, Puzzle, ShieldCheck } from 'lucide-react';
 import { useModalA11y } from '../hooks/useModalA11y';
 import { onPairRequest } from '../api/events';
+import * as api from '../api/commands';
+import { useToastStore } from '../store/toast';
 
 interface ExtensionStatus {
   has_token: boolean;
@@ -18,8 +20,11 @@ interface OnboardingProps {
 
 export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
   const { t } = useTranslation();
+  const showToast = useToastStore((s) => s.showToast);
   const [step, setStep] = useState(1);
   const [status, setStatus] = useState<ExtensionStatus | null>(null);
+  const [extensionId, setExtensionId] = useState('');
+  const [installingHost, setInstallingHost] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const handleClose = useCallback(() => {
     localStorage.setItem('onboarding_complete', 'true');
@@ -63,6 +68,25 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
 
   const paired = (status?.approved_extension_ids?.length ?? 0) > 0;
   const pending = !!status?.pending_pair_id;
+  const suggestedExtensionId = status?.pending_pair_id || status?.approved_extension_ids?.[0] || '';
+
+  const handleInstallNativeHost = async () => {
+    const chromeId = (extensionId || suggestedExtensionId).trim();
+    if (chromeId.length !== 32) {
+      showToast('error', t('onboarding.native_host_invalid_id'));
+      return;
+    }
+    setInstallingHost(true);
+    try {
+      await api.installNativeHostManifests(chromeId);
+      showToast('success', t('onboarding.native_host_installed'));
+    } catch (e) {
+      console.error(e);
+      showToast('error', t('onboarding.native_host_failed'));
+    } finally {
+      setInstallingHost(false);
+    }
+  };
 
   return (
     <div className="wizard-overlay" onClick={skip} role="presentation">
@@ -133,6 +157,28 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
                     </>
                   )}
                 </div>
+              </div>
+              <div className="field" style={{ marginTop: 12 }}>
+                <label className="field-label" htmlFor="onboard-ext-id">
+                  {t('onboarding.native_host_id')}
+                </label>
+                <input
+                  id="onboard-ext-id"
+                  className="field-input mono"
+                  placeholder={suggestedExtensionId || 'abcdefghijklmnopqrstuvwxyzabcdef'}
+                  value={extensionId}
+                  onChange={(e) => setExtensionId(e.target.value)}
+                />
+                <p className="field-hint">{t('onboarding.native_host_hint')}</p>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{ marginTop: 8 }}
+                  onClick={handleInstallNativeHost}
+                  disabled={installingHost}
+                >
+                  {installingHost ? t('onboarding.native_host_installing') : t('onboarding.native_host_install')}
+                </button>
               </div>
             </>
           )}

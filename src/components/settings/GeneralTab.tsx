@@ -9,6 +9,10 @@ type Props = {
   pendingPairs: string[];
   handleApprovePair: (extensionId: string) => void;
   handleRelinkExtension: () => void;
+  extensionId: string;
+  onExtensionIdChange: (value: string) => void;
+  onInstallNativeHost: () => void;
+  installingNativeHost: boolean;
 };
 
 export function GeneralTab({
@@ -19,6 +23,10 @@ export function GeneralTab({
   pendingPairs,
   handleApprovePair,
   handleRelinkExtension,
+  extensionId,
+  onExtensionIdChange,
+  onInstallNativeHost,
+  installingNativeHost,
 }: Props) {
   const { t } = useTranslation();
   return (
@@ -115,6 +123,33 @@ export function GeneralTab({
         <button type="button" className="btn-secondary" onClick={handleRelinkExtension}>
           {t('settings.relink_extension')}
         </button>
+        <div className="field" style={{ marginTop: 12 }}>
+          <label className="field-label" htmlFor="set-extension-id">
+            {t('onboarding.native_host_id')}
+          </label>
+          <div className="input-action">
+            <input
+              id="set-extension-id"
+              className="field-input mono"
+              type="text"
+              value={extensionId}
+              onChange={(e) => onExtensionIdChange(e.target.value)}
+              placeholder="abcdefghijklmnopqrstuvwxyzabcdef"
+              maxLength={32}
+            />
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={onInstallNativeHost}
+              disabled={installingNativeHost}
+            >
+              {installingNativeHost
+                ? t('onboarding.native_host_installing')
+                : t('onboarding.native_host_install')}
+            </button>
+          </div>
+          <p className="field-hint">{t('onboarding.native_host_hint')}</p>
+        </div>
       </div>
       <div className="field">
         <label className="field-label" htmlFor="cat-video">
