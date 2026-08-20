@@ -20,9 +20,11 @@ REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 TOKEN="$(gh auth token)"
 URL="https://x-access-token:${TOKEN}@github.com/${REPO}.wiki.git"
 
-if ! git clone "$URL" "$TMP/repo" 2>/dev/null; then
+if ! git clone "$URL" "$TMP/repo" 2>"$TMP/clone.err"; then
   cat >&2 <<EOF
 Could not clone ${REPO}.wiki.git
+
+$(cat "$TMP/clone.err" 2>/dev/null || true)
 
 GitHub creates the wiki git backend only after the first wiki page exists.
 
@@ -36,8 +38,10 @@ EOF
   exit 1
 fi
 
-rsync -a --delete "$WIKI_SRC/" "$TMP/repo/"
+# ponytail: never rsync --delete over .git; GitHub wiki uses branch master.
+rsync -a --delete --exclude='.git' --exclude='README.md' "$WIKI_SRC/" "$TMP/repo/"
 cd "$TMP/repo"
+BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo master)"
 
 git add -A
 if git diff --cached --quiet; then
@@ -47,6 +51,6 @@ fi
 
 git -c user.name="Falcon DM" -c user.email="wiki@falcon-dm.local" \
   commit -m "docs: sync wiki from repository wiki/ directory"
-git push origin HEAD
+git push origin "$BRANCH"
 
 echo "Wiki synced: https://github.com/${REPO}/wiki"
