@@ -1,8 +1,8 @@
 use super::database::{Database, DatabaseError, Result};
 use super::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
 use chrono::Utc;
-use rusqlite::{params, Row, TransactionBehavior};
 use rusqlite::OptionalExtension;
+use rusqlite::{params, Row, TransactionBehavior};
 
 fn like_contains_pattern(search: &str) -> String {
     let escaped = search.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");

@@ -9,6 +9,7 @@
 **Reference**
 - [Architecture](Architecture)
 - [Security](Security)
+- [Roadmap](Roadmap)
 
 **Help**
 - [Troubleshooting](Troubleshooting)

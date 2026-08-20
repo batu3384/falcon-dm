@@ -177,7 +177,9 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
                   onClick={handleInstallNativeHost}
                   disabled={installingHost}
                 >
-                  {installingHost ? t('onboarding.native_host_installing') : t('onboarding.native_host_install')}
+                  {installingHost
+                    ? t('onboarding.native_host_installing')
+                    : t('onboarding.native_host_install')}
                 </button>
               </div>
             </>

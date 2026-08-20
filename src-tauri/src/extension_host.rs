@@ -25,7 +25,10 @@ pub fn native_host_install_supported() -> bool {
     }
 }
 
-fn native_host_install_targets(chrome_extension_id: &str, edge_extension_id: &str) -> Result<Vec<NativeHostTarget>, String> {
+fn native_host_install_targets(
+    chrome_extension_id: &str,
+    edge_extension_id: &str,
+) -> Result<Vec<NativeHostTarget>, String> {
     let home = dirs::home_dir().ok_or_else(|| "home directory unavailable".to_string())?;
     let chrome_origin = format!("chrome-extension://{chrome_extension_id}/");
     let edge_origin = format!("edge-extension://{edge_extension_id}/");
@@ -34,13 +37,11 @@ fn native_host_install_targets(chrome_extension_id: &str, edge_extension_id: &st
     #[cfg(target_os = "macos")]
     {
         targets.push(NativeHostTarget {
-            dir: home
-                .join("Library/Application Support/Google/Chrome/NativeMessagingHosts"),
+            dir: home.join("Library/Application Support/Google/Chrome/NativeMessagingHosts"),
             origin: chrome_origin.clone(),
         });
         targets.push(NativeHostTarget {
-            dir: home
-                .join("Library/Application Support/Microsoft Edge/NativeMessagingHosts"),
+            dir: home.join("Library/Application Support/Microsoft Edge/NativeMessagingHosts"),
             origin: edge_origin.clone(),
         });
     }
@@ -63,7 +64,8 @@ fn native_host_install_targets(chrome_extension_id: &str, edge_extension_id: &st
 
     #[cfg(target_os = "windows")]
     {
-        let local = dirs::data_local_dir().ok_or_else(|| "local app data unavailable".to_string())?;
+        let local =
+            dirs::data_local_dir().ok_or_else(|| "local app data unavailable".to_string())?;
         targets.push(NativeHostTarget {
             dir: local.join("Google/Chrome/User Data/NativeMessagingHosts"),
             origin: format!("chrome-extension://{chrome_extension_id}/"),

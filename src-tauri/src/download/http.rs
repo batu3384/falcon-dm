@@ -1,6 +1,6 @@
 use crate::download::http_client::{
-    add_request_headers, resolve_resource, split_byte_ranges, with_pinned_clients, ResolvedResource,
-    MAX_HTTP_BYTES, MAX_REDIRECTS, MIN_PARALLEL_BYTES,
+    add_request_headers, resolve_resource, split_byte_ranges, with_pinned_clients,
+    ResolvedResource, MAX_HTTP_BYTES, MAX_REDIRECTS, MIN_PARALLEL_BYTES,
 };
 use crate::storage::{models::DownloadStatus, Database};
 use crate::util::{copy_file_exclusive, validate_fetch_url_async};
@@ -242,13 +242,9 @@ async fn download_http_segment(
         let headers = headers.clone();
         let range_header = range_header.clone();
         async move {
-            let request = add_request_headers(
-                client.get(final_url.clone()),
-                &initial,
-                &final_url,
-                &headers,
-            )
-            .header(RANGE, range_header);
+            let request =
+                add_request_headers(client.get(final_url.clone()), &initial, &final_url, &headers)
+                    .header(RANGE, range_header);
             request.send().await.map_err(|e| format!("HTTP segment failed: {e}"))
         }
     })
@@ -530,14 +526,8 @@ async fn process_http_single(
             return Err("HTTP response exceeds maximum download size".into());
         }
         file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        apply_speed_limit(
-            headers.options.speed_limit_kbps,
-            baseline,
-            downloaded,
-            started,
-            &cancel,
-        )
-        .await?;
+        apply_speed_limit(headers.options.speed_limit_kbps, baseline, downloaded, started, &cancel)
+            .await?;
         let speed =
             downloaded.saturating_sub(baseline) as f64 / started.elapsed().as_secs_f64().max(0.001);
         emit_progress(

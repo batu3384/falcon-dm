@@ -1,6 +1,4 @@
-use crate::util::{
-    sanitize_header_value, validate_fetch_url_async, with_pinned_http_clients,
-};
+use crate::util::{sanitize_header_value, validate_fetch_url_async, with_pinned_http_clients};
 use reqwest::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE};
 use reqwest::{Client, StatusCode};
 use std::time::Duration;

@@ -109,8 +109,12 @@ async fn send_hls_request(
                 let current = current.clone();
                 let headers = headers.clone();
                 async move {
-                    let request =
-                        apply_hls_request_headers(client.get(current.clone()), &source, &current, &headers);
+                    let request = apply_hls_request_headers(
+                        client.get(current.clone()),
+                        &source,
+                        &current,
+                        &headers,
+                    );
                     request.send().await.map_err(|e| e.to_string())
                 }
             },

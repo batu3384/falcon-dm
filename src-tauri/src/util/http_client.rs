@@ -49,7 +49,8 @@ where
     let addresses = super::resolve_public_addresses_async(url).await?;
     let mut last_err = "HTTP request failed".to_string();
     for addr in addresses {
-        let client = build_pinned_http_client(url, Some(addr), proxy, timeout, default_headers.clone())?;
+        let client =
+            build_pinned_http_client(url, Some(addr), proxy, timeout, default_headers.clone())?;
         match op(client).await {
             Ok(value) => return Ok(value),
             Err(err) if retryable_network_error(&err) => last_err = err,

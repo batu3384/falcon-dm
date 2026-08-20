@@ -18,8 +18,8 @@ use native_messaging::PairProofStore;
 use serde::Deserialize;
 use settings::Settings;
 use storage::models::{Download, DownloadCategory, DownloadStatus};
-use storage::InsertDownloadResult;
 use storage::Database;
+use storage::InsertDownloadResult;
 use tauri::{AppHandle, Emitter, Manager};
 use util::{
     app_data_dir, default_download_dir, full_file_path, is_hls_url, is_junk_media_url,

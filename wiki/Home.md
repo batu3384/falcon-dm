@@ -14,6 +14,7 @@ Falcon DM is a local-only macOS download manager for HTTP(S), HLS, and YouTube â
 | [Security](Security) | Threat model and hardening |
 | [Troubleshooting](Troubleshooting) | Common issues |
 | [FAQ](FAQ) | Short answers |
+| [Roadmap](Roadmap) | Now / Next / Later milestones |
 
 ## Repository
 
