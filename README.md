@@ -142,7 +142,7 @@ npm run tauri build    # .app / .dmg (see release.yml for signed builds)
 
 ## Development & contributing
 
-Details: [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md) (no public issues for vulns).
+Details: [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md) (no public issues for vulns). Extended docs: [Wiki](https://github.com/batu3384/falcon-dm/wiki) (source in [`wiki/`](wiki/)).
 
 ```bash
 # Frontend
