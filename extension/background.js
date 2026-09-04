@@ -1,16 +1,16 @@
-importScripts("media-utils.js", "shared.js", "pairing.js", "api.js");
+importScripts('media-utils.js', 'shared.js', 'pairing.js', 'api.js');
 
 function setupMenus() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
-      id: "download_with_falcon",
-      title: msg("contextDownload", "Download with Falcon DM"),
-      contexts: ["link", "image", "video", "audio"],
+      id: 'download_with_falcon',
+      title: msg('contextDownload', 'Download with Falcon DM'),
+      contexts: ['link', 'image', 'video', 'audio'],
     });
     chrome.contextMenus.create({
-      id: "grab_page_links",
-      title: msg("contextGrabber", "Grab page links with Falcon"),
-      contexts: ["page"],
+      id: 'grab_page_links',
+      title: msg('contextGrabber', 'Grab page links with Falcon'),
+      contexts: ['page'],
     });
   });
 }
@@ -19,10 +19,10 @@ chrome.runtime.onInstalled.addListener(() => {
   setupMenus();
   refreshBadge();
   ensurePaired(true).catch(() => {
-    setState("offline");
+    setState('offline');
     notify(
-      msg("appName", "Falcon DM"),
-      msg("popupOnboard", "Open Falcon DM and approve this extension in Settings")
+      msg('appName', 'Falcon DM'),
+      msg('popupOnboard', 'Open Falcon DM and approve this extension in Settings'),
     );
   });
 });
@@ -50,14 +50,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 function headerValue(headers, name) {
   const h = (headers || []).find((x) => x.name.toLowerCase() === name.toLowerCase());
-  return h ? h.value : "";
+  return h ? h.value : '';
 }
 
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     const url = details.url;
-    const ct = headerValue(details.responseHeaders, "content-type").toLowerCase();
-    const cl = parseInt(headerValue(details.responseHeaders, "content-length"), 10) || 0;
+    const ct = headerValue(details.responseHeaders, 'content-type').toLowerCase();
+    const cl = parseInt(headerValue(details.responseHeaders, 'content-length'), 10) || 0;
 
     if (!self.FalconMedia || !self.FalconMedia.isCapturableMedia(url, ct)) return;
 
@@ -74,7 +74,7 @@ chrome.webRequest.onHeadersReceived.addListener(
       // Keep largest content-length seen for this URL
       metaMap.set(clean, {
         contentLength: Math.max(cl, (prev && prev.contentLength) || 0),
-        contentType: ct || (prev && prev.contentType) || "",
+        contentType: ct || (prev && prev.contentType) || '',
         ts: Date.now(),
       });
       MEDIA_META.set(details.tabId, metaMap);
@@ -83,8 +83,8 @@ chrome.webRequest.onHeadersReceived.addListener(
       ensureContentScript(details.tabId);
     }
   },
-  { urls: ["<all_urls>"] },
-  ["responseHeaders"]
+  { urls: ['<all_urls>'] },
+  ['responseHeaders'],
 );
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
@@ -97,69 +97,69 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
     try {
       const cookiesHeader = await getCookiesHeader(item.url);
 
-      const filename =
-        item.filename ||
-        item.url.split("/").pop().split("?")[0] ||
-        "download";
+      const filename = item.filename || item.url.split('/').pop().split('?')[0] || 'download';
 
-      await sendToFalcon("/api/add", {
+      await sendToFalcon('/api/add', {
         url: item.url,
         filename,
-        referrer: item.referrer || "",
+        referrer: item.referrer || '',
         user_agent: navigator.userAgent,
         cookies: cookiesHeader,
         cookie_url: item.url,
       });
       suggest({ cancel: true });
-      notify("Falcon DM", msg("sentToApp", "Download sent to Falcon DM"));
+      notify('Falcon DM', msg('sentToApp', 'Download sent to Falcon DM'));
     } catch (e) {
       console.error(e);
       suggest({ cancel: false });
-      notify("Falcon DM", e.message || msg("appClosedFallback", "Falcon DM offline — browser download kept"));
+      notify(
+        'Falcon DM',
+        e.message || msg('appClosedFallback', 'Falcon DM offline — browser download kept'),
+      );
     }
   })();
   return true;
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId === "download_with_falcon") {
+  if (info.menuItemId === 'download_with_falcon') {
     const url = info.linkUrl || info.srcUrl;
     if (!url) return;
-    const filename = url.split("/").pop().split("?")[0] || "download";
+    const filename = url.split('/').pop().split('?')[0] || 'download';
     try {
       const cookiesHeader = await getCookiesHeader(url);
-      await sendToFalcon("/api/add", {
+      await sendToFalcon('/api/add', {
         url,
         filename,
-        referrer: info.pageUrl || "",
+        referrer: info.pageUrl || '',
         user_agent: navigator.userAgent,
         cookies: cookiesHeader,
         cookie_url: url,
       });
-      notify("Falcon DM", msg("sentToApp", "Download sent to Falcon DM"));
+      notify('Falcon DM', msg('sentToApp', 'Download sent to Falcon DM'));
     } catch (e) {
       console.error(e);
-      notify("Falcon DM", e.message || msg("errorAppOffline", "Failed"));
+      notify('Falcon DM', e.message || msg('errorAppOffline', 'Failed'));
     }
   }
 
-  if (info.menuItemId === "grab_page_links" && tab?.id) {
+  if (info.menuItemId === 'grab_page_links' && tab?.id) {
     ensureContentScript(tab.id).then(() => {
-      chrome.tabs.sendMessage(tab.id, { action: "open_grabber" });
+      chrome.tabs.sendMessage(tab.id, { action: 'open_grabber' });
     });
   }
 });
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // --- popup: live status + queue preview ---
-  if (request.action === "check_status") {
+  if (request.action === 'check_status') {
     (async () => {
       const healthy = await appHealthy();
       if (healthy) {
         const token = await getToken();
-        setState(token ? "connected" : "pending");
+        setState(token ? 'connected' : 'pending');
       } else {
-        setState("offline");
+        setState('offline');
       }
       sendResponse({
         state: connectionState,
@@ -170,7 +170,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  if (request.action === "get_status") {
+  if (request.action === 'get_status') {
     sendResponse({
       state: connectionState,
       paused: interceptPaused,
@@ -179,7 +179,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  if (request.action === "set_paused") {
+  if (request.action === 'set_paused') {
     const next = !!request.paused;
     // Respond immediately, then durably persist so an MV3 SW restart keeps the
     // user's hijack preference (previously a SW restart would reset to false).
@@ -190,20 +190,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   // --- popup: download current tab's media (inject overlay + open picker) ---
-  if (request.action === "grab_tab_media") {
+  if (request.action === 'grab_tab_media') {
     (async () => {
       try {
         const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         if (!active || !active.id) {
-          sendResponse({ ok: false, error: msg("errorInvalidUrl", "No active tab") });
+          sendResponse({ ok: false, error: msg('errorInvalidUrl', 'No active tab') });
           return;
         }
         const injected = await ensureContentScript(active.id);
         if (!injected) {
-          sendResponse({ ok: false, error: msg("errorMediaUtils", "Cannot run on this page") });
+          sendResponse({ ok: false, error: msg('errorMediaUtils', 'Cannot run on this page') });
           return;
         }
-        chrome.tabs.sendMessage(active.id, { action: "open_download_modal" }, () => {
+        chrome.tabs.sendMessage(active.id, { action: 'open_download_modal' }, () => {
           if (chrome.runtime.lastError) {
             sendResponse({ ok: false, error: chrome.runtime.lastError.message });
           } else {
@@ -218,18 +218,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   // --- popup: download an arbitrary URL via /api/add ---
-  if (request.action === "add_url") {
-    const rawUrl = (request.url || "").trim();
+  if (request.action === 'add_url') {
+    const rawUrl = (request.url || '').trim();
     if (!rawUrl || !/^https?:/i.test(rawUrl)) {
-      sendResponse({ success: false, error: msg("errorInvalidUrl", "No valid URL") });
+      sendResponse({ success: false, error: msg('errorInvalidUrl', 'No valid URL') });
       return true;
     }
     (async () => {
       try {
         const cookies = await getCookiesHeader(rawUrl);
-        await sendToFalcon("/api/add", {
+        await sendToFalcon('/api/add', {
           url: rawUrl,
-          filename: rawUrl.split("/").pop().split("?")[0] || "download",
+          filename: rawUrl.split('/').pop().split('?')[0] || 'download',
           referrer: rawUrl,
           user_agent: navigator.userAgent,
           cookies,
@@ -243,12 +243,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  if (request.action === "get_real_media_url") {
+  if (request.action === 'get_real_media_url') {
     const tabId = sender.tab ? sender.tab.id : -1;
     const set = MEDIA_URLS.get(tabId);
     const urls = set ? Array.from(set) : [];
-    const pageUrl = (sender.tab && sender.tab.url) || request.page_url || "";
-    const title = (sender.tab && sender.tab.title) || "";
+    const pageUrl = (sender.tab && sender.tab.url) || request.page_url || '';
+    const title = (sender.tab && sender.tab.title) || '';
 
     const metaMap = {};
     const rawMeta = MEDIA_META.get(tabId);
@@ -265,19 +265,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         urls: merged,
         metaMap,
         title,
-        cookies: "",
+        cookies: '',
         userAgent: navigator.userAgent,
       });
     };
 
     // Pull YouTube player_response from MAIN world (isolated world cannot see it)
-    const isYt =
-      /youtube\.com|youtu\.be/i.test(pageUrl) && tabId > -1 && chrome.scripting;
+    const isYt = /youtube\.com|youtu\.be/i.test(pageUrl) && tabId > -1 && chrome.scripting;
     if (isYt) {
       chrome.scripting
         .executeScript({
           target: { tabId },
-          world: "MAIN",
+          world: 'MAIN',
           func: () => {
             const out = [];
             const pushPr = (pr) => {
@@ -291,12 +290,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             try {
               const cfg = window.ytplayer?.config?.args;
               let raw = cfg?.player_response || cfg?.raw_player_response;
-              if (typeof raw === "string") raw = JSON.parse(raw);
+              if (typeof raw === 'string') raw = JSON.parse(raw);
               pushPr(raw);
             } catch (_) {}
             try {
-              const el = document.getElementById("movie_player");
-              if (el && typeof el.getPlayerResponse === "function") {
+              const el = document.getElementById('movie_player');
+              if (el && typeof el.getPlayerResponse === 'function') {
                 pushPr(el.getPlayerResponse());
               }
             } catch (_) {}
@@ -315,12 +314,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  if (request.action === "check_connection") {
+  if (request.action === 'check_connection') {
     (async () => {
       try {
         await ensureAppRunning();
         await ensurePaired(true);
-        await postFalcon("/api/ping", {});
+        await postFalcon('/api/ping', {});
         sendResponse({ ok: true });
       } catch (e) {
         sendResponse({ ok: false, error: e.message });
@@ -329,7 +328,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  if (request.action === "auto_pair") {
+  if (request.action === 'auto_pair') {
     ensureAppRunning()
       .then(() => ensurePaired(true))
       .then(() => sendResponse({ ok: true }))
@@ -337,12 +336,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  if (request.action === "download_video" || request.action === "download_url") {
-    const rawUrl = (request.url || "").trim();
-    if (!rawUrl || rawUrl.startsWith("blob:")) {
+  if (request.action === 'download_video' || request.action === 'download_url') {
+    const rawUrl = (request.url || '').trim();
+    if (!rawUrl || rawUrl.startsWith('blob:')) {
       sendResponse({
         success: false,
-        error: msg("errorNoValidSource", "No downloadable URL found — play the video and try again"),
+        error: msg(
+          'errorNoValidSource',
+          'No downloadable URL found — play the video and try again',
+        ),
       });
       return true;
     }
@@ -350,7 +352,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (self.FalconMedia && self.FalconMedia.isJunkUrl(rawUrl)) {
       sendResponse({
         success: false,
-        error: msg("errorJunkUrl", "Bu adres gerçek video değil (YouTube UI sesi) — videoyu oynatıp tekrar dene"),
+        error: msg(
+          'errorJunkUrl',
+          'Bu adres gerçek video değil (YouTube UI sesi) — videoyu oynatıp tekrar dene',
+        ),
       });
       return true;
     }
@@ -362,16 +367,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     (async () => {
       const cookies = await getCookiesHeader(url);
-      sendToFalcon("/api/intercept", {
+      sendToFalcon('/api/intercept', {
         url,
         page_url: request.page_url,
-        title: request.title || "",
+        title: request.title || '',
         cookies,
         cookie_url: url,
         user_agent: request.user_agent || navigator.userAgent,
         referer: request.page_url,
         filename: request.filename || null,
-        media_type: request.media_type || "application/octet-stream",
+        media_type: request.media_type || 'application/octet-stream',
         format: request.format || null,
       })
         .then((data) => sendResponse({ success: true, data }))
@@ -380,17 +385,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  if (request.action === "batch_download") {
+  if (request.action === 'batch_download') {
     const items = (request.items || []).slice(0, 20);
     (async () => {
       const settled = await Promise.allSettled(
         items.map(async (it) => {
           try {
             const cookies = await getCookiesHeader(it.url);
-            const data = await sendToFalcon("/api/add", {
+            const data = await sendToFalcon('/api/add', {
               url: it.url,
-              filename: it.filename || it.url.split("/").pop().split("?")[0] || "download",
-              referrer: request.page_url || "",
+              filename: it.filename || it.url.split('/').pop().split('?')[0] || 'download',
+              referrer: request.page_url || '',
               user_agent: navigator.userAgent,
               cookies,
               cookie_url: it.url,
@@ -407,12 +412,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               error: error?.message || String(error),
             };
           }
-        })
+        }),
       );
       const results = settled.map((result, index) =>
-        result.status === "fulfilled"
+        result.status === 'fulfilled'
           ? result.value
-          : { url: items[index].url, ok: false, error: result.reason?.message || String(result.reason) }
+          : {
+              url: items[index].url,
+              ok: false,
+              error: result.reason?.message || String(result.reason),
+            },
       );
       sendResponse({
         success: results.every((result) => result.ok),

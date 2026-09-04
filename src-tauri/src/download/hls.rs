@@ -585,8 +585,15 @@ mod tests {
 
     #[test]
     fn test_pick_best_variant_bandwidth() {
-        // Smoke: empty → None
         assert!(pick_best_variant(&[]).is_none());
+        let playlist = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nlow.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2500000\nhigh.m3u8\n";
+        let parsed = m3u8_rs::parse_playlist_res(playlist).expect("master playlist");
+        let m3u8_rs::Playlist::MasterPlaylist(master) = parsed else {
+            panic!("expected master");
+        };
+        let best = pick_best_variant(&master.variants).expect("variant");
+        assert_eq!(best.bandwidth, 2_500_000);
+        assert!(best.uri.contains("high.m3u8"));
     }
 
     #[test]
@@ -612,5 +619,98 @@ mod tests {
         let (tx, mut rx) = tokio::sync::watch::channel(false);
         tx.send(true).unwrap();
         assert!(cancellation_requested(&mut rx).await);
+    }
+
+    async fn spawn_hls_fixture() -> (String, Vec<u8>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let seg0 = b"SEG0DATA".to_vec();
+        let seg1 = b"SEG1DATA".to_vec();
+        let expected: Vec<u8> = [seg0.as_slice(), seg1.as_slice()].concat();
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nlow.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2500000\nhigh.m3u8\n";
+        let media = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:1.0,\nseg0.ts\n#EXTINF:1.0,\nseg1.ts\n#EXT-X-ENDLIST\n";
+        let mut files = std::collections::HashMap::new();
+        files.insert("/master.m3u8".to_string(), master.to_vec());
+        files.insert("/high.m3u8".to_string(), media.to_vec());
+        files.insert("/seg0.ts".to_string(), seg0);
+        files.insert("/seg1.ts".to_string(), seg1);
+        let files = std::sync::Arc::new(files);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let files = files.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let Ok(n) = sock.read(&mut buf).await else {
+                        return;
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/");
+                    let Some(body) = files.get(path) else {
+                        let _ = sock.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                        return;
+                    };
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(header.as_bytes()).await;
+                    let _ = sock.write_all(body).await;
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{}", addr.port()), expected)
+    }
+
+    #[tokio::test]
+    async fn hls_master_picks_best_and_downloads_segments() {
+        let (base, expected) = spawn_hls_fixture().await;
+        let master = format!("{base}/master.m3u8");
+        let _g = crate::util::allow_loopback_for_tests();
+        let source = Url::parse(&master).unwrap();
+        let bytes = read_bounded_response(
+            send_hls_request(&source, &source, &HlsHeaders::default()).await.unwrap(),
+            MAX_PLAYLIST_BYTES,
+        )
+        .await
+        .unwrap();
+        let Playlist::MasterPlaylist(pl) = m3u8_rs::parse_playlist_res(&bytes).unwrap() else {
+            panic!("expected master");
+        };
+        let variant = pick_best_variant(&pl.variants).unwrap();
+        assert!(variant.uri.contains("high.m3u8"));
+        let variant_url = source.join(&variant.uri).unwrap();
+        let media_bytes = read_bounded_response(
+            send_hls_request(&source, &variant_url, &HlsHeaders::default()).await.unwrap(),
+            MAX_PLAYLIST_BYTES,
+        )
+        .await
+        .unwrap();
+        let Playlist::MediaPlaylist(media) = m3u8_rs::parse_playlist_res(&media_bytes).unwrap()
+        else {
+            panic!("expected media");
+        };
+        let mut assembled = Vec::new();
+        for seg in media.segments {
+            let seg_url = variant_url.join(&seg.uri).unwrap();
+            let body = read_bounded_response(
+                send_hls_request(&source, &seg_url, &HlsHeaders::default()).await.unwrap(),
+                MAX_SEGMENT_BYTES,
+            )
+            .await
+            .unwrap();
+            assembled.extend(body);
+        }
+        assert_eq!(assembled, expected);
     }
 }

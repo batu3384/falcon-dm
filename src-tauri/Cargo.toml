@@ -5,6 +5,14 @@ description = "A Tauri App"
 authors = ["Falcon DM contributors"]
 edition = "2021"
 license = "MIT"
+default-run = "falcon-dm"
+
+# Slim native-host crate must stay a workspace member so it does not link
+# Tauri/AppKit. Chrome-spawned AppKit hosts hang on sendNativeMessage.
+[workspace]
+resolver = "2"
+members = ["crates/falcon-native-host"]
+default-members = [".", "crates/falcon-native-host"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

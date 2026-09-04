@@ -144,8 +144,16 @@ describe('diagnostic payload schemas', () => {
       failed: 4,
       total_downloaded_bytes: 5,
       current_speed: 6,
+      all: 10,
+      archived: 1,
+      video: 2,
+      music: 0,
+      document: 0,
+      archive: 0,
+      program: 0,
     };
     expect(DownloadStatsSchema.parse(stats).active).toBe(1);
+    expect(DownloadStatsSchema.parse(stats).all).toBe(10);
     expect(() => DownloadStatsSchema.parse({ ...stats, active: '1' })).toThrow();
   });
 
@@ -158,6 +166,13 @@ describe('diagnostic payload schemas', () => {
       failed: 4,
       total_downloaded_bytes: 5,
       current_speed: 6,
+      all: 10,
+      archived: 1,
+      video: 2,
+      music: 0,
+      document: 0,
+      archive: 0,
+      program: 0,
     };
     expect(() => DownloadStatsSchema.parse({ ...stats, active: -1 })).toThrow();
     expect(() => DownloadStatsSchema.parse({ ...stats, current_speed: Number.NaN })).toThrow();

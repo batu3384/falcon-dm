@@ -111,6 +111,13 @@ export const DownloadStatsSchema = z.object({
   failed: z.number().int().nonnegative(),
   total_downloaded_bytes: z.number().finite().nonnegative(),
   current_speed: z.number().finite().nonnegative(),
+  all: z.number().int().nonnegative(),
+  archived: z.number().int().nonnegative(),
+  video: z.number().int().nonnegative(),
+  music: z.number().int().nonnegative(),
+  document: z.number().int().nonnegative(),
+  archive: z.number().int().nonnegative(),
+  program: z.number().int().nonnegative(),
 });
 
 export type DownloadStatus = z.infer<typeof DownloadStatusEnum>;

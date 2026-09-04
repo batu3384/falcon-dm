@@ -34,8 +34,10 @@
   "downloadList": {
     "no_downloads": "İndirme bulunamadı",
     "no_downloads_desc": "Bu kategoride henüz hiçbir indirme işlemi yok.",
-    "no_search_results": "Sonuç bulunamadı",
-    "no_search_desc": "Aramanla eşleşen indirme yok.",
+    "no_search_results": "Eşleşme yok",
+    "no_search_desc": "Farklı bir dosya adı veya URL dene.",
+    "empty_failed": "Başarısız indirme yok",
+    "empty_failed_desc": "Hata alan transferler burada görünür.",
     "add_cta": "İndirme Ekle",
     "loading": "İndirmeler yükleniyor…",
     "load_error": "İndirmeler kullanılamıyor",
@@ -121,7 +123,9 @@
     "speed_limit_set": "Hız limiti: {{limit}} KB/s",
     "load_more": "Daha fazla yükle",
     "loading_more": "Yükleniyor…",
-    "skip_to_content": "İçeriğe geç"
+    "skip_to_content": "İçeriğe geç",
+    "dismiss": "Kapat",
+    "toasts": "Bildirimler"
   },
   "newDownloadModal": {
     "title": "Yeni İndirme Ekle",
@@ -186,6 +190,7 @@
     "saving": "Kaydediliyor...",
     "saved": "Ayarlar kaydedildi",
     "save_failed": "Ayarlar kaydedilemedi",
+    "load_failed": "Ayarlar yüklenemedi",
     "confirm_close": "Kaydedilmemiş ayar değişiklikleri silinsin mi?",
     "discard": "Değişiklikleri sil",
     "continue_editing": "Düzenlemeye devam et",

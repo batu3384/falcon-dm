@@ -89,6 +89,14 @@ verify_binary_arch() {
   fi
 }
 
+# Homebrew copies break after Cellar path changes. Re-provision if -version fails.
+sidecar_runs() {
+  local file="$1"
+  shift
+  [[ -x "$file" ]] || return 1
+  "$file" "$@" >/dev/null 2>&1
+}
+
 main() {
   local script_root
   script_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -127,12 +135,16 @@ main() {
 
   # ----- aria2c -----
   local aria2_bin="$binary_dir/aria2c-$target_triple"
-  if [[ -x "$aria2_bin" ]]; then
+  if [[ -x "$aria2_bin" ]] && sidecar_runs "$aria2_bin" --version; then
     if [[ -n "$aria2_sha256" ]]; then
       verify_sha256 "$aria2_bin" "$aria2_sha256"
     fi
     echo "  aria2c already present, skipping"
   else
+    if [[ -x "$aria2_bin" ]]; then
+      echo "  aria2c present but broken — re-provisioning"
+      rm -f "$aria2_bin"
+    fi
     echo "  aria2c missing — provisioning from Homebrew"
     local brew_bin
     if [[ "$arch" == "aarch64" ]]; then
@@ -157,7 +169,7 @@ main() {
  
   # ----- ffmpeg -----
   local ffmpeg_bin="$binary_dir/ffmpeg-$target_triple"
-  if [[ -x "$ffmpeg_bin" ]]; then
+  if [[ -x "$ffmpeg_bin" ]] && sidecar_runs "$ffmpeg_bin" -version; then
     if [[ "$arch" == "x86_64" && -z "$ffmpeg_sha256" ]]; then
       echo "  ERROR: FFMPEG_SHA256 is required to verify an Intel download" >&2
       exit 1
@@ -167,6 +179,10 @@ main() {
     fi
     echo "  ffmpeg already present, skipping"
   else
+    if [[ -x "$ffmpeg_bin" ]]; then
+      echo "  ffmpeg present but broken — re-provisioning"
+      rm -f "$ffmpeg_bin"
+    fi
     echo "  ffmpeg missing — provisioning"
     if [[ "$arch" == "aarch64" ]]; then
       local brew_bin="/opt/homebrew/bin/ffmpeg"

@@ -142,22 +142,32 @@ pub fn start_pairing_server(
     use tokio::net::UnixListener;
 
     let path = socket_path(data_dir);
-    let listener = match UnixListener::bind(&path) {
+    // ponytail: Tokio UnixListener::bind needs a reactor. Tauri .setup() runs on
+    // the macOS UI thread without one — bind there panics. std bind is sync.
+    let std_listener = match std::os::unix::net::UnixListener::bind(&path) {
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             if std::os::unix::net::UnixStream::connect(&path).is_ok() {
                 return Err("native pairing server is already running".into());
             }
             std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-            UnixListener::bind(&path).map_err(|e| e.to_string())?
+            std::os::unix::net::UnixListener::bind(&path).map_err(|e| e.to_string())?
         }
         Err(error) => return Err(error.to_string()),
     };
+    std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| e.to_string())?;
 
     let clients = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_PAIR_CLIENTS));
     tauri::async_runtime::spawn(async move {
+        let listener = match UnixListener::from_std(std_listener) {
+            Ok(listener) => listener,
+            Err(error) => {
+                log::error!("native pairing tokio wrap failed: {error}");
+                return;
+            }
+        };
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 break;
@@ -262,5 +272,25 @@ mod tests {
         store.issue("newest", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(store.len(), MAX_PAIR_PROOFS);
         assert!(!store.consume("challenge-0", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_pairing_server_does_not_panic_without_caller_runtime() {
+        let dir = PathBuf::from(format!(
+            "/tmp/fdm-p-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = std::sync::Arc::new(PairProofStore::default());
+        let result = std::thread::spawn({
+            let dir = dir.clone();
+            move || start_pairing_server(&dir, store)
+        })
+        .join()
+        .expect("caller thread panicked");
+        assert!(result.is_ok(), "{result:?}");
+        let _ = std::fs::remove_file(socket_path(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

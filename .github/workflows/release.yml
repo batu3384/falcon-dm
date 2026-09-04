@@ -55,7 +55,7 @@ jobs:
 
       - name: Build native messaging host
         working-directory: src-tauri
-        run: cargo build --bin falcon-dm-native-host --target ${{ matrix.target }} --release
+        run: cargo build -p falcon-dm-native-host --target ${{ matrix.target }} --release
 
       - name: Bundle native messaging host
         run: |

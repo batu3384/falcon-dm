@@ -34,19 +34,14 @@ export function ConfirmDialog({
     >
       <div
         ref={panelRef}
-        className="modal-panel"
-        style={{ width: 380 }}
+        className="modal-panel modal-sm"
         onClick={(e) => e.stopPropagation()}
         role="alertdialog"
         aria-modal="true"
         aria-describedby="confirm-msg"
       >
         <div className="modal-body">
-          <p
-            id="confirm-msg"
-            className="field-hint"
-            style={{ margin: 0, color: 'inherit', fontSize: 14 }}
-          >
+          <p id="confirm-msg" className="confirm-msg">
             {message}
           </p>
         </div>
@@ -56,8 +51,7 @@ export function ConfirmDialog({
           </button>
           <button
             type="button"
-            className="btn-primary"
-            style={danger ? { background: 'var(--danger)' } : undefined}
+            className={`btn-primary${danger ? ' danger' : ''}`}
             onClick={onConfirm}
           >
             {confirmLabel || t('inspector.remove')}

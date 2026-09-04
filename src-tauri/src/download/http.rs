@@ -88,7 +88,7 @@ async fn redirect_target(base: &Url, location: &str) -> Result<Url, String> {
 }
 
 fn emit_progress(
-    app_handle: &AppHandle,
+    app_handle: Option<&AppHandle>,
     download_id: i64,
     downloaded: u64,
     total: u64,
@@ -104,17 +104,19 @@ fn emit_progress(
             &DownloadStatus::Downloading,
         );
     }
-    let _ = app_handle.emit(
-        "download-progress",
-        serde_json::json!({
-            "id": download_id,
-            "downloaded_size": downloaded,
-            "total_size": total.max(downloaded),
-            "speed": speed,
-            "status": "Downloading",
-            "connections": connections
-        }),
-    );
+    if let Some(app) = app_handle {
+        let _ = app.emit(
+            "download-progress",
+            serde_json::json!({
+                "id": download_id,
+                "downloaded_size": downloaded,
+                "total_size": total.max(downloaded),
+                "speed": speed,
+                "status": "Downloading",
+                "connections": connections
+            }),
+        );
+    }
 }
 
 pub(crate) fn range_byte_length(start: u64, end: u64) -> u64 {
@@ -256,7 +258,7 @@ async fn download_http_segment(
 }
 
 async fn process_http_parallel(
-    app_handle: &AppHandle,
+    app_handle: Option<&AppHandle>,
     download_id: i64,
     resource: ResolvedResource,
     out_path: &str,
@@ -284,7 +286,6 @@ async fn process_http_parallel(
 
     let results: Vec<Result<(), String>> = stream::iter(ranges.into_iter().enumerate())
         .map(|(index, (start, end))| {
-            let app_handle = app_handle.clone();
             let headers = headers.clone();
             let proxy = proxy.clone();
             let initial = initial.clone();
@@ -320,7 +321,7 @@ async fn process_http_parallel(
                     downloaded_bytes.fetch_add(chunk_len, Ordering::SeqCst) + chunk_len;
                 let speed = downloaded as f64 / started.elapsed().as_secs_f64().max(0.001);
                 emit_progress(
-                    &app_handle,
+                    app_handle,
                     download_id,
                     downloaded,
                     resource.total_bytes,
@@ -377,7 +378,7 @@ async fn process_http_parallel(
 }
 
 async fn process_http_single(
-    app_handle: &AppHandle,
+    app_handle: Option<&AppHandle>,
     download_id: i64,
     url: &str,
     out_path: &str,
@@ -565,6 +566,18 @@ pub async fn process_http(
     headers: HttpHeaders,
     db: Option<Database>,
 ) -> Result<(), String> {
+    process_http_dispatch(Some(app_handle), download_id, url, out_path, cancel, headers, db).await
+}
+
+async fn process_http_dispatch(
+    app_handle: Option<&AppHandle>,
+    download_id: i64,
+    url: &str,
+    out_path: &str,
+    cancel: watch::Receiver<bool>,
+    headers: HttpHeaders,
+    db: Option<Database>,
+) -> Result<(), String> {
     let destination = PathBuf::from(out_path);
     let temp = temporary_path(&destination, download_id)?;
     let resume_from =
@@ -634,5 +647,171 @@ mod tests {
     fn part_path_uses_download_id() {
         let path = part_path_for("/tmp", "movie.mp4", 7).unwrap();
         assert!(path.ends_with(".movie.mp4.7.falcon.part"));
+    }
+
+    async fn spawn_range_server(payload: std::sync::Arc<Vec<u8>>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let payload = payload.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let Ok(n) = sock.read(&mut buf).await else {
+                        return;
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let method = req
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().next())
+                        .unwrap_or("GET");
+                    let range = req.lines().find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("range: bytes=")
+                            .map(|value| value.trim().to_string())
+                    });
+                    let last = payload.len() as u64 - 1;
+                    let (start, end, status, extra) = if let Some(spec) = range {
+                        let mut parts = spec.split('-');
+                        let start: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let end: u64 = parts
+                            .next()
+                            .filter(|s| !s.is_empty())
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(last);
+                        let end = end.min(last);
+                        (
+                            start,
+                            end,
+                            206,
+                            format!("Content-Range: bytes {start}-{end}/{}\r\n", payload.len()),
+                        )
+                    } else {
+                        (0, last, 200, String::new())
+                    };
+                    let body = &payload[start as usize..=end as usize];
+                    let reason = if status == 206 { "Partial Content" } else { "OK" };
+                    let header = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{extra}Connection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(header.as_bytes()).await;
+                    if method != "HEAD" {
+                        let _ = sock.write_all(body).await;
+                    }
+                });
+            }
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    #[tokio::test]
+    async fn parallel_range_segments_reassemble_payload() {
+        let payload: Vec<u8> = (0..4000u32).map(|i| (i % 251) as u8).collect();
+        let payload = std::sync::Arc::new(payload);
+        let base = spawn_range_server(payload.clone()).await;
+        let url = format!("{base}/file.bin");
+        let client =
+            reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let ranges = split_byte_ranges(payload.len() as u64, 4);
+        assert_eq!(ranges.len(), 4);
+        let tmp = std::env::temp_dir().join(format!("falcon-http-seg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (_tx, cancel) = watch::channel(false);
+        let gate = SpeedGate::new(0);
+        for (index, (start, end)) in ranges.iter().copied().enumerate() {
+            let response = client
+                .get(&url)
+                .header(RANGE, format!("bytes={start}-{end}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            let path = tmp.join(format!("seg_{index:02}"));
+            stream_segment_to_file(response, &path, range_byte_length(start, end), &cancel, &gate)
+                .await
+                .unwrap();
+        }
+        let mut assembled = Vec::new();
+        for index in 0..ranges.len() {
+            assembled.extend(std::fs::read(tmp.join(format!("seg_{index:02}"))).unwrap());
+        }
+        assert_eq!(assembled.as_slice(), payload.as_slice());
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn stream_segment_rejects_byte_count_mismatch() {
+        let payload = std::sync::Arc::new(vec![1u8, 2, 3, 4]);
+        let base = spawn_range_server(payload).await;
+        let client = reqwest::Client::new();
+        let response =
+            client.get(format!("{base}/x")).header(RANGE, "bytes=0-3").send().await.unwrap();
+        let tmp = std::env::temp_dir().join(format!("falcon-http-bad-{}", uuid::Uuid::new_v4()));
+        let (_tx, cancel) = watch::channel(false);
+        let err = stream_segment_to_file(response, &tmp, 2, &cancel, &SpeedGate::new(0))
+            .await
+            .unwrap_err();
+        assert!(err.contains("exceeds range") || err.contains("mismatch"));
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    #[tokio::test]
+    async fn process_http_single_writes_loopback_payload() {
+        let payload: Vec<u8> = (0..4000u32).map(|i| (i % 251) as u8).collect();
+        let payload = std::sync::Arc::new(payload);
+        let base = spawn_range_server(payload.clone()).await;
+        let url = format!("{base}/file.bin");
+        let dest =
+            std::env::temp_dir().join(format!("falcon-http-single-{}.bin", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&dest);
+        let dest_str = dest.to_str().unwrap().to_string();
+        let (_tx, cancel) = watch::channel(false);
+        let _g = crate::util::allow_loopback_for_tests();
+        process_http_dispatch(
+            None,
+            42,
+            &url,
+            &dest_str,
+            cancel,
+            HttpHeaders { max_connections: 1, ..Default::default() },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), payload.as_slice());
+        let _ = std::fs::remove_file(dest);
+    }
+
+    #[tokio::test]
+    async fn process_http_parallel_reassembles_loopback_payload() {
+        let payload: Vec<u8> = (0..MIN_PARALLEL_BYTES as usize).map(|i| (i % 251) as u8).collect();
+        let payload = std::sync::Arc::new(payload);
+        let base = spawn_range_server(payload.clone()).await;
+        let url = format!("{base}/file.bin");
+        let dest =
+            std::env::temp_dir().join(format!("falcon-http-par-{}.bin", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&dest);
+        let dest_str = dest.to_str().unwrap().to_string();
+        let (_tx, cancel) = watch::channel(false);
+        let _g = crate::util::allow_loopback_for_tests();
+        process_http_dispatch(
+            None,
+            43,
+            &url,
+            &dest_str,
+            cancel,
+            HttpHeaders { max_connections: 4, ..Default::default() },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap().as_slice(), payload.as_slice());
+        let _ = std::fs::remove_file(dest);
     }
 }

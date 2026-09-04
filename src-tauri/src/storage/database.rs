@@ -543,11 +543,17 @@ mod tests {
         let mut paused = create_test_download("paused.bin");
         paused.status = DownloadStatus::Paused;
         paused.downloaded_size = 10;
+        paused.category = DownloadCategory::Video;
         db.insert_download(&paused).unwrap();
-        let (active, queued, paused_count, completed, failed, bytes, _speed) =
-            db.download_stats().unwrap();
-        assert_eq!((active, queued, paused_count, completed, failed), (0, 0, 1, 0, 0));
-        assert_eq!(bytes, 10);
+        let stats = db.download_stats().unwrap();
+        assert_eq!(
+            (stats.active, stats.queued, stats.paused, stats.completed, stats.failed),
+            (0, 0, 1, 0, 0)
+        );
+        assert_eq!(stats.total_downloaded_bytes, 10);
+        assert_eq!(stats.all, 1);
+        assert_eq!(stats.video, 1);
+        assert_eq!(stats.archived, 0);
     }
 
     #[test]

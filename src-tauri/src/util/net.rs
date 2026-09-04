@@ -1,6 +1,45 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use super::path::sanitize_filename;
+
+// ponytail: test-only loopback exception. Release builds never compile this.
+// Parallel-safe via thread_local (tokio::test is current_thread by default).
+// Allows 127.0.0.1/::1 only — RFC1918/CGNAT stay blocked.
+#[cfg(test)]
+thread_local! {
+    static ALLOW_LOOPBACK: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub struct LoopbackAllowGuard;
+
+#[cfg(test)]
+impl Drop for LoopbackAllowGuard {
+    fn drop(&mut self) {
+        ALLOW_LOOPBACK.with(|c| c.set(false));
+    }
+}
+
+#[cfg(test)]
+pub fn allow_loopback_for_tests() -> LoopbackAllowGuard {
+    ALLOW_LOOPBACK.with(|c| c.set(true));
+    LoopbackAllowGuard
+}
+
+fn loopback_exception(ip: std::net::IpAddr) -> bool {
+    #[cfg(test)]
+    {
+        ALLOW_LOOPBACK.with(|c| c.get()) && ip.is_loopback()
+    }
+    #[cfg(not(test))]
+    {
+        let _ = ip;
+        false
+    }
+}
 
 pub fn is_hls_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
@@ -14,6 +53,9 @@ pub fn is_hls_url(url: &str) -> bool {
 /// Covers loopback, RFC1918, link-local, unspecified, CGNAT (100.64.0.0/10),
 /// IPv6 ULA/link-local, and IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1).
 fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    if loopback_exception(ip) {
+        return false;
+    }
     match ip {
         std::net::IpAddr::V4(v4) => {
             v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || {
@@ -39,6 +81,10 @@ fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
 fn is_blocked_download_host(host: &str) -> bool {
     let h = host.trim().trim_matches('[').trim_matches(']').to_lowercase();
     if h == "localhost" {
+        #[cfg(test)]
+        if ALLOW_LOOPBACK.with(|c| c.get()) {
+            return false;
+        }
         return true;
     }
     if let Ok(ip) = h.parse::<std::net::IpAddr>() {
@@ -395,6 +441,19 @@ mod tests {
     fn public_resolution_rejects_private_addresses() {
         let private = url::Url::parse("https://127.0.0.1/file").unwrap();
         assert!(resolve_public_addresses(&private).is_err());
+    }
+
+    #[test]
+    fn loopback_allow_guard_unblocks_loopback_only() {
+        assert!(validate_download_url("http://127.0.0.1/x").is_err());
+        {
+            let _g = allow_loopback_for_tests();
+            assert!(validate_download_url("http://127.0.0.1/x").is_ok());
+            assert!(validate_download_url("http://localhost/x").is_ok());
+            assert!(validate_download_url("http://192.168.1.1/x").is_err());
+        }
+        assert!(validate_download_url("http://127.0.0.1/x").is_err());
+        assert!(validate_download_url("http://localhost/x").is_err());
     }
 
     #[test]

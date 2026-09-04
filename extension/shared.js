@@ -1,5 +1,5 @@
-const FALCON_API = "http://127.0.0.1:14201";
-const WAKE_URL = "falcondm://wake";
+const FALCON_API = 'http://127.0.0.1:14201';
+const WAKE_URL = 'falcondm://wake';
 const MEDIA_URLS = new Map();
 const MEDIA_META = new Map();
 let pairInFlight = null;
@@ -21,14 +21,12 @@ function withTimeout(promise, timeoutMs, label) {
 
 function fetchWithTimeout(url, options, timeoutMs, label) {
   const controller = new AbortController();
-  return withTimeout(
-    fetch(url, { ...options, signal: controller.signal }),
-    timeoutMs,
-    label
-  ).catch((error) => {
-    controller.abort();
-    throw error;
-  });
+  return withTimeout(fetch(url, { ...options, signal: controller.signal }), timeoutMs, label).catch(
+    (error) => {
+      controller.abort();
+      throw error;
+    },
+  );
 }
 
 // Connection / UI state shared with popup + toolbar badge.
@@ -37,7 +35,7 @@ function fetchWithTimeout(url, options, timeoutMs, label) {
 // is a durable user preference. We mirror it (and connectionState) into
 // chrome.storage.session so a SW restart restores the user's choice instead of
 // silently re-enabling download hijacking.
-let connectionState = "offline"; // "connected" | "pending" | "offline"
+let connectionState = 'offline'; // "connected" | "pending" | "offline"
 let interceptPaused = false; // when true, automatic hijack is off (browser downloads natively)
 const RECENT = []; // recent sends shown in the popup queue preview
 const INJECTED = new Set(); // tab ids that already have the on-demand content script
@@ -45,13 +43,12 @@ const INJECTED = new Set(); // tab ids that already have the on-demand content s
 // On SW startup, hydrate the durable preference from session storage.
 (async () => {
   try {
-    const { falconInterceptPaused, falconConnectionState } =
-      await chrome.storage.session.get({
-        falconInterceptPaused: false,
-        falconConnectionState: "offline",
-      });
+    const { falconInterceptPaused, falconConnectionState } = await chrome.storage.session.get({
+      falconInterceptPaused: false,
+      falconConnectionState: 'offline',
+    });
     interceptPaused = !!falconInterceptPaused;
-    connectionState = falconConnectionState || "offline";
+    connectionState = falconConnectionState || 'offline';
     refreshBadge();
   } catch (_) {}
 })();
@@ -61,17 +58,15 @@ function setState(s) {
   connectionState = s;
   refreshBadge();
   // Best-effort persist (non-blocking); SW restart will restore the badge.
-  chrome.storage.session
-    .set({ falconConnectionState: connectionState })
-    .catch(() => {});
+  chrome.storage.session.set({ falconConnectionState: connectionState }).catch(() => {});
 }
 
 /** Reflect connection state on the toolbar icon badge. */
 function refreshBadge() {
   const map = {
-    connected: { text: "✓", color: "#22c55e" },
-    pending: { text: "•", color: "#D97706" },
-    offline: { text: "", color: "#dc2626" },
+    connected: { text: '✓', color: '#22c55e' },
+    pending: { text: '•', color: '#D97706' },
+    offline: { text: '', color: '#dc2626' },
   };
   const b = map[connectionState] || map.offline;
   try {
@@ -81,12 +76,12 @@ function refreshBadge() {
 }
 
 function trackDownload(filename, url, kind) {
-  let host = "";
+  let host = '';
   try {
-    host = new URL(url).hostname.replace(/^www\./, "");
+    host = new URL(url).hostname.replace(/^www\./, '');
   } catch (_) {}
   RECENT.unshift({
-    filename: (filename || "download").slice(0, 80),
+    filename: (filename || 'download').slice(0, 80),
     host,
     ts: Date.now(),
     kind,
@@ -101,7 +96,7 @@ async function ensureContentScript(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ["media-utils.js", "content.js"],
+      files: ['media-utils.js', 'content.js'],
     });
     return true;
   } catch (_) {
@@ -111,17 +106,17 @@ async function ensureContentScript(tabId) {
 }
 
 async function getToken() {
-  const { apiToken } = await chrome.storage.local.get({ apiToken: "" });
-  return (apiToken || "").trim();
+  const { apiToken } = await chrome.storage.local.get({ apiToken: '' });
+  return (apiToken || '').trim();
 }
 
 async function appHealthy() {
   try {
     const r = await fetchWithTimeout(
       `${FALCON_API}/api/health`,
-      { method: "GET" },
+      { method: 'GET' },
       HEALTH_TIMEOUT_MS,
-      "Falcon health check"
+      'Falcon health check',
     );
     return r.ok;
   } catch {
@@ -157,31 +152,25 @@ async function waitForHealthy(timeoutMs = 25000) {
 /** Ensure Falcon is running — wake + poll like IDM. */
 async function ensureAppRunning() {
   if (await appHealthy()) return true;
-  await withTimeout(wakeFalcon(), 5000, "Falcon wake");
+  await withTimeout(wakeFalcon(), 5000, 'Falcon wake');
   return waitForHealthy(25000);
 }
 async function getCookiesHeader(url) {
-  if (!url) return "";
+  if (!url) return '';
   try {
-    const cookies = await withTimeout(
-      chrome.cookies.getAll({ url }),
-      3000,
-      "Cookie lookup"
-    );
+    const cookies = await withTimeout(chrome.cookies.getAll({ url }), 3000, 'Cookie lookup');
     if (cookies.length) {
-      return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+      return cookies.map((c) => `${c.name}=${c.value}`).join('; ');
     }
-  } catch (_) {
-  }
-  return "";
+  } catch (_) {}
+  return '';
 }
 
 function notify(title, message) {
   chrome.notifications.create({
-    type: "basic",
-    iconUrl: "icon128.png",
+    type: 'basic',
+    iconUrl: 'icon128.png',
     title,
     message,
   });
 }
-

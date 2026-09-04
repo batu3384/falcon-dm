@@ -326,20 +326,33 @@ pub(crate) struct DownloadStats {
     failed: u64,
     total_downloaded_bytes: u64,
     current_speed: f64,
+    all: u64,
+    archived: u64,
+    video: u64,
+    music: u64,
+    document: u64,
+    archive: u64,
+    program: u64,
 }
 
 #[tauri::command]
 pub async fn get_stats(state: State<'_, AppState>) -> Result<DownloadStats, String> {
-    let (active, queued, paused, completed, failed, total_bytes, speed) =
-        state.db.download_stats().map_err(|e| e.to_string())?;
+    let stats = state.db.download_stats().map_err(|e| e.to_string())?;
     Ok(DownloadStats {
-        active,
-        queued,
-        paused,
-        completed,
-        failed,
-        total_downloaded_bytes: total_bytes,
-        current_speed: speed,
+        active: stats.active,
+        queued: stats.queued,
+        paused: stats.paused,
+        completed: stats.completed,
+        failed: stats.failed,
+        total_downloaded_bytes: stats.total_downloaded_bytes,
+        current_speed: stats.current_speed,
+        all: stats.all,
+        archived: stats.archived,
+        video: stats.video,
+        music: stats.music,
+        document: stats.document,
+        archive: stats.archive,
+        program: stats.program,
     })
 }
 
@@ -497,7 +510,7 @@ pub fn install_native_host_manifests(
         .filter(|id| !id.is_empty())
         .unwrap_or_else(|| chrome.clone());
     let executable = crate::extension_host::resolve_native_host_binary().ok_or_else(|| {
-        "Native host binary not found. Build it with: cargo build --bin falcon-dm-native-host"
+        "Native host binary not found. Build it with: cargo build -p falcon-dm-native-host"
             .to_string()
     })?;
     crate::extension_host::install_native_host_manifests(&executable, &chrome, &edge)

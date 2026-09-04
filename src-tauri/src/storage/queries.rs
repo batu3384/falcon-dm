@@ -22,6 +22,24 @@ impl InsertDownloadResult {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct DownloadStatsData {
+    pub active: u64,
+    pub queued: u64,
+    pub paused: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub total_downloaded_bytes: u64,
+    pub current_speed: f64,
+    pub all: u64,
+    pub archived: u64,
+    pub video: u64,
+    pub music: u64,
+    pub document: u64,
+    pub archive: u64,
+    pub program: u64,
+}
+
 impl Database {
     pub fn insert_download(&self, download: &Download) -> Result<i64> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
@@ -464,8 +482,9 @@ impl Database {
         Ok(downloads)
     }
 
-    pub fn download_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64, f64)> {
+    pub fn download_stats(&self) -> Result<DownloadStatsData> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let mut data = DownloadStatsData::default();
         let mut stmt = conn.prepare(
             "SELECT status, COUNT(*), COALESCE(SUM(downloaded_size), 0), \
                     COALESCE(SUM(CASE WHEN status IN ('Downloading', 'Merging') THEN speed ELSE 0 END), 0) \
@@ -473,13 +492,6 @@ impl Database {
              WHERE (archived = 0 OR archived IS NULL) \
              GROUP BY status",
         )?;
-        let mut active = 0u64;
-        let mut queued = 0u64;
-        let mut paused = 0u64;
-        let mut completed = 0u64;
-        let mut failed = 0u64;
-        let mut total_bytes = 0u64;
-        let mut speed = 0.0f64;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let status: String = row.get(0)?;
@@ -487,20 +499,51 @@ impl Database {
             let bytes: i64 = row.get(2)?;
             let row_speed: f64 = row.get(3)?;
             let count = count.max(0) as u64;
-            total_bytes = total_bytes.saturating_add(bytes.max(0) as u64);
+            data.total_downloaded_bytes =
+                data.total_downloaded_bytes.saturating_add(bytes.max(0) as u64);
             match status.as_str() {
                 "Downloading" | "Merging" => {
-                    active += count;
-                    speed += row_speed;
+                    data.active += count;
+                    data.current_speed += row_speed;
                 }
-                "Queued" => queued += count,
-                "Paused" => paused += count,
-                "Completed" => completed += count,
-                "Failed" => failed += count,
+                "Queued" => data.queued += count,
+                "Paused" => data.paused += count,
+                "Completed" => data.completed += count,
+                "Failed" => data.failed += count,
                 _ => {}
             }
         }
-        Ok((active, queued, paused, completed, failed, total_bytes, speed.max(0.0)))
+        data.current_speed = data.current_speed.max(0.0);
+        data.all = conn
+            .query_row(
+                "SELECT COUNT(*) FROM downloads WHERE archived = 0 OR archived IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?
+            .max(0) as u64;
+        data.archived = conn
+            .query_row("SELECT COUNT(*) FROM downloads WHERE archived = 1", [], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .max(0) as u64;
+        let mut cat_stmt = conn.prepare(
+            "SELECT category, COUNT(*) FROM downloads \
+             WHERE (archived = 0 OR archived IS NULL) GROUP BY category",
+        )?;
+        let mut cat_rows = cat_stmt.query([])?;
+        while let Some(row) = cat_rows.next()? {
+            let category: String = row.get(0)?;
+            let count = row.get::<_, i64>(1)?.max(0) as u64;
+            match category.as_str() {
+                "Video" => data.video += count,
+                "Music" => data.music += count,
+                "Document" => data.document += count,
+                "Archive" => data.archive += count,
+                "Program" => data.program += count,
+                _ => {}
+            }
+        }
+        Ok(data)
     }
 
     pub fn get_downloads(&self, filter: &DownloadFilter) -> Result<Vec<Download>> {

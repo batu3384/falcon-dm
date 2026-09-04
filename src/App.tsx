@@ -40,6 +40,7 @@ import { onDownloadAdded, onDownloadProgress, onPairRequest } from './api/events
 import * as api from './api/commands';
 import { applyTheme, watchSystemTheme } from './types';
 import { getDownloadCapabilities } from './lib/downloadCapabilities';
+import { libraryCountsFromStats } from './lib/libraryCounts';
 import { useClipboardMonitor, URL_RE } from './hooks/useClipboardMonitor';
 
 function App() {
@@ -81,6 +82,7 @@ function App() {
   const [logsOpen, setLogsOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
+  const [libraryCounts, setLibraryCounts] = useState<Record<string, number>>({});
 
   // Keep inspector in sync with live list (was a useEffect in App before).
   useEffect(() => {
@@ -98,8 +100,18 @@ function App() {
     watchSystemTheme();
 
     fetchDownloads();
+    const refreshLibraryCounts = () => {
+      api
+        .getStats()
+        .then((stats) => setLibraryCounts(libraryCountsFromStats(stats)))
+        .catch(() => {});
+    };
+    refreshLibraryCounts();
 
-    const refreshTimer = setInterval(fetchDownloads, 5000);
+    const refreshTimer = setInterval(() => {
+      fetchDownloads();
+      refreshLibraryCounts();
+    }, 5000);
 
     const unlistenAdded = onDownloadAdded((d) => {
       addDownload(d);
@@ -126,6 +138,10 @@ function App() {
   // switches to/from "Archived" (archived rows are excluded by default).
   useEffect(() => {
     fetchDownloads(activeCategory === 'Archived');
+    api
+      .getStats()
+      .then((stats) => setLibraryCounts(libraryCountsFromStats(stats)))
+      .catch(() => {});
   }, [activeCategory, fetchDownloads]);
 
   useClipboardMonitor(clipboardMonitor, (text) => {
@@ -133,23 +149,6 @@ function App() {
     setIsModalOpen(true);
     showToast('info', t('app.clipboard_url'));
   });
-
-  const categoryCounts = useMemo<Record<string, number>>(
-    () => ({
-      'All Downloads': downloads.length,
-      Downloading: downloads.filter((d) => d.status === 'Downloading' || d.status === 'Merging')
-        .length,
-      Completed: downloads.filter((d) => d.status === 'Completed').length,
-      Paused: downloads.filter((d) => d.status === 'Paused' || d.status === 'Queued').length,
-      Failed: downloads.filter((d) => d.status === 'Failed').length,
-      Video: downloads.filter((d) => d.category === 'Video').length,
-      Music: downloads.filter((d) => d.category === 'Music').length,
-      Documents: downloads.filter((d) => d.category === 'Document').length,
-      Compressed: downloads.filter((d) => d.category === 'Archive').length,
-      Programs: downloads.filter((d) => d.category === 'Program').length,
-    }),
-    [downloads],
-  );
 
   const runBatchAction = useCallback(
     async (targets: typeof downloads, action: 'pause' | 'resume' | 'delete') => {
@@ -168,6 +167,10 @@ function App() {
           : [],
       );
       await fetchDownloads();
+      api
+        .getStats()
+        .then((stats) => setLibraryCounts(libraryCountsFromStats(stats)))
+        .catch(() => {});
       const failedNames = failures
         .map(({ download, error }) => `${download.filename} (${error})`)
         .join(', ');
@@ -184,18 +187,28 @@ function App() {
   );
 
   const handlePauseAll = useCallback(async () => {
-    await runBatchAction(
-      downloads.filter((download) => getDownloadCapabilities(download.status).pause),
-      'pause',
-    );
-  }, [downloads, runBatchAction]);
+    try {
+      const rows = await api.listAllDownloads({ archived: false });
+      await runBatchAction(
+        rows.filter((download) => getDownloadCapabilities(download.status).pause),
+        'pause',
+      );
+    } catch (e) {
+      showToast('error', api.extractTauriError(e));
+    }
+  }, [runBatchAction, showToast]);
 
   const handleResumeAll = useCallback(async () => {
-    await runBatchAction(
-      downloads.filter((download) => getDownloadCapabilities(download.status).resume),
-      'resume',
-    );
-  }, [downloads, runBatchAction]);
+    try {
+      const rows = await api.listAllDownloads({ archived: false });
+      await runBatchAction(
+        rows.filter((download) => getDownloadCapabilities(download.status).resume),
+        'resume',
+      );
+    } catch (e) {
+      showToast('error', api.extractTauriError(e));
+    }
+  }, [runBatchAction, showToast]);
 
   const handleBatchAction = useCallback(
     async (action: 'pause' | 'resume' | 'delete') => {
@@ -219,8 +232,10 @@ function App() {
         setSpeedLimited((s.speed_limit_kbps ?? 0) > 0);
         setSavedSpeedLimit(s.speed_limit_kbps ?? 0);
       })
-      .catch((e) => showToast('error', api.extractTauriError(e)));
-  }, [showToast]);
+      .catch(() => {
+        setSpeedLimited(false);
+      });
+  }, []);
 
   const toggleSpeedLimit = useCallback(async () => {
     try {
@@ -325,6 +340,7 @@ function App() {
           const next = i18n.language === 'en' ? 'tr' : 'en';
           i18n.changeLanguage(next);
           localStorage.setItem('falcon_lang', next);
+          document.documentElement.lang = next;
         },
       },
     ],
@@ -332,6 +348,7 @@ function App() {
   );
 
   const toasts = useToastStore((s) => s.toasts);
+  const dismissToast = useToastStore((s) => s.dismiss);
   const selectedDownloads = useMemo(
     () => downloads.filter((download) => selectedIds.has(download.id)),
     [downloads, selectedIds],
@@ -371,7 +388,7 @@ function App() {
         <Sidebar
           activeCategory={activeCategory}
           onSelectCategory={setActiveCategory}
-          counts={categoryCounts}
+          counts={libraryCounts}
         />
 
         <main className="main-area" id="main-content">
@@ -384,12 +401,8 @@ function App() {
             }}
             onPauseAll={handlePauseAll}
             onResumeAll={handleResumeAll}
-            canPauseAll={downloads.some(
-              (download) => getDownloadCapabilities(download.status).pause,
-            )}
-            canResumeAll={downloads.some(
-              (download) => getDownloadCapabilities(download.status).resume,
-            )}
+            canPauseAll={(libraryCounts.pausable ?? 0) > 0}
+            canResumeAll={(libraryCounts.resumable ?? 0) > 0}
             clipboardMonitor={clipboardMonitor}
             onToggleClipboard={() => setClipboardMonitor((v) => !v)}
             onOpenSettings={() => setSettingsOpen(true)}
@@ -494,9 +507,13 @@ function App() {
       )}
 
       {toasts.length > 0 && (
-        <div className="toast-stack" role="status" aria-live="polite">
+        <div className="toast-stack" role="region" aria-label={t('app.toasts')}>
           {toasts.map((tt) => (
-            <div key={tt.id} className={`toast ${tt.kind}`}>
+            <div
+              key={tt.id}
+              className={`toast ${tt.kind}`}
+              role={tt.kind === 'error' ? 'alert' : 'status'}
+            >
               {tt.kind === 'success' ? (
                 <CheckCircle2 />
               ) : tt.kind === 'error' ? (
@@ -505,6 +522,14 @@ function App() {
                 <Info />
               )}
               <span>{tt.msg}</span>
+              <button
+                type="button"
+                className="icon-btn toast-dismiss"
+                aria-label={t('app.dismiss')}
+                onClick={() => dismissToast(tt.id)}
+              >
+                <X size={14} />
+              </button>
             </div>
           ))}
         </div>

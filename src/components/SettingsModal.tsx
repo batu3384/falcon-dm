@@ -36,6 +36,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
     download_profiles: [],
   });
   const [saveError, setSaveError] = useState('');
+  const [loadError, setLoadError] = useState('');
   const [pendingPairs, setPendingPairs] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -60,18 +61,21 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
     api
       .getSettings()
       .then((loaded) => {
+        setLoadError('');
         if (!dirtyRef.current) {
           setSettingsState(loaded);
           const suggested = loaded.allowed_extension_ids?.[0];
           if (suggested) setExtensionId(suggested);
         }
       })
-      .catch((e) => console.error('Failed to load settings:', e));
+      .catch((e) => {
+        setLoadError(api.extractTauriError(e) || t('settings.load_failed'));
+      });
     api
       .getPendingPairs()
       .then(setPendingPairs)
       .catch(() => {});
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const unlisten = onPairRequest((extensionId) => {
@@ -153,7 +157,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
   };
 
   const handleSave = async () => {
-    if (saving) return;
+    if (saving || loadError) return;
     setSaveError('');
     setSaving(true);
     try {
@@ -248,6 +252,11 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
           {activeTab === 'profiles' && (
             <ProfilesTab settings={settings} setSettings={setSettings} />
           )}
+          {loadError && (
+            <p className="field-error" role="alert">
+              {loadError}
+            </p>
+          )}
           {saveError && <p className="field-error">{saveError}</p>}
         </div>
 
@@ -255,7 +264,12 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
           <button type="button" className="btn-secondary" data-modal-cancel onClick={requestClose}>
             {t('settings.cancel')}
           </button>
-          <button type="button" className="btn-primary" onClick={handleSave} disabled={saving}>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={handleSave}
+            disabled={saving || Boolean(loadError)}
+          >
             {saving ? t('settings.saving') : t('settings.save')}
           </button>
         </div>

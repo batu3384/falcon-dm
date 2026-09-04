@@ -2,25 +2,25 @@ function newPairChallenge() {
   if (crypto.randomUUID) return crypto.randomUUID();
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function getNativePairProof(challenge, timeoutMs = 3000) {
+function getNativePairProof(challenge, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     if (!chrome.runtime.sendNativeMessage) {
-      reject(new Error("Native messaging is unavailable"));
+      reject(new Error('Native messaging is unavailable'));
       return;
     }
     let settled = false;
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
-        reject(new Error("Native pairing timed out"));
+        reject(new Error('Native pairing timed out'));
       }
     }, timeoutMs);
     try {
       chrome.runtime.sendNativeMessage(
-        "com.falcondm.native",
+        'com.falcondm.native',
         { extension_id: chrome.runtime.id, challenge },
         (response) => {
           if (settled) return;
@@ -32,7 +32,7 @@ function getNativePairProof(challenge, timeoutMs = 3000) {
             return;
           }
           if (!response || !response.ok || !response.proof) {
-            reject(new Error(response?.error || "Native pairing failed"));
+            reject(new Error(response?.error || 'Native pairing failed'));
             return;
           }
           resolve(response.proof);
@@ -54,8 +54,8 @@ async function requestPair() {
   return fetchWithTimeout(
     `${FALCON_API}/api/pair`,
     {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         extension_id: chrome.runtime.id,
         challenge,
@@ -63,7 +63,7 @@ async function requestPair() {
       }),
     },
     REQUEST_TIMEOUT_MS,
-    "Pair request"
+    'Pair request',
   );
 }
 
@@ -78,18 +78,18 @@ async function ensurePaired(force = false) {
             const r = await fetchWithTimeout(
               `${FALCON_API}/api/ping`,
               {
-                method: "POST",
+                method: 'POST',
                 headers: {
-                  "Content-Type": "application/json",
-                  "X-Falcon-Token": existing,
+                  'Content-Type': 'application/json',
+                  'X-Falcon-Token': existing,
                 },
-                body: "{}",
+                body: '{}',
               },
               REQUEST_TIMEOUT_MS,
-              "Falcon ping"
+              'Falcon ping',
             );
             if (r.ok) {
-              setState("connected");
+              setState('connected');
               return existing;
             }
           } catch (_) {}
@@ -97,10 +97,10 @@ async function ensurePaired(force = false) {
       }
 
       if (!(await appHealthy())) {
-        await withTimeout(wakeFalcon(), 5000, "Falcon wake");
+        await withTimeout(wakeFalcon(), 5000, 'Falcon wake');
         if (!(await waitForHealthy(25000))) {
           throw new Error(
-            msg("errorWaking", "Falcon DM başlatılamadı — uygulamayı kurun veya manuel açın")
+            msg('errorWaking', 'Falcon DM başlatılamadı — uygulamayı kurun veya manuel açın'),
           );
         }
       }
@@ -109,9 +109,9 @@ async function ensurePaired(force = false) {
       if (r.status === 403) {
         throw new Error(
           msg(
-            "errorExtensionBlocked",
-            "Extension blocked — open Falcon DM Settings → Reconnect extension"
-          )
+            'errorExtensionBlocked',
+            'Extension blocked — open Falcon DM Settings → Reconnect extension',
+          ),
         );
       }
 
@@ -137,29 +137,26 @@ async function ensurePaired(force = false) {
         if (rr.status === 403) {
           throw new Error(
             msg(
-              "errorExtensionBlocked",
-              "Extension blocked — open Falcon DM Settings → Reconnect extension"
-            )
+              'errorExtensionBlocked',
+              'Extension blocked — open Falcon DM Settings → Reconnect extension',
+            ),
           );
         }
         first = await finishPair(rr);
       }
       if (first.token) {
-        setState("connected");
+        setState('connected');
         return first.token;
       }
       if (first.error) {
-        throw new Error(msg("errorAppOffline", "Could not pair with Falcon DM"));
+        throw new Error(msg('errorAppOffline', 'Could not pair with Falcon DM'));
       }
 
       // Pending approval — poll until Settings approve (or timeout)
-      setState("pending");
+      setState('pending');
       notify(
-        msg("appName", "Falcon DM"),
-        msg(
-          "errorPairPending",
-          "Approve this extension in Falcon DM Settings, then try again"
-        )
+        msg('appName', 'Falcon DM'),
+        msg('errorPairPending', 'Approve this extension in Falcon DM Settings, then try again'),
       );
       for (let i = 0; i < PAIR_POLL_ATTEMPTS; i++) {
         await new Promise((res) => setTimeout(res, 2000));
@@ -172,25 +169,22 @@ async function ensurePaired(force = false) {
         if (r2.status === 403) {
           throw new Error(
             msg(
-              "errorExtensionBlocked",
-              "Extension blocked — open Falcon DM Settings → Reconnect extension"
-            )
+              'errorExtensionBlocked',
+              'Extension blocked — open Falcon DM Settings → Reconnect extension',
+            ),
           );
         }
         const again = await finishPair(r2);
         if (again.token) {
-          setState("connected");
+          setState('connected');
           return again.token;
         }
       }
       throw new Error(
-        msg(
-          "errorPairPending",
-          "Approve this extension in Falcon DM Settings, then try again"
-        )
+        msg('errorPairPending', 'Approve this extension in Falcon DM Settings, then try again'),
       );
     } catch (e) {
-      setState("offline");
+      setState('offline');
       throw e;
     } finally {
       pairInFlight = null;

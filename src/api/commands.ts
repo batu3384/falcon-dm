@@ -9,6 +9,7 @@ import {
   ExtensionStatusSchema,
 } from '../lib/schema';
 import type { DownloadModel, SettingsModel, ScheduleModel } from '../types';
+import { collectPaged } from '../lib/paging';
 
 // ponytail: centralized Tauri command layer. Every invoke() in the app used to
 // repeat the raw command-name string with no type link to the backend; renaming
@@ -17,12 +18,19 @@ import type { DownloadModel, SettingsModel, ScheduleModel } from '../types';
 
 /** Convert a Tauri error (string | object) into a readable message. */
 export function extractTauriError(e: unknown): string {
-  if (typeof e === 'string') return e;
-  if (e && typeof e === 'object') {
+  let message = String(e);
+  if (typeof e === 'string') message = e;
+  else if (e && typeof e === 'object') {
     const err = e as Record<string, unknown>;
-    if (typeof err.message === 'string') return err.message;
+    if (typeof err.message === 'string') message = err.message;
   }
-  return String(e);
+  if (/invoke/i.test(message) && /undefined/i.test(message)) {
+    const lang = typeof document !== 'undefined' ? document.documentElement.lang || '' : '';
+    return lang.startsWith('tr')
+      ? 'Falcon DM motoru bağlı değil'
+      : 'Falcon DM engine is not connected';
+  }
+  return message;
 }
 
 export interface DownloadFilter {
@@ -40,6 +48,17 @@ export async function getDownloads(filter?: DownloadFilter): Promise<DownloadMod
     filter: { limit: 200, offset: 0, ...filter },
   });
   return DownloadArraySchema.parse(raw);
+}
+
+export async function listAllDownloads(filter?: DownloadFilter): Promise<DownloadModel[]> {
+  const pageSize = 200;
+  return collectPaged(pageSize, (beforeId) =>
+    getDownloads({
+      ...filter,
+      limit: pageSize,
+      ...(beforeId === undefined ? {} : { before_id: beforeId }),
+    }),
+  );
 }
 
 export async function getDownload(id: number): Promise<DownloadModel> {
@@ -162,6 +181,13 @@ export interface DownloadStats {
   failed: number;
   total_downloaded_bytes: number;
   current_speed: number;
+  all: number;
+  archived: number;
+  video: number;
+  music: number;
+  document: number;
+  archive: number;
+  program: number;
 }
 
 export async function getStats(): Promise<DownloadStats> {

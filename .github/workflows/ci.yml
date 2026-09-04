@@ -64,16 +64,16 @@ jobs:
           ARCH: aarch64
       - name: Format check
         working-directory: src-tauri
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Clippy (deny warnings)
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         working-directory: src-tauri
-        run: cargo test
+        run: cargo test --workspace
       - name: Build (debug)
         working-directory: src-tauri
-        run: cargo build
+        run: cargo build --workspace
 
   cargo-deny:
     name: Supply-chain audit (cargo deny)

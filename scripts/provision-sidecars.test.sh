@@ -40,4 +40,17 @@ if "if: ${{ secrets.APPLE_CERTIFICATE" in workflow:
     raise SystemExit("release workflow must not use secrets directly in if conditions")
 PY
 
+if sidecar_runs /usr/bin/false; then
+  echo "sidecar_runs accepted a failing binary" >&2
+  exit 1
+fi
+if sidecar_runs /tmp/falcon-missing-sidecar-bin; then
+  echo "sidecar_runs accepted a missing binary" >&2
+  exit 1
+fi
+if ! sidecar_runs /bin/echo ok; then
+  echo "sidecar_runs rejected a working binary" >&2
+  exit 1
+fi
+
 echo "provision-sidecars checksum tests passed"

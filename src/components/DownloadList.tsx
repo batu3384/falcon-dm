@@ -1,6 +1,6 @@
 import { useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, Inbox } from 'lucide-react';
+import { AlertCircle, AlertTriangle, Inbox, SearchX } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import DownloadItem from './DownloadItem';
 import type { DownloadModel } from '../types';
@@ -102,17 +102,7 @@ export default function DownloadList({
 
       <div className="dl-list" role="list" ref={scrollRef} style={{ overflowY: 'auto', flex: 1 }}>
         {error && downloads.length > 0 && (
-          <div
-            role="alert"
-            style={{
-              alignItems: 'center',
-              display: 'flex',
-              gap: 8,
-              justifyContent: 'space-between',
-              margin: '8px 12px',
-              padding: '8px 10px',
-            }}
-          >
+          <div className="diagnostic-error" role="alert">
             <span title={error}>{t('downloadList.load_error_desc')}</span>
             <button type="button" className="btn-secondary" onClick={onRetry ?? onRefresh}>
               {t('downloadList.retry')}
@@ -152,21 +142,30 @@ export default function DownloadList({
         ) : filtered.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">
-              <Inbox strokeWidth={1.5} />
+              {searchQuery ? (
+                <SearchX strokeWidth={1.5} />
+              ) : category === 'Failed' ? (
+                <AlertTriangle strokeWidth={1.5} />
+              ) : (
+                <Inbox strokeWidth={1.5} />
+              )}
             </div>
             <div className="empty-title">
-              {searchQuery ? t('downloadList.no_search_results') : t('downloadList.no_downloads')}
+              {searchQuery
+                ? t('downloadList.no_search_results')
+                : category === 'Failed'
+                  ? t('downloadList.empty_failed')
+                  : t('downloadList.no_downloads')}
             </div>
             <div className="empty-desc">
-              {searchQuery ? t('downloadList.no_search_desc') : t('downloadList.no_downloads_desc')}
+              {searchQuery
+                ? t('downloadList.no_search_desc')
+                : category === 'Failed'
+                  ? t('downloadList.empty_failed_desc')
+                  : t('downloadList.no_downloads_desc')}
             </div>
-            {!searchQuery && onAddClick && (
-              <button
-                type="button"
-                className="btn-primary"
-                style={{ marginTop: 12 }}
-                onClick={onAddClick}
-              >
+            {!searchQuery && category !== 'Failed' && onAddClick && (
+              <button type="button" className="btn-primary empty-cta" onClick={onAddClick}>
                 {t('downloadList.add_cta')}
               </button>
             )}

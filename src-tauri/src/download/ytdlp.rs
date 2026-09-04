@@ -352,4 +352,11 @@ mod tests {
         assert!(resolve_output(&run_dir).is_err());
         std::fs::remove_dir_all(run_dir).unwrap();
     }
+
+    #[test]
+    fn find_ytdlp_resolves_when_binary_exists() {
+        if std::process::Command::new("yt-dlp").arg("--version").output().is_ok() {
+            assert!(find_ytdlp(None).is_ok());
+        }
+    }
 }
