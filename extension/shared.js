@@ -75,13 +75,6 @@ function eraseBrowserDownload(id) {
   } catch (_) {}
 }
 
-function cancelBrowserDownload(id) {
-  if (id == null) return;
-  try {
-    chrome.downloads.cancel(id, () => void chrome.runtime.lastError);
-  } catch (_) {}
-}
-
 async function setInterceptFailClosed(next) {
   interceptFailClosed = !!next;
   await chrome.storage.local.set({ falconInterceptFailClosed: interceptFailClosed });

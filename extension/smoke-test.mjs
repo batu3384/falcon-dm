@@ -76,23 +76,38 @@ assert(
   'bounded request timeout',
 );
 assert(background.includes('suggest();'), 'download passthrough uses bare suggest()');
-assert(background.includes('fallbackBrowserDownload'), 'fail-open browser re-download');
 const hijackListen = background.slice(
   background.indexOf('chrome.downloads.onDeterminingFilename.addListener'),
   background.indexOf('chrome.downloads.onCreated.addListener'),
 );
 assert(
-  hijackListen.indexOf('stashPendingChromeFilename(item);') <
-    hijackListen.indexOf('cancelBrowserDownload(item.id);') &&
-    hijackListen.indexOf('cancelBrowserDownload(item.id);') <
-      hijackListen.indexOf('runHijack(item).catch'),
-  'hijack stash then cancel before falcon post',
+  hijackListen.indexOf('markHijackStarted(item);') <
+    hijackListen.lastIndexOf('runHijack(item, { skipDedupCheck: true })'),
+  'primary hijack marks dedup before runHijack',
 );
+assert(background.includes('pauseBrowserDownload'), 'hijack pauses Chrome until Falcon accepts');
+assert(background.includes('resumeBrowserDownload'), 'fail-open resumes Chrome download');
 assert(
-  /stashPendingChromeFilename\(item\);[\s\S]*?suggest\(\);[\s\S]*?cancelBrowserDownload\(item\.id\);/.test(
+  /suggest\(\);[\s\S]*?pauseBrowserDownload\(item\.id\);[\s\S]*?runHijack\(item, \{ skipDedupCheck: true \}\)/.test(
     hijackListen,
   ),
-  'hijack uses suggest() then cancelBrowserDownload',
+  'hijack pauses Chrome then queues Falcon without early abort',
+);
+{
+  const runHijackTry = background.slice(
+    background.indexOf('await sendToFalcon'),
+    background.indexOf('} catch (e)'),
+  );
+  assert(
+    runHijackTry.includes('abortAndEraseBrowserDownload(item.id)'),
+    'success aborts Chrome only after Falcon POST',
+  );
+}
+assert(!background.includes('blockBrowser'), 'removed falconReachable kill switch on POST errors');
+assert(background.includes('hijackInFlight'), 'onCreated dedupes against active hijack');
+assert(
+  !/suggest\(\);[\s\S]*?abortAndEraseBrowserDownload\(item\.id\);[\s\S]*?runHijack/.test(hijackListen),
+  'listener does not abort before runHijack',
 );
 const hijackBlock = background.slice(
   background.indexOf('chrome.downloads.onDeterminingFilename.addListener'),
@@ -121,12 +136,6 @@ assert(
   'download uses watch-page cookies for googlevideo',
 );
 assert(background.includes('/api/intercept'), 'media intercept endpoint');
-assert(
-  /stashPendingChromeFilename\(item\);[\s\S]*?suggest\(\);[\s\S]*?cancelBrowserDownload\(item\.id\);/.test(
-    background,
-  ),
-  'download intercept suggest then cancel',
-);
 assert(background.includes('cookie_url: cookieLookup'), 'download intercept cookie origin');
 const optionsHtml = readFileSync(path.join(__dirname, 'options.html'), 'utf8');
 assert(optionsHtml.includes('aria-live="polite"'), 'options status live region');
@@ -159,9 +168,11 @@ assert(content.includes('aria-modal'), 'overlay aria-modal');
 assert(content.includes('Escape'), 'overlay escape close');
 assert(content.includes('fm-fab'), 'isolated video chip');
 assert(background.includes('runHijack'), 'hijack logic centralized');
-assert(background.includes('falconReachable'), 'fallback uses health snapshot not stale badge');
-assert(background.includes('downloads.onCreated'), 'backup cancel stray Chrome downloads');
-assert(shared.includes('cancelBrowserDownload'), 'can abort in-flight browser download');
+assert(background.includes('hijackInFlight'), 'in-flight hijack guard');
+assert(background.includes('hijackRecentlyHandled'), 'onCreated skips duplicate hijack');
+assert(background.includes('removeFile'), 'complete hijacks delete file from disk');
+assert(!background.includes('queueMicrotask(() => {\n    chrome.downloads'), 'abort does not defer cancel');
+assert(background.includes('downloads.onChanged'), 'watch hijacked ids until purged');
 assert(background.includes('eraseBrowserDownload'), 'hijack clears ghost Chrome download row');
 assert(background.includes('interceptQueued'), 'hijack success explains Chrome cancel');
 assert(background.includes('set_fail_closed'), 'fail-closed toggle handler');
