@@ -32,8 +32,8 @@
     "command_palette": "Komut Paleti"
   },
   "downloadList": {
-    "no_downloads": "İndirme bulunamadı",
-    "no_downloads_desc": "Bu kategoride henüz hiçbir indirme işlemi yok.",
+    "no_downloads": "Henüz indirme yok",
+    "no_downloads_desc": "URL ekle, ya da tarayıcı eklentisinden gönder.",
     "no_search_results": "Eşleşme yok",
     "no_search_desc": "Farklı bir dosya adı veya URL dene.",
     "empty_failed": "Başarısız indirme yok",
@@ -200,6 +200,7 @@
     "extension_reset": "Eklenti bağlantısı sıfırlandı — Ayarlar'dan tekrar onaylayın",
     "pair_pending": "Bekleyen eklenti onayı",
     "pair_approve": "Eklentiyi onayla",
+    "pair_approve_manual": "Bu ID'yi onayla",
     "pair_approved": "Eklenti onaylandı — bekleyen istek otomatik devam eder",
     "pair_none": "Bekleyen eklenti isteği yok",
     "cat_video": "Video kayıt yolu",

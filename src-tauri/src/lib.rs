@@ -22,10 +22,10 @@ use storage::Database;
 use storage::InsertDownloadResult;
 use tauri::{AppHandle, Emitter, Manager};
 use util::{
-    app_data_dir, default_download_dir, full_file_path, is_hls_url, is_junk_media_url,
-    lock_or_recover, normalize_media_url, resolve_download_filename, resolve_save_dir,
-    sanitize_header_value, validate_completed_file, validate_fetch_url_async,
-    LEGACY_DEFAULT_API_TOKEN,
+    app_data_dir, default_download_dir, full_file_path, is_googlevideo_url, is_hls_url,
+    is_junk_media_url, is_youtube_host, lock_or_recover, normalize_media_url,
+    resolve_download_filename, resolve_save_dir, sanitize_header_value, validate_completed_file,
+    validate_fetch_url_async, LEGACY_DEFAULT_API_TOKEN,
 };
 
 use axum::http::{HeaderMap, StatusCode};
@@ -70,11 +70,26 @@ pub(crate) fn cookie_url_matches_download(download_url: &str, cookie_url: Option
     let Ok(cookie_source) = url::Url::parse(cookie_url) else {
         return false;
     };
-    matches!(download.scheme(), "https")
+    if matches!(download.scheme(), "https")
         && download.scheme() == cookie_source.scheme()
         && download.host_str().map(str::to_ascii_lowercase)
             == cookie_source.host_str().map(str::to_ascii_lowercase)
         && download.port_or_known_default() == cookie_source.port_or_known_default()
+    {
+        return true;
+    }
+    // YouTube CDN: browser sends youtube.com cookies for googlevideo streams.
+    if is_googlevideo_url(download_url)
+        && download.scheme() == "https"
+        && cookie_source.scheme() == "https"
+    {
+        if let Some(host) = cookie_source.host_str() {
+            if is_youtube_host(host) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub struct AppState {
@@ -298,7 +313,7 @@ fn resolve_media_referer(
 ) -> Option<String> {
     let page = page_url.filter(|s| !s.is_empty());
     let r = referer.filter(|s| !s.is_empty()).or(page);
-    let resolved = if url.contains("googlevideo") || url.contains("youtube.com") {
+    let resolved = if is_googlevideo_url(url) || util::is_youtube_watch_url(url) {
         r.or(Some("https://www.youtube.com/"))
     } else {
         r
@@ -358,6 +373,22 @@ mod tests {
         assert!(!cookie_url_matches_download(
             "http://cdn.example.com/video.mp4",
             Some("http://cdn.example.com/video.mp4")
+        ));
+        assert!(cookie_url_matches_download(
+            "https://rr3---sn-abc.googlevideo.com/videoplayback?id=xyz",
+            Some("https://www.youtube.com/watch?v=abc")
+        ));
+        assert!(!cookie_url_matches_download(
+            "https://rr3---sn-abc.googlevideo.com/videoplayback?id=xyz",
+            Some("https://vimeo.com/123")
+        ));
+        assert!(!cookie_url_matches_download(
+            "https://rr3---sn-abc.googlevideo.com/videoplayback?id=xyz",
+            Some("https://notyoutube.com/watch")
+        ));
+        assert!(!cookie_url_matches_download(
+            "https://rr3---sn-abc.googlevideo.com/videoplayback?id=xyz",
+            Some("http://www.youtube.com/watch?v=abc")
         ));
     }
 }

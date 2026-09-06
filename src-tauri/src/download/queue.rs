@@ -6,7 +6,8 @@ use crate::storage::{
     Database,
 };
 use crate::util::{
-    is_hls_url, lock_or_recover, split_falcon_format, youtube_page_url_for_download,
+    is_googlevideo_url, is_hls_url, is_youtube_direct_cdn_url, is_youtube_watch_url, lock_or_recover,
+    split_falcon_format, youtube_page_url_for_download,
 };
 use chrono::{Local, NaiveTime};
 use serde::{Deserialize, Serialize};
@@ -59,9 +60,16 @@ pub(crate) fn route_queued_download(
     referrer: Option<&str>,
     has_aria2_gid: bool,
 ) -> DownloadRoute {
-    if youtube_page_url_for_download(url, referrer).is_some() {
-        DownloadRoute::YtDlp
-    } else if is_hls_url(url) {
+    let (clean, _) = split_falcon_format(url);
+    // IDM path: browser-signed progressive googlevideo + session headers → native HTTP.
+    if is_googlevideo_url(&clean) && is_youtube_direct_cdn_url(&clean) {
+        return DownloadRoute::Http;
+    }
+    // yt-dlp fallback when only a watch/shorts/live URL is available (or sabr CDN ticket).
+    if is_youtube_watch_url(&clean) || youtube_page_url_for_download(url, referrer).is_some() {
+        return DownloadRoute::YtDlp;
+    }
+    if is_hls_url(url) {
         DownloadRoute::Hls
     } else if has_aria2_gid {
         DownloadRoute::Aria2
@@ -650,6 +658,22 @@ mod tests {
         );
         assert_eq!(
             route_queued_download("https://www.youtube.com/watch?v=abc", None, false),
+            DownloadRoute::YtDlp
+        );
+        assert_eq!(
+            route_queued_download(
+                "https://rr3---sn-abc.googlevideo.com/videoplayback?itag=18&id=xyz",
+                Some("https://www.youtube.com/watch?v=abc"),
+                false,
+            ),
+            DownloadRoute::Http
+        );
+        assert_eq!(
+            route_queued_download(
+                "https://rr3---sn-abc.googlevideo.com/videoplayback?sabr=1&id=xyz",
+                Some("https://www.youtube.com/watch?v=abc"),
+                false,
+            ),
             DownloadRoute::YtDlp
         );
         assert_eq!(

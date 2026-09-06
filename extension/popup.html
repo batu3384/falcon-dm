@@ -4,42 +4,76 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Falcon DM</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="chrome.css" />
   </head>
   <body class="popup">
     <header class="top">
       <div class="brand">
         <img src="icon48.png" alt="" class="logo" />
-        <strong>__MSG_appName__</strong>
+        <strong id="app-name">Falcon DM</strong>
       </div>
       <span id="status" class="pill" data-state="offline" aria-live="polite">…</span>
     </header>
 
-    <button id="grab" class="primary" type="button">__MSG_popupDownloadPage__</button>
-
-    <div class="url-row">
-      <span id="page-url" class="url" title=""></span>
-      <button id="dl-url" class="secondary sm" type="button">__MSG_popupDownloadUrl__</button>
+    <div id="banner" class="banner" hidden role="alert">
+      <p id="banner-text"></p>
+      <button id="banner-action" class="secondary sm" type="button"></button>
     </div>
 
-    <div class="section">
-      <div class="section-title">__MSG_popupQueueTitle__</div>
-      <ul id="queue" class="queue"></ul>
+    <div id="pending-box" class="pending-box" hidden>
+      <p id="pending-text"></p>
     </div>
 
-    <div class="actions">
-      <button id="reconnect" class="secondary" type="button">__MSG_popupReconnect__</button>
-      <button id="pause" class="secondary" type="button">__MSG_popupPause__</button>
+    <div id="blocked-box" class="blocked-box" hidden>
+      <p id="blocked-text"></p>
+      <button id="open-options" class="secondary sm" type="button"></button>
     </div>
 
-    <div class="check-row popup-check">
-      <input id="fail-closed" type="checkbox" />
-      <label for="fail-closed">__MSG_popupFailClosed__</label>
-    </div>
-    <p class="hint popup-hint" id="fail-closed-hint">__MSG_popupFailClosedHint__</p>
+    <button id="grab" class="primary" type="button"></button>
+    <p id="grab-hint" class="help"></p>
+
+    <details class="more" id="more">
+      <summary id="more-label"></summary>
+
+      <section class="page-card">
+        <div class="section-title" id="tab-label"></div>
+        <div class="url-row">
+          <span id="page-url" class="url" title=""></span>
+          <button id="dl-url" class="secondary sm" type="button"></button>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-title" id="queue-label"></div>
+        <ul id="queue" class="queue">
+          <li class="empty" id="queue-empty"></li>
+        </ul>
+      </section>
+
+      <div class="actions">
+        <button id="reconnect" class="secondary" type="button"></button>
+        <button id="pause" class="secondary" type="button"></button>
+      </div>
+
+      <label class="check-row popup-check" for="fail-closed">
+        <input id="fail-closed" type="checkbox" />
+        <span>
+          <span id="fail-closed-label"></span>
+          <span class="hint popup-hint" id="fail-closed-hint"></span>
+        </span>
+      </label>
+    </details>
+
+    <p id="notice" class="notice" hidden></p>
 
     <footer>
-      <a id="settings" href="#">__MSG_popupSettings__</a>
+      <a id="settings" href="#"></a>
     </footer>
 
     <script src="popup.js"></script>

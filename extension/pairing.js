@@ -28,7 +28,16 @@ function getNativePairProof(challenge, timeoutMs = 8000) {
           clearTimeout(timer);
           const runtimeError = chrome.runtime.lastError;
           if (runtimeError) {
-            reject(new Error(runtimeError.message));
+            reject(
+              new Error(
+                runtimeError.message.includes('Native messaging host not found')
+                  ? msg(
+                      'errorNativeHostMissing',
+                      'Native host missing or wrong extension ID — Falcon Settings → install native host with this extension ID',
+                    )
+                  : runtimeError.message,
+              ),
+            );
             return;
           }
           if (!response || !response.ok || !response.proof) {

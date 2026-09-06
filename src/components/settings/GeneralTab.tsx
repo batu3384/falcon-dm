@@ -194,6 +194,14 @@ export function GeneralTab({
                 ? t('onboarding.native_host_installing')
                 : t('onboarding.native_host_install')}
             </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => handleApprovePair(extensionId.trim())}
+              disabled={!/^[a-p]{32}$/.test(extensionId.trim())}
+            >
+              {t('settings.pair_approve_manual')}
+            </button>
           </div>
           <p className="field-hint">{t('onboarding.native_host_hint')}</p>
         </div>

@@ -1,6 +1,8 @@
 (function () {
-  if (window.falconDmInjected) return;
-  window.falconDmInjected = true;
+  const CS_KEY = '__falconDmContentScript';
+  const extId = chrome?.runtime?.id;
+  if (extId && window[CS_KEY] === extId) return;
+  if (extId) window[CS_KEY] = extId;
 
   const FM = window.FalconMedia;
   const TOKENS = {
@@ -50,69 +52,91 @@
       * { box-sizing: border-box; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
       .fm-overlay {
         position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-        background: rgba(10,10,12,.62); padding: 16px;
+        background: rgba(12,16,24,.64); padding: 20px;
       }
       .fm-panel {
-        width: min(440px, calc(100vw - 32px)); max-height: min(78vh, 640px);
-        overflow: auto; background: #161618; color: #f4f4f5;
-        border: 1px solid rgba(255,255,255,.1); border-radius: 14px;
-        box-shadow: 0 24px 64px rgba(0,0,0,.5); padding: 18px 18px 16px;
-        display: flex; flex-direction: column; gap: 14px;
+        width: min(460px, calc(100vw - 32px)); max-height: min(82vh, 680px);
+        overflow: auto; background: #171b24; color: #f4f4f5;
+        border: 1px solid rgba(255,255,255,.1); border-radius: 16px;
+        box-shadow: 0 24px 64px rgba(8,12,24,.55); padding: 18px 18px 16px;
+        display: flex; flex-direction: column; gap: 12px;
       }
       .fm-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-      .fm-title { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.02em; color: #fff; }
-      .fm-sub { margin: 4px 0 0; font-size: 12px; color: #a1a1aa; line-height: 1.4; }
+      .fm-title { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.02em; color: #fff; text-wrap: pretty; }
+      .fm-sub { margin: 4px 0 0; font-size: 12px; color: #9aa3b2; line-height: 1.4; }
+      .fm-steps { margin: 6px 0 0; font-size: 11px; font-weight: 600; color: #93c5fd; letter-spacing: .01em; }
       .fm-close {
-        width: 32px; height: 32px; border-radius: 8px; border: 1px solid rgba(255,255,255,.1);
-        background: transparent; color: #e4e4e7; cursor: pointer; font-size: 18px; line-height: 1;
+        width: 36px; height: 36px; border-radius: 10px; border: 1px solid rgba(255,255,255,.1);
+        background: transparent; color: #e4e4e7; cursor: pointer; font-size: 20px; line-height: 1;
       }
-      .fm-label { font-size: 11px; font-weight: 700; color: #a1a1aa; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; display: block; }
-      .fm-cards { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow: auto; }
+      .fm-close:hover { background: rgba(255,255,255,.06); }
+      .fm-label { font-size: 12px; font-weight: 600; color: #9aa3b2; margin-bottom: 8px; display: block; }
+      .fm-cards, .fm-grab-list { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow: auto; }
       .fm-card {
         display: flex; align-items: center; gap: 12px; padding: 11px 12px;
-        border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: #1e1e22;
+        border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: #1e2430;
         cursor: pointer; transition: border-color .15s, background .15s;
       }
-      .fm-card:hover { border-color: #3f3f46; }
+      .fm-card:hover { border-color: #3f4b63; }
       .fm-card.active { border-color: ${TOKENS.primary}; background: rgba(37,99,235,.18); }
       .fm-card input { accent-color: ${TOKENS.primary}; width: 16px; height: 16px; flex-shrink: 0; }
       .fm-card-body { flex: 1; min-width: 0; }
       .fm-card-title { font-size: 13px; font-weight: 600; color: #fff; }
-      .fm-card-meta { font-size: 12px; color: #a1a1aa; margin-top: 2px; }
+      .fm-card-meta { font-size: 12px; color: #9aa3b2; margin-top: 2px; }
       .fm-badge {
         font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px;
-        background: rgba(217,119,6,.2); color: #fbbf24; text-transform: uppercase; letter-spacing: .04em;
+        background: rgba(217,119,6,.2); color: #fbbf24; letter-spacing: .02em;
       }
       .fm-badge.hls { background: rgba(37,99,235,.2); color: #93c5fd; }
       .fm-input {
         width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,.12);
-        background: #1e1e22; color: #fff; font-size: 13px;
+        background: #1e2430; color: #fff; font-size: 13px;
       }
-      .fm-info, .fm-error {
+      .fm-info, .fm-error, .fm-warn {
         padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.45;
       }
       .fm-info { background: rgba(37,99,235,.12); border: 1px solid rgba(37,99,235,.3); color: #bfdbfe; }
       .fm-error { background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.35); color: #fecaca; }
+      .fm-warn { background: rgba(217,119,6,.12); border: 1px solid rgba(217,119,6,.35); color: #fde68a; display: none; }
       .fm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+      .fm-grab-bar { display: flex; gap: 8px; }
       .fm-btn {
-        min-height: 36px; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: none;
+        min-height: 40px; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: none;
       }
+      .fm-btn-sm { min-height: 32px; padding: 6px 10px; font-size: 12px; }
       .fm-btn-ghost { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.14); }
       .fm-btn-primary { background: ${TOKENS.accent}; color: #fff; }
-      .fm-btn:disabled { opacity: .6; cursor: default; }
+      .fm-btn:hover { filter: brightness(1.05); }
+      .fm-btn:disabled { opacity: .6; cursor: default; filter: none; }
       .fm-btn:focus-visible, .fm-close:focus-visible, .fm-input:focus-visible, .fm-card:focus-within {
-        outline: none; box-shadow: 0 0 0 2px #161618, 0 0 0 4px #3b82f6;
+        outline: none; box-shadow: 0 0 0 2px #171b24, 0 0 0 4px #3b82f6;
       }
       .fm-check {
-        display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; font-size: 12px; cursor: pointer; color: #e4e4e7;
+        display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: 12px; cursor: pointer; color: #e4e4e7;
       }
+      .fm-check span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .fm-fab {
         min-height: 44px; padding: 0 14px; border: none; border-radius: 999px; cursor: pointer;
-        background: #161618; color: #fff; font-size: 12px; font-weight: 650;
+        background: #171b24; color: #fff; font-size: 12px; font-weight: 650;
         display: inline-flex; align-items: center; gap: 6px;
         box-shadow: 0 8px 24px rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.12);
       }
       .fm-fab:hover { border-color: ${TOKENS.accent}; }
+      @media (prefers-color-scheme: light) {
+        .fm-overlay { background: rgba(15,23,42,.45); }
+        .fm-panel { background: #fff; color: #111827; border-color: #e2e6ee; box-shadow: 0 24px 48px rgba(15,23,42,.16); }
+        .fm-title { color: #111827; }
+        .fm-sub, .fm-label, .fm-card-meta { color: #5b6575; }
+        .fm-close { color: #111827; border-color: #e2e6ee; }
+        .fm-card, .fm-input { background: #f5f7fb; border-color: #e2e6ee; }
+        .fm-card-title { color: #111827; }
+        .fm-btn-ghost { color: #111827; border-color: #cfd5e0; }
+        .fm-check { color: #111827; }
+        .fm-fab { background: #fff; color: #111827; border-color: #e2e6ee; }
+        .fm-btn:focus-visible, .fm-close:focus-visible, .fm-input:focus-visible, .fm-card:focus-within {
+          box-shadow: 0 0 0 2px #fff, 0 0 0 4px #3b82f6;
+        }
+      }
       @media (prefers-reduced-motion: reduce) {
         * { transition: none !important; animation: none !important; }
       }
@@ -184,7 +208,7 @@
     const head = el('div');
     head.className = 'fm-head';
     const titles = el('div');
-    titles.innerHTML = `<h2 class="fm-title">${esc(msg('downloadVideo', 'Download with Falcon DM'))}</h2><p class="fm-sub">${esc(pageTitle || pageUrl)}</p>`;
+    titles.innerHTML = `<h2 class="fm-title">${esc(msg('downloadVideo', 'Download with Falcon DM'))}</h2><p class="fm-sub">${esc(pageTitle || pageUrl)}</p><p class="fm-steps">${esc(msg('overlaySteps', 'Pick quality → Start download'))}</p>`;
     const closeBtn = el('button');
     closeBtn.className = 'fm-close';
     closeBtn.type = 'button';
@@ -219,7 +243,7 @@
       info.textContent = /youtube\.com|youtu\.be/i.test(pageUrl)
         ? msg(
             'youtubeHint',
-            'YouTube: Falcon yt-dlp ile sayfa adresinden indirir (CDN 403 olmaz). En iyi kalite otomatik birleşir.',
+            'YouTube: Falcon captures the signed CDN link from this tab. Pick Video+Audio for sound.',
           )
         : msg(
             'qualityHint',
@@ -235,6 +259,18 @@
       const cards = el('div');
       cards.className = 'fm-cards';
 
+      const warn = el('div');
+      warn.className = 'fm-warn';
+      warn.textContent = msg(
+        'videoOnlyHint',
+        'This source has no audio. Pick a Video+Audio card if you want sound.',
+      );
+
+      function syncWarn() {
+        const videoOnly = selected && !selected.muxed && !selected.isAudio && !selected.isHls;
+        warn.style.display = videoOnly ? 'block' : 'none';
+      }
+
       function renderCards() {
         cards.innerHTML = '';
         sources.forEach((item) => {
@@ -248,13 +284,17 @@
 
           const body = el('div');
           body.className = 'fm-card-body';
-          const metaParts = [item.subtitle];
-          if (item.sizeLabel) metaParts.push(item.sizeLabel);
-          body.innerHTML = `<div class="fm-card-title">${esc(item.title)}</div><div class="fm-card-meta">${esc(metaParts.join(' · '))}</div>`;
+          body.innerHTML = `<div class="fm-card-title">${esc(item.title)}</div><div class="fm-card-meta">${esc(item.subtitle || '')}</div>`;
 
           const badge = el('span');
           badge.className = 'fm-badge' + (item.isHls ? ' hls' : '');
-          badge.textContent = item.isHls ? 'HLS' : item.format;
+          badge.textContent = item.isHls
+            ? msg('kindStream', 'Stream')
+            : item.muxed
+              ? msg('kindVideoAudio', 'Video+Audio')
+              : item.isAudio
+                ? msg('kindAudio', 'Audio')
+                : msg('kindVideoOnly', 'Video only');
 
           card.appendChild(radio);
           card.appendChild(body);
@@ -265,13 +305,16 @@
             renderCards();
             errorBox.style.display = 'none';
             nameInput.value = FM.defaultFilename(pageTitle, item);
+            syncWarn();
           });
 
           cards.appendChild(card);
         });
       }
       renderCards();
+      syncWarn();
       panel.appendChild(cards);
+      panel.appendChild(warn);
     }
 
     panel.appendChild(nameWrap);
@@ -297,13 +340,22 @@
       goBtn.disabled = true;
       goBtn.textContent = msg('sending', 'Sending...');
 
-      const isYt =
-        /youtube\.com|youtu\.be/i.test(pageUrl) ||
-        (selected.url || '').includes('googlevideo') ||
-        (selected.url || '').includes('videoplayback');
-      let downloadUrl = isYt ? pageUrl.split('#')[0] : selected.url;
+      const isYtPage = (() => {
+        try {
+          return FM.isYoutubeHost(new URL(pageUrl).hostname);
+        } catch {
+          return false;
+        }
+      })();
+      const hasCdn = FM.isDirectGooglevideoUrl(selected.url || '');
+      const isYt = isYtPage || hasCdn;
+      let downloadUrl = hasCdn
+        ? FM.normalizeMediaUrl(selected.url)
+        : isYt
+          ? pageUrl.split('#')[0]
+          : selected.url;
       let format = null;
-      if (isYt) {
+      if (isYt && !hasCdn) {
         const h = Number(selected.height) || Number(selected.label) || 1080;
         const height = Math.min(Math.max(h, 144), 2160);
         format = `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/bv*+ba/b`;
@@ -382,6 +434,10 @@
       sources = [...muxed, ...hls, ...video, ...audio];
     }
 
+    if (!sources.length) {
+      sources = FM.youtubeFallbackSources(location.href);
+    }
+
     createModal(
       (resp && resp.title) || document.title,
       location.href,
@@ -393,13 +449,13 @@
 
   function createDownloadButton() {
     const host = el('div', {
-      position: 'absolute',
-      zIndex: '999999',
-      top: '10px',
-      right: '10px',
+      position: 'fixed',
+      zIndex: '2147483646',
+      pointerEvents: 'none',
     });
     const shadow = host.attachShadow({ mode: 'open' });
     injectStyles(shadow);
+    const wrap = el('div', { pointerEvents: 'auto' });
     const btn = el('button');
     btn.className = 'fm-fab';
     btn.type = 'button';
@@ -410,18 +466,35 @@
       e.stopPropagation();
       openDownloadModal().catch((err) => console.error('[Falcon DM]', err));
     });
-    shadow.appendChild(btn);
+    wrap.appendChild(btn);
+    shadow.appendChild(wrap);
     return host;
   }
 
   function attachToVideo(video) {
     if (ATTACHED_VIDEOS.has(video)) return;
     ATTACHED_VIDEOS.add(video);
-    const parent = video.parentElement;
-    if (!parent) return;
-    if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
-    const btn = createDownloadButton();
-    parent.appendChild(btn);
+    const host = createDownloadButton();
+    document.documentElement.appendChild(host);
+
+    function place() {
+      const r = video.getBoundingClientRect();
+      if (r.width < 32 || r.height < 32) {
+        host.style.display = 'none';
+        return;
+      }
+      host.style.display = 'block';
+      host.style.top = `${Math.max(8, r.top + 8)}px`;
+      host.style.left = `${Math.max(8, r.right - 150)}px`;
+    }
+
+    place();
+    const onMove = () => place();
+    window.addEventListener('scroll', onMove, true);
+    window.addEventListener('resize', onMove);
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(onMove).observe(video);
+    }
   }
 
   function collectGrabberLinks() {
@@ -445,7 +518,7 @@
         });
       } catch (_) {}
     });
-    return out.slice(0, 50);
+    return out.slice(0, 100);
   }
 
   function openGrabber() {
@@ -478,6 +551,7 @@
     panel.appendChild(info);
 
     const list = el('div');
+    list.className = 'fm-grab-list';
     const checks = [];
     links.forEach((it) => {
       const row = el('label');
@@ -493,6 +567,29 @@
       row.appendChild(span);
       list.appendChild(row);
     });
+    if (links.length) {
+      const bar = el('div');
+      bar.className = 'fm-grab-bar';
+      const all = el('button');
+      all.className = 'fm-btn fm-btn-ghost fm-btn-sm';
+      all.type = 'button';
+      all.textContent = msg('grabberSelectAll', 'Select all');
+      all.onclick = () =>
+        checks.forEach((c) => {
+          if (!c.cb.disabled) c.cb.checked = true;
+        });
+      const none = el('button');
+      none.className = 'fm-btn fm-btn-ghost fm-btn-sm';
+      none.type = 'button';
+      none.textContent = msg('grabberSelectNone', 'Select none');
+      none.onclick = () =>
+        checks.forEach((c) => {
+          if (!c.cb.disabled) c.cb.checked = false;
+        });
+      bar.appendChild(all);
+      bar.appendChild(none);
+      panel.appendChild(bar);
+    }
     panel.appendChild(list);
 
     const actions = el('div');
@@ -548,6 +645,7 @@
     closeBtn.focus();
   }
 
+  ensureYoutubePageChip();
   document.querySelectorAll('video').forEach(attachToVideo);
 
   let pendingVideos = [];
@@ -576,7 +674,47 @@
     }
   }).observe(document.documentElement, { childList: true, subtree: true });
 
+  function ensureYoutubePageChip() {
+    if (!FM || !FM.isYoutubeHost(location.hostname)) return;
+    let isWatch = false;
+    try {
+      const u = new URL(location.href);
+      isWatch =
+        FM.isYoutubeWatchUrl(location.href) ||
+        u.hostname === 'youtu.be' ||
+        u.pathname.startsWith('/shorts/') ||
+        u.pathname.startsWith('/live/');
+    } catch (_) {}
+    if (!isWatch) return;
+    if (document.getElementById('falcon-dm-yt-chip')) return;
+    const host = el('div', {
+      position: 'fixed',
+      top: '72px',
+      right: '16px',
+      zIndex: '2147483646',
+    });
+    host.id = 'falcon-dm-yt-chip';
+    const shadow = host.attachShadow({ mode: 'open' });
+    injectStyles(shadow);
+    const btn = el('button');
+    btn.className = 'fm-fab';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', msg('downloadWithFalcon', 'Download with Falcon'));
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg><span>${esc(msg('downloadWithFalcon', 'Falcon'))}</span>`;
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openDownloadModal().catch((err) => console.error('[Falcon DM]', err));
+    });
+    shadow.appendChild(btn);
+    document.documentElement.appendChild(host);
+  }
+
   chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
+    if (req.action === 'ping') {
+      sendResponse({ ok: true });
+      return true;
+    }
     if (req.action === 'open_grabber') {
       openGrabber();
       sendResponse({ ok: true });

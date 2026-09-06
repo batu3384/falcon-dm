@@ -293,7 +293,8 @@ impl Database {
         let sql = format!(
             "UPDATE downloads
              SET status = 'Queued', priority = priority + 1, aria2_gid = NULL,
-                 completed_at = NULL, error_message = NULL, speed = 0.0
+                 completed_at = NULL, error_message = NULL, speed = 0.0,
+                 downloaded_size = 0, total_size = 0
              WHERE id = ?1 AND status IN ({})",
             placeholders.join(", ")
         );

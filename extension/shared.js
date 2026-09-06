@@ -87,6 +87,7 @@ function refreshBadge() {
   const map = {
     connected: { text: '✓', color: '#22c55e' },
     pending: { text: '•', color: '#D97706' },
+    blocked: { text: '!', color: '#dc2626' },
     offline: { text: '', color: '#dc2626' },
   };
   const b = map[connectionState] || map.offline;
@@ -112,13 +113,22 @@ function trackDownload(filename, url, kind) {
 
 /** Inject the on-demand content script once per tab. Idempotent. */
 async function ensureContentScript(tabId) {
-  if (!tabId || tabId < 0 || INJECTED.has(tabId)) return true;
+  if (!tabId || tabId < 0) return false;
+  if (INJECTED.has(tabId)) {
+    try {
+      await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+      return true;
+    } catch (_) {
+      INJECTED.delete(tabId);
+    }
+  }
   INJECTED.add(tabId);
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ['media-utils.js', 'content.js'],
     });
+    await chrome.tabs.sendMessage(tabId, { action: 'ping' });
     return true;
   } catch (_) {
     INJECTED.delete(tabId); // allow retry (e.g. chrome:// pages reject injection)
@@ -176,6 +186,21 @@ async function ensureAppRunning() {
   await withTimeout(wakeFalcon(), 5000, 'Falcon wake');
   return waitForHealthy(25000);
 }
+function cookieLookupUrl(downloadUrl, pageUrl) {
+  const dl = (downloadUrl || '').trim();
+  const page = (pageUrl || '').trim();
+  const fm = typeof FalconMedia !== 'undefined' ? FalconMedia : null;
+  const isGv = fm ? fm.isGooglevideoUrl(dl) : false;
+  let isYtPage = false;
+  if (page && /^https?:/i.test(page)) {
+    try {
+      isYtPage = fm ? fm.isYoutubeHost(new URL(page).hostname) : false;
+    } catch (_) {}
+  }
+  if (isGv && isYtPage) return page.split('#')[0];
+  return dl;
+}
+
 async function getCookiesHeader(url) {
   if (!url) return '';
   try {

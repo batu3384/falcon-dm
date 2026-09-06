@@ -17,12 +17,21 @@
     "contextMenus",
     "storage",
     "scripting",
+    "tabs",
     "nativeMessaging"
   ],
-  "host_permissions": [
-    "<all_urls>",
-    "http://127.0.0.1:14201/*"
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.youtube.com/*",
+        "*://youtu.be/*",
+        "*://*.youtube-nocookie.com/*"
+      ],
+      "js": ["media-utils.js", "content.js"],
+      "run_at": "document_idle"
+    }
   ],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1:14201/*"],
   "background": {
     "service_worker": "background.js"
   },

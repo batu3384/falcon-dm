@@ -7,17 +7,31 @@
   "startDownload": { "message": "İndirmeyi Başlat" },
   "sending": { "message": "Gönderiliyor..." },
   "queued": { "message": "Falcon DM kuyruğuna eklendi" },
-  "youtubeHint": { "message": "YouTube: Falcon yt-dlp ile sayfa adresinden indirir. En iyi kalite otomatik birleşir." },
-  "qualityHint": { "message": "Kalite ve format seçin. HLS akışları Falcon DM tarafından otomatik birleştirilir." },
+  "youtubeHint": {
+    "message": "YouTube: Falcon bu sekmeden imzalı CDN adresini alır. Ses için Video+Ses seç."
+  },
+  "videoOnlyHint": { "message": "Bu kaynakta ses yok. Ses istiyorsan Video+Ses kartını seç." },
+  "popupCurrentTab": { "message": "Bu sekme" },
+  "grabberSelectAll": { "message": "Tümünü seç" },
+  "grabberSelectNone": { "message": "Hiçbirini seçme" },
+  "grabberFailed": { "message": "indirme başarısız" },
+  "grabberRetry": { "message": "başarısızları tekrar dene" },
+  "qualityHint": {
+    "message": "Kalite ve format seçin. HLS akışları Falcon DM tarafından otomatik birleştirilir."
+  },
   "labelQuality": { "message": "Kalite ve format" },
   "sentToApp": { "message": "Falcon DM'e gönderildi" },
-  "errorJunkUrl": { "message": "Bu adres gerçek video değil — videoyu oynatıp kalite kartından seç" },
+  "errorJunkUrl": {
+    "message": "Bu adres gerçek video değil — videoyu oynatıp kalite kartından seç"
+  },
   "errorWaking": { "message": "Falcon DM başlatılamadı — uygulamayı kurun veya manuel açın" },
   "errorExtensionReload": { "message": "Eklenti yenilendi — sayfayı yenileyin" },
   "errorMediaUtils": { "message": "Falcon modülü yüklenemedi — eklentiyi yenileyin" },
   "errorAppOffline": { "message": "Falcon DM çalışmıyor — masaüstü uygulamasını açın" },
   "errorTokenInvalid": { "message": "Bağlantı koptu — otomatik yeniden bağlanılacak" },
-  "errorExtensionBlocked": { "message": "Eklenti engelli — Falcon DM Ayarlar → Eklentiyi yeniden bağla" },
+  "errorExtensionBlocked": {
+    "message": "Eklenti engelli — Falcon DM Ayarlar → Eklentiyi yeniden bağla"
+  },
   "errorInvalidUrl": { "message": "Geçerli video adresi bulunamadı — başka kaynak seçin" },
   "errorNoValidSource": { "message": "İndirilebilir URL yok — videoyu oynatıp tekrar deneyin" },
   "errorRateLimit": { "message": "Çok fazla istek — kısa süre sonra tekrar deneyin" },
@@ -32,10 +46,14 @@
   "grabberEmpty": { "message": "Bu sayfada indirilebilir link bulunamadı" },
   "grabberSend": { "message": "Seçilenleri gönder" },
   "optionsTitle": { "message": "Falcon DM Bağlantısı" },
-  "optionsDesc": { "message": "Falcon DM açıkken eklenti otomatik bağlanır. Token yapıştırmaya gerek yok." },
+  "optionsDesc": {
+    "message": "Bağlandıktan sonra indirmeler Falcon DM'e gider. Sorun olursa alttan token kaydet."
+  },
   "optionsTest": { "message": "Bağlantıyı test et" },
   "optionsPair": { "message": "Şimdi bağlan" },
-  "optionsHint": { "message": "Engelliyse: Falcon DM → Ayarlar → Eklentiyi yeniden bağla, sonra Şimdi bağlan." },
+  "optionsHint": {
+    "message": "Engelliyse: Falcon DM → Ayarlar → Eklentiyi yeniden bağla, sonra Şimdi bağlan."
+  },
   "optionsConnected": { "message": "Bağlı — indirmeler Falcon DM'e gider" },
   "kindStream": { "message": "Akış" },
   "kindAudio": { "message": "Ses" },
@@ -57,6 +75,29 @@
   "popupFailClosed": { "message": "Çevrimdışıyken engelle" },
   "popupFailClosedHint": { "message": "Falcon DM alamazsa tarayıcı indirmesini iptal et." },
   "optionsFailClosed": { "message": "Falcon DM çevrimdışıyken tarayıcı indirmesini engelle" },
-  "optionsFailClosedHint": { "message": "Açıkken yakalanan indirmeler tarayıcıya düşmez, iptal edilir." },
-  "popupOnboard": { "message": "Falcon DM'i açın ve eklentiyi Ayarlar'da onaylayın" }
+  "optionsFailClosedHint": {
+    "message": "Açıkken yakalanan indirmeler tarayıcıya düşmez, iptal edilir."
+  },
+  "popupOnboard": { "message": "Falcon DM'i açın ve eklentiyi Ayarlar'da onaylayın" },
+  "errorPairPending": { "message": "Falcon DM Ayarlar'da bu eklentiyi onaylayın" },
+  "popupGrabHint": { "message": "Önce videoyu oynat. Sonra kalite seçip indir." },
+  "popupConnectedHint": { "message": "Bağlı — videoyu oynat, kalite seç, indir." },
+  "popupOfflineHelp": { "message": "Falcon DM kapalı veya eşleşmemiş. Uygulamayı aç, Yeniden bağlan'a bas." },
+  "popupAdvanced": { "message": "Gelişmiş" },
+  "popupPendingHelp": { "message": "Falcon DM → Ayarlar → Eklenti bölümünde onay ver." },
+  "popupOpenPicker": { "message": "Kalite seç" },
+  "overlaySteps": { "message": "Kalite seç → İndirmeyi başlat" },
+  "popupStateBlocked": { "message": "Onay gerekli" },
+  "popupBlockedHelp": { "message": "Eklenti ID'sini Falcon DM Ayarlar'da onayla, API token'ı eklenti ayarlarına yapıştır." },
+  "popupOpenOptions": { "message": "Eklenti ayarlarını aç" },
+  "errorNativeHostMissing": { "message": "Native host yok veya eski eklenti ID — Falcon Ayarlar'dan bu ID ile kur" },
+  "errorTokenEmpty": { "message": "Token boş" },
+  "optionsExtensionId": { "message": "Eklenti ID" },
+  "optionsExtensionIdHint": { "message": "Kopyala → Falcon DM Ayarlar → eklentiyi onayla + native host kur" },
+  "optionsCopyId": { "message": "Kopyala" },
+  "optionsIdCopied": { "message": "Eklenti ID kopyalandı" },
+  "optionsCopyFailed": { "message": "Kopyalanamadı" },
+  "optionsApiToken": { "message": "API token" },
+  "optionsApiTokenHint": { "message": "Falcon DM Ayarlar → API token kopyala, buraya yapıştır, Kaydet" },
+  "optionsSaveToken": { "message": "Token kaydet" }
 }

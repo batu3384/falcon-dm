@@ -15,7 +15,7 @@ const pairing = readFileSync(path.join(__dirname, 'pairing.js'), 'utf8');
 const api = readFileSync(path.join(__dirname, 'api.js'), 'utf8');
 const content = readFileSync(path.join(__dirname, 'content.js'), 'utf8');
 const manifest = JSON.parse(readFileSync(path.join(__dirname, 'manifest.json'), 'utf8'));
-const sandbox = { console, globalThis: {} };
+const sandbox = { console, globalThis: {}, URL };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(src, sandbox);
@@ -32,8 +32,11 @@ assert(FM.isCapturableMedia('https://x.com/a.m3u8', 'application/vnd.apple.mpegu
 const norm = FM.normalizeMediaUrl(
   'https://googlevideo.com/videoplayback?id=abc&range=0-100&other=1',
 );
-assert(!norm.includes('range='), 'strip range');
-assert(norm.includes('id=abc'), 'keep id');
+assert(FM.isDirectGooglevideoUrl('https://rr1---sn.googlevideo.com/videoplayback?itag=18&id=1'), 'direct cdn');
+assert(!FM.isDirectGooglevideoUrl('https://rr1---sn.googlevideo.com/videoplayback?sabr=1&itag=18&id=1'), 'reject sabr cdn');
+assert(!FM.isGooglevideoUrl('https://cdn.example.com/videoplayback?id=1'), 'reject videoplayback spoof');
+assert(FM.isYoutubeHost('www.youtube.com'), 'youtube host');
+assert(!FM.isYoutubeHost('evil-youtube.com'), 'reject youtube suffix spoof');
 assert(manifest.permissions.includes('nativeMessaging'), 'native messaging permission');
 assert(manifest.host_permissions.includes('http://127.0.0.1:14201/*'), 'localhost host permission');
 assert(
@@ -47,13 +50,18 @@ assert(
 assert(background.includes('suggest({ cancel: false })'), 'download fallback');
 assert(background.includes('Promise.allSettled'), 'batch partial results');
 assert(shared.includes('getCookiesHeader'), 'target cookie lookup');
+assert(shared.includes('cookieLookupUrl'), 'YouTube CDN cookie lookup');
 assert(
-  !`${background}${shared}${api}`.includes('getCookiesHeader(it.url, request.page_url)'),
-  'no page cookie fallback',
+  shared.includes('isYoutubeHost') || shared.includes('FalconMedia.isYoutubeHost'),
+  'CDN cookie lookup requires YouTube page host check',
+);
+assert(
+  background.includes('cookieLookupUrl(url, pageUrl)'),
+  'download uses watch-page cookies for googlevideo',
 );
 assert(background.includes('/api/intercept'), 'media intercept endpoint');
 assert(background.includes('suggest({ cancel: true })'), 'download intercept cancels browser save');
-assert(background.includes('cookie_url: item.url'), 'download intercept cookie origin');
+assert(background.includes('cookie_url: cookieLookup'), 'download intercept cookie origin');
 const optionsHtml = readFileSync(path.join(__dirname, 'options.html'), 'utf8');
 assert(optionsHtml.includes('aria-live="polite"'), 'options status live region');
 assert(background.includes('results'), 'batch result contract');
@@ -66,7 +74,9 @@ assert(
   'module split',
 );
 const popup = readFileSync(path.join(__dirname, 'popup.js'), 'utf8');
-assert(content.includes('pageUrl.split'), 'YouTube watch URL');
+assert(content.includes('pageUrl.split'), 'YouTube watch URL fallback');
+assert(content.includes('hasCdn'), 'YouTube CDN direct capture');
+assert(content.includes('normalizeMediaUrl(selected.url)'), 'CDN URL normalized');
 assert(/setAttribute\(['"]role['"],\s*['"]dialog['"]\)/.test(content), 'overlay dialog role');
 assert(content.includes('aria-modal'), 'overlay aria-modal');
 assert(content.includes('Escape'), 'overlay escape close');
@@ -74,11 +84,27 @@ assert(content.includes('fm-fab'), 'isolated video chip');
 assert(background.includes('getInterceptFailClosed'), 'fail-closed preference lookup');
 assert(background.includes('set_fail_closed'), 'fail-closed toggle handler');
 assert(background.includes('GRAB_BATCH_LIMIT'), 'grabber batch limit constant');
-assert(Number(background.match(/GRAB_BATCH_LIMIT = (\d+)/)?.[1]) >= 100, 'grabber batch limit raised');
+assert(
+  Number(background.match(/GRAB_BATCH_LIMIT = (\d+)/)?.[1]) >= 100,
+  'grabber batch limit raised',
+);
 assert(popup.includes('refresh();'), 'pause refreshes connection state');
 const popupHtml = readFileSync(path.join(__dirname, 'popup.html'), 'utf8');
 assert(popupHtml.includes('aria-live="polite"'), 'popup status live region');
 assert(content.includes('Math.min(Math.max(h, 144), 2160)'), 'bounded YouTube height');
-assert(content.includes('googlevideo'), 'YouTube CDN source guard');
+assert(content.includes('isDirectGooglevideoUrl'), 'YouTube CDN direct guard');
+assert(content.includes('videoOnlyHint'), 'video-only audio warning');
+assert(content.includes('grabberSelectAll'), 'grabber select-all');
+assert(content.includes('fm-warn'), 'overlay warning style');
+assert(content.includes('prefers-color-scheme: light'), 'overlay light theme');
+const chromeCss = readFileSync(path.join(__dirname, 'chrome.css'), 'utf8');
+assert(chromeCss.includes('.check-row'), 'popup checkbox row');
+assert(manifest.permissions.includes('tabs'), 'tabs permission');
+assert(Array.isArray(manifest.content_scripts) && manifest.content_scripts.length, 'youtube content_scripts');
+assert(content.includes('youtubeFallbackSources'), 'youtube fallback tiers');
+assert(content.includes('ensureYoutubePageChip'), 'youtube page chip');
+assert(content.includes("'ping'"), 'content script ping');
+assert(popupHtml.includes('id="notice"'), 'popup error notice');
+assert(optionsHtml.includes('options-head'), 'options header');
 
 console.log('extension smoke ok');

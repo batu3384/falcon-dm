@@ -413,72 +413,75 @@ function App() {
             onToggleSpeedLimit={toggleSpeedLimit}
           />
 
-          <div className="content-row">
-            {selectedIds.size > 1 && (
-              <div className="batch-bar" role="toolbar" aria-label={t('app.batch_actions')}>
-                <span className="batch-count mono">
-                  {selectedIds.size} {t('app.selected')}
-                </span>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => handleBatchAction('pause')}
-                  disabled={!canBatchPause}
-                >
-                  <Pause size={14} /> {t('toolbar.pause_all')}
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => handleBatchAction('resume')}
-                  disabled={!canBatchResume}
-                >
-                  <Play size={14} /> {t('toolbar.resume_all')}
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  style={{ color: 'var(--danger)' }}
-                  onClick={() => setConfirmBatchDelete(true)}
-                >
-                  <Trash2 size={14} /> {t('downloadItem.delete')}
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={clearSelection}
-                  aria-label={t('app.clear_selection')}
-                >
-                  <X size={15} />
-                </button>
-              </div>
-            )}
-            <ErrorBoundary label="DownloadList">
-              <DownloadList
-                downloads={downloads}
-                category={activeCategory}
-                searchQuery={searchQuery}
-                selectedId={selectedDownload?.id ?? null}
-                onSelectDownload={selectDownload}
-                onRefresh={fetchDownloads}
-                onRetry={retryFetch}
-                loading={loading}
-                error={error}
-                batchSelectedIds={selectedIds}
-              />
-            </ErrorBoundary>
-
-            {hasMore && (
+          {selectedIds.size > 1 && (
+            <div className="batch-bar" role="toolbar" aria-label={t('app.batch_actions')}>
+              <span className="batch-count mono">
+                {selectedIds.size} {t('app.selected')}
+              </span>
               <button
                 type="button"
-                className="btn-secondary load-more-btn"
-                onClick={() => void loadMoreDownloads()}
-                disabled={loadingMore}
-                aria-busy={loadingMore}
+                className="btn-secondary"
+                onClick={() => handleBatchAction('pause')}
+                disabled={!canBatchPause}
               >
-                {loadingMore ? t('app.loading_more') : t('app.load_more')}
+                <Pause size={14} aria-hidden={true} /> {t('toolbar.pause_all')}
               </button>
-            )}
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => handleBatchAction('resume')}
+                disabled={!canBatchResume}
+              >
+                <Play size={14} aria-hidden={true} /> {t('toolbar.resume_all')}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary btn-danger-text"
+                onClick={() => setConfirmBatchDelete(true)}
+              >
+                <Trash2 size={14} aria-hidden={true} /> {t('downloadItem.delete')}
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={clearSelection}
+                aria-label={t('app.clear_selection')}
+              >
+                <X size={15} />
+              </button>
+            </div>
+          )}
+
+          <div className="content-row">
+            <div className="list-pane">
+              <ErrorBoundary label="DownloadList">
+                <DownloadList
+                  downloads={downloads}
+                  category={activeCategory}
+                  searchQuery={searchQuery}
+                  selectedId={selectedDownload?.id ?? null}
+                  onSelectDownload={selectDownload}
+                  onRefresh={fetchDownloads}
+                  onRetry={retryFetch}
+                  onAddClick={() => setIsModalOpen(true)}
+                  loading={loading}
+                  error={error}
+                  batchSelectedIds={selectedIds}
+                />
+              </ErrorBoundary>
+
+              {hasMore && (
+                <button
+                  type="button"
+                  className="btn-secondary load-more-btn"
+                  onClick={() => void loadMoreDownloads()}
+                  disabled={loadingMore}
+                  aria-busy={loadingMore}
+                >
+                  {loadingMore ? t('app.loading_more') : t('app.load_more')}
+                </button>
+              )}
+            </div>
 
             {selectedDownload && (
               <ErrorBoundary label="InspectorPanel">

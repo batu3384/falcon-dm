@@ -72,6 +72,53 @@
     return m ? parseInt(m[1], 10) : null;
   }
 
+  function isYoutubeHost(host) {
+    const h = (host || '').trim().toLowerCase();
+    return (
+      h === 'youtu.be' ||
+      h === 'youtube.com' ||
+      h.endsWith('.youtube.com') ||
+      h === 'youtube-nocookie.com' ||
+      h.endsWith('.youtube-nocookie.com')
+    );
+  }
+
+  function isGooglevideoUrl(url) {
+    try {
+      const h = new URL(url).hostname.toLowerCase();
+      return h === 'googlevideo.com' || h.endsWith('.googlevideo.com');
+    } catch {
+      return false;
+    }
+  }
+
+  function isDirectGooglevideoUrl(url) {
+    if (!isGooglevideoUrl(url)) return false;
+    try {
+      const u = new URL(url);
+      const sabr = u.searchParams.get('sabr');
+      if (sabr === '1' || sabr === 'true') return false;
+      return u.searchParams.has('itag');
+    } catch {
+      return false;
+    }
+  }
+
+  function isYoutubeWatchUrl(url) {
+    try {
+      const u = new URL(url);
+      if (!isYoutubeHost(u.hostname)) return false;
+      if (u.hostname === 'youtu.be') return u.pathname.length > 1;
+      return (
+        u.pathname.startsWith('/watch') ||
+        u.pathname.startsWith('/shorts/') ||
+        u.pathname.startsWith('/live/')
+      );
+    } catch {
+      return false;
+    }
+  }
+
   /** Strip byte-range / segment params so full file downloads. */
   function normalizeMediaUrl(raw) {
     if (!raw || typeof raw !== 'string') return '';
@@ -124,8 +171,7 @@
       return { fmt: 'MP4', type: 'video' };
     }
     if (u.includes('mime=audio')) return { fmt: 'Audio', type: 'audio' };
-    if (u.includes('videoplayback') || u.includes('googlevideo'))
-      return { fmt: 'MP4', type: 'video' };
+    if (isGooglevideoUrl(url)) return { fmt: 'MP4', type: 'video' };
     return { fmt: 'Media', type: 'video' };
   }
 
@@ -208,8 +254,11 @@
         : muxed
           ? _i18n('kindVideoAudio', 'Video+Audio')
           : _i18n('kindVideoOnly', 'Video only');
-    const title = [quality, fmt.fmt, kind].filter(Boolean).join(' · ');
-    const subtitle = hostLabel(clean);
+    const title = quality ? `${quality} · ${fmt.fmt}` : `${fmt.fmt} · ${kind}`;
+    const sizeLabel = size > 0 ? formatBytes(size) : '';
+    const subtitle = isGooglevideoUrl(clean)
+      ? [kind, sizeLabel].filter(Boolean).join(' · ')
+      : [hostLabel(clean), kind, sizeLabel].filter(Boolean).join(' · ');
     const ext = extFromUrl(clean, meta, fmt, isHls, isAudio);
 
     return {
@@ -245,7 +294,8 @@
       seen.add(dedupeKey);
 
       const meta = (metaMap && (metaMap[raw] || metaMap[clean])) || {};
-      const isYt = clean.includes('googlevideo') || clean.includes('videoplayback');
+      const isYt = isGooglevideoUrl(clean);
+      if (isYt && !isDirectGooglevideoUrl(clean)) continue;
       if (
         meta.contentLength > 0 &&
         meta.contentLength < 2048 &&
@@ -281,6 +331,41 @@
     return `${base}.${ext}`;
   }
 
+  /** yt-dlp tiers when CDN capture is empty (modern YouTube uses SABR/cipher). */
+  function youtubeFallbackSources(pageUrl) {
+    const watch = String(pageUrl || '').split('#')[0];
+    try {
+      const u = new URL(watch);
+      if (!isYoutubeHost(u.hostname)) return [];
+      if (!isYoutubeWatchUrl(watch) && u.hostname !== 'youtu.be' && !u.pathname.startsWith('/shorts/')) {
+        return [];
+      }
+    } catch (_) {
+      return [];
+    }
+    const tiers = [
+      { height: 360, label: '360' },
+      { height: 480, label: '480' },
+      { height: 720, label: '720' },
+      { height: 1080, label: '1080' },
+    ];
+    const hint = _i18n('youtubeHint', 'YouTube via yt-dlp');
+    return tiers.map(({ height, label }) => ({
+      url: watch,
+      title: `${height}p · MP4 · ${_i18n('kindVideoAudio', 'Video+Audio')}`,
+      subtitle: hint,
+      quality: `${height}p`,
+      format: 'MP4',
+      muxed: false,
+      isAudio: false,
+      isHls: false,
+      height,
+      label,
+      score: height,
+      ext: 'mp4',
+    }));
+  }
+
   root.FalconMedia = {
     analyzeUrl,
     groupSources,
@@ -290,6 +375,11 @@
     normalizeMediaUrl,
     isJunkUrl,
     isCapturableMedia,
+    isYoutubeHost,
+    isGooglevideoUrl,
+    isDirectGooglevideoUrl,
+    isYoutubeWatchUrl,
+    youtubeFallbackSources,
     YT_ITAG,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

@@ -21,7 +21,7 @@ interface DownloadListProps {
 
 // ponytail: item height is fixed by the .dl-item layout. Used as the virtualizer
 // estimate; the actual rendered height matches so there's no drift.
-const ITEM_HEIGHT = 64;
+const ITEM_HEIGHT = 68;
 
 export default function DownloadList({
   downloads,
@@ -128,7 +128,7 @@ export default function DownloadList({
           </div>
         ) : error && downloads.length === 0 ? (
           <div className="empty-state error-state" role="alert">
-            <div className="empty-icon">
+            <div className="empty-icon" aria-hidden="true">
               <AlertCircle strokeWidth={1.5} />
             </div>
             <div className="empty-title">{t('downloadList.load_error')}</div>
@@ -141,7 +141,7 @@ export default function DownloadList({
           </div>
         ) : filtered.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-icon">
+            <div className="empty-icon" aria-hidden="true">
               {searchQuery ? (
                 <SearchX strokeWidth={1.5} />
               ) : category === 'Failed' ? (

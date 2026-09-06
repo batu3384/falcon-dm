@@ -49,8 +49,6 @@ export default function Toolbar({
   onToggleSpeedLimit,
 }: ToolbarProps) {
   const { t, i18n } = useTranslation();
-  const isMac = navigator.platform.toUpperCase().includes('MAC');
-
   const toggleLanguage = () => {
     const next = i18n.language === 'en' ? 'tr' : 'en';
     i18n.changeLanguage(next);
@@ -68,7 +66,7 @@ export default function Toolbar({
             onClick={onAddClick}
             aria-label={t('toolbar.add_download')}
           >
-            <Plus size={15} strokeWidth={2.5} />
+            <Plus size={15} strokeWidth={2.5} aria-hidden={true} />
             <span>{t('toolbar.add_download')}</span>
           </button>
 
@@ -134,12 +132,14 @@ export default function Toolbar({
             <Search size={14} />
             <input
               className="search-input"
+              type="search"
               placeholder={t('toolbar.search_placeholder')}
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
               aria-label={t('toolbar.search_placeholder')}
+              autoComplete="off"
+              spellCheck={false}
             />
-            <kbd className="kbd">{isMac ? '⌘K' : 'Ctrl+K'}</kbd>
           </div>
           <button
             type="button"

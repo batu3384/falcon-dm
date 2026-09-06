@@ -249,15 +249,21 @@ pub fn is_junk_media_url(url: &str) -> bool {
             && !lower.contains("videoplayback"))
 }
 
+pub fn is_youtube_host(host: &str) -> bool {
+    let h = host.trim().to_ascii_lowercase();
+    h == "youtu.be"
+        || h == "youtube.com"
+        || h.ends_with(".youtube.com")
+        || h == "youtube-nocookie.com"
+        || h.ends_with(".youtube-nocookie.com")
+}
+
 pub fn is_youtube_watch_url(url: &str) -> bool {
     let Ok(u) = url::Url::parse(url) else {
         return false;
     };
     let host = u.host_str().unwrap_or("");
-    if !(host.ends_with("youtube.com")
-        || host == "youtu.be"
-        || host.ends_with("youtube-nocookie.com"))
-    {
+    if !is_youtube_host(host) {
         return false;
     }
     if host == "youtu.be" {
@@ -269,8 +275,31 @@ pub fn is_youtube_watch_url(url: &str) -> bool {
 }
 
 pub fn is_googlevideo_url(url: &str) -> bool {
-    let lower = url.to_lowercase();
-    lower.contains("googlevideo.com") || lower.contains("videoplayback")
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+    if host.is_empty() {
+        return url.to_ascii_lowercase().contains("googlevideo.com");
+    }
+    host == "googlevideo.com" || host.ends_with(".googlevideo.com")
+}
+
+/// Progressive googlevideo ticket (itag, no sabr=1). SABR/adaptive-only URLs 403 or return junk.
+pub fn is_youtube_direct_cdn_url(url: &str) -> bool {
+    if !is_googlevideo_url(url) {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed
+        .query_pairs()
+        .any(|(k, v)| k == "sabr" && (v == "1" || v.eq_ignore_ascii_case("true")))
+    {
+        return false;
+    }
+    parsed.query_pairs().any(|(k, v)| k == "itag" && !v.is_empty())
 }
 
 /// Internal wire: `#falconfmt=<urlencoded yt-dlp -f>`. Prefer API field `format` — this fragment is storage/compat only.
@@ -302,6 +331,14 @@ pub fn attach_falcon_format(url: &str, format: Option<&str>) -> String {
     }
 }
 
+/// YouTube watch IDs are exactly 11 chars; googlevideo `id=` is often an opaque stream ticket.
+fn looks_like_youtube_video_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// Prefer canonical watch URL for yt-dlp (CDN links 403 outside browser).
 pub fn youtube_page_url_for_download(url: &str, referrer: Option<&str>) -> Option<String> {
     let (clean, selected_format) = split_falcon_format(url);
@@ -315,11 +352,11 @@ pub fn youtube_page_url_for_download(url: &str, referrer: Option<&str>) -> Optio
             return Some(attach_falcon_format(&referrer_clean, format));
         }
     }
-    // googlevideo: build watch URL from id= even without referrer
+    // googlevideo: only synthesize watch URL when id= looks like a real 11-char video id.
     if is_googlevideo_url(&clean) {
         if let Ok(u) = url::Url::parse(&clean) {
             for (k, v) in u.query_pairs() {
-                if k == "id" && !v.is_empty() && v.len() >= 6 {
+                if k == "id" && looks_like_youtube_video_id(&v) {
                     return Some(attach_falcon_format(
                         &format!("https://www.youtube.com/watch?v={v}"),
                         selected_format.as_deref(),
@@ -327,10 +364,15 @@ pub fn youtube_page_url_for_download(url: &str, referrer: Option<&str>) -> Optio
                 }
             }
         }
-        if let Some(r) = referrer.filter(|s| s.contains("youtube.com") || s.contains("youtu.be")) {
-            let (referrer_clean, referrer_format) = split_falcon_format(r);
-            let format = selected_format.as_deref().or(referrer_format.as_deref());
-            return Some(attach_falcon_format(&referrer_clean, format));
+        if let Some(r) = referrer {
+            let Ok(ru) = url::Url::parse(r) else {
+                return None;
+            };
+            if ru.host_str().is_some_and(is_youtube_host) {
+                let (referrer_clean, referrer_format) = split_falcon_format(r);
+                let format = selected_format.as_deref().or(referrer_format.as_deref());
+                return Some(attach_falcon_format(&referrer_clean, format));
+            }
         }
     }
     None
@@ -490,6 +532,42 @@ mod tests {
     fn test_dns_rebinding_fail_safe() {
         let url = url::Url::parse("https://nonexistent-falcon-12345.invalid/file").unwrap();
         assert!(resolve_public_addresses(&url).is_err());
+    }
+
+    #[test]
+    fn youtube_direct_cdn_rejects_sabr() {
+        let sabr = "https://rr1---sn.googlevideo.com/videoplayback?sabr=1&itag=18&id=abc";
+        assert!(!is_youtube_direct_cdn_url(sabr));
+        let ok = "https://rr1---sn.googlevideo.com/videoplayback?itag=18&id=abc";
+        assert!(is_youtube_direct_cdn_url(ok));
+    }
+
+    #[test]
+    fn youtube_host_rejects_suffix_spoof() {
+        assert!(is_youtube_host("youtu.be"));
+        assert!(!is_youtube_host("notyoutube.com"));
+        assert!(!is_youtube_host("evil-youtube.com"));
+        assert!(!is_googlevideo_url("https://cdn.example.com/videoplayback?id=1"));
+        assert!(is_googlevideo_url("https://rr1---sn-abc.googlevideo.com/videoplayback?id=1"));
+    }
+
+    #[test]
+    fn youtube_page_url_rejects_spoof_referrer() {
+        let cdn = "https://rr1---sn-abc.googlevideo.com/videoplayback?id=abc";
+        assert!(youtube_page_url_for_download(cdn, Some("https://notyoutube.com/watch")).is_none());
+        assert!(youtube_page_url_for_download(cdn, Some("https://www.youtube.com/watch?v=abc")).is_some());
+    }
+
+    #[test]
+    fn youtube_page_url_rejects_opaque_googlevideo_id() {
+        let sabr = "https://rr5---sn.googlevideo.com/videoplayback?sabr=1&id=o-APsuIA4T4oPiiO6f7-MNbOU-LO0MDxOui5B37OAnUHZZ";
+        assert!(youtube_page_url_for_download(sabr, None).is_none());
+        let watch = youtube_page_url_for_download(
+            sabr,
+            Some("https://www.youtube.com/watch?v=PuVl7GB4d2c"),
+        )
+        .unwrap();
+        assert!(watch.contains("watch?v=PuVl7GB4d2c"));
     }
 
     #[test]

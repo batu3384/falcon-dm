@@ -126,7 +126,12 @@ function DownloadItemInner({
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     onSelect?.(isSelected ? null : item);
-    setMenu({ x: e.clientX, y: e.clientY });
+    const menuW = 220;
+    const menuH = 340;
+    const pad = 8;
+    const x = Math.min(e.clientX, window.innerWidth - menuW - pad);
+    const y = Math.min(e.clientY, window.innerHeight - menuH - pad);
+    setMenu({ x: Math.max(pad, x), y: Math.max(pad, y) });
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {

@@ -7,8 +7,20 @@
   "startDownload": { "message": "Start Download" },
   "sending": { "message": "Sending..." },
   "queued": { "message": "Queued in Falcon DM" },
-  "youtubeHint": { "message": "YouTube: Falcon downloads via yt-dlp from the watch page (avoids CDN 403). Best quality is merged automatically." },
-  "qualityHint": { "message": "Choose quality and format. HLS streams are merged automatically by Falcon DM." },
+  "youtubeHint": {
+    "message": "YouTube: Falcon captures the signed CDN link from this tab. Pick Video+Audio for sound."
+  },
+  "videoOnlyHint": {
+    "message": "This source has no audio. Pick a Video+Audio card if you want sound."
+  },
+  "popupCurrentTab": { "message": "Current tab" },
+  "grabberSelectAll": { "message": "Select all" },
+  "grabberSelectNone": { "message": "Select none" },
+  "grabberFailed": { "message": "downloads failed" },
+  "grabberRetry": { "message": "retry failed items" },
+  "qualityHint": {
+    "message": "Choose quality and format. HLS streams are merged automatically by Falcon DM."
+  },
   "labelQuality": { "message": "Quality & format" },
   "sentToApp": { "message": "Sent to Falcon DM" },
   "errorJunkUrl": { "message": "Not a real video URL — play the video and pick a quality card" },
@@ -17,7 +29,9 @@
   "errorMediaUtils": { "message": "Falcon module failed to load — reload extension" },
   "errorAppOffline": { "message": "Falcon DM is not running — open the desktop app" },
   "errorTokenInvalid": { "message": "Connection lost — will re-pair automatically" },
-  "errorExtensionBlocked": { "message": "Extension blocked — Falcon DM Settings → Reconnect extension" },
+  "errorExtensionBlocked": {
+    "message": "Extension blocked — Falcon DM Settings → Reconnect extension"
+  },
   "errorInvalidUrl": { "message": "No valid video URL — try another source" },
   "errorNoValidSource": { "message": "No downloadable URL — play the video and try again" },
   "errorRateLimit": { "message": "Too many requests — try again shortly" },
@@ -32,10 +46,14 @@
   "grabberEmpty": { "message": "No downloadable links found on this page" },
   "grabberSend": { "message": "Send selected" },
   "optionsTitle": { "message": "Falcon DM Connection" },
-  "optionsDesc": { "message": "Connects automatically when Falcon DM is open. No token paste needed." },
+  "optionsDesc": {
+    "message": "Connects automatically when Falcon DM is open. No token paste needed."
+  },
   "optionsTest": { "message": "Test connection" },
   "optionsPair": { "message": "Connect now" },
-  "optionsHint": { "message": "If blocked: Falcon DM → Settings → Reconnect extension, then Connect now." },
+  "optionsHint": {
+    "message": "If blocked: Falcon DM → Settings → Reconnect extension, then Connect now."
+  },
   "optionsConnected": { "message": "Connected — downloads go to Falcon DM" },
   "kindStream": { "message": "Stream" },
   "kindAudio": { "message": "Audio" },
@@ -57,6 +75,29 @@
   "popupFailClosed": { "message": "Block when offline" },
   "popupFailClosedHint": { "message": "Cancel browser download if Falcon DM cannot receive it." },
   "optionsFailClosed": { "message": "Block browser download when Falcon DM is offline" },
-  "optionsFailClosedHint": { "message": "When enabled, intercepted downloads are cancelled instead of falling back to the browser." },
-  "popupOnboard": { "message": "Open Falcon DM and approve this extension in Settings" }
+  "optionsFailClosedHint": {
+    "message": "When enabled, intercepted downloads are cancelled instead of falling back to the browser."
+  },
+  "popupOnboard": { "message": "Open Falcon DM and approve this extension in Settings" },
+  "errorPairPending": { "message": "Approve this extension in Falcon DM Settings" },
+  "popupGrabHint": { "message": "Play the video first, then pick quality in the overlay." },
+  "popupConnectedHint": { "message": "Connected — play the video, pick quality, download." },
+  "popupOfflineHelp": { "message": "Falcon DM is offline or not paired. Open the app, then Reconnect." },
+  "popupAdvanced": { "message": "Advanced" },
+  "popupPendingHelp": { "message": "Falcon DM → Settings → approve the extension." },
+  "popupOpenPicker": { "message": "Pick quality" },
+  "overlaySteps": { "message": "Pick quality → Start download" },
+  "popupStateBlocked": { "message": "Approval required" },
+  "popupBlockedHelp": { "message": "Approve this extension ID in Falcon DM Settings, then paste API token in extension options." },
+  "popupOpenOptions": { "message": "Open extension settings" },
+  "errorNativeHostMissing": { "message": "Native host missing or wrong extension ID — install from Falcon Settings with this ID" },
+  "errorTokenEmpty": { "message": "Token is empty" },
+  "optionsExtensionId": { "message": "Extension ID" },
+  "optionsExtensionIdHint": { "message": "Copy to Falcon DM Settings → approve extension + install native host." },
+  "optionsCopyId": { "message": "Copy" },
+  "optionsIdCopied": { "message": "Extension ID copied" },
+  "optionsCopyFailed": { "message": "Copy failed" },
+  "optionsApiToken": { "message": "API token" },
+  "optionsApiTokenHint": { "message": "Copy from Falcon DM Settings → Extension API token, paste here, Save." },
+  "optionsSaveToken": { "message": "Save token" }
 }

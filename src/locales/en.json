@@ -32,8 +32,8 @@
     "command_palette": "Command Palette"
   },
   "downloadList": {
-    "no_downloads": "No downloads found",
-    "no_downloads_desc": "You don't have any downloads in this category.",
+    "no_downloads": "No downloads yet",
+    "no_downloads_desc": "Add a URL, or send one from the browser extension.",
     "no_search_results": "No matches",
     "no_search_desc": "Try a different filename or URL.",
     "empty_failed": "No failed downloads",
@@ -200,6 +200,7 @@
     "extension_reset": "Extension link reset — approve again from Settings when the browser pairs",
     "pair_pending": "Pending extension approval",
     "pair_approve": "Approve extension",
+    "pair_approve_manual": "Approve this ID",
     "pair_approved": "Extension approved — pending browser request continues automatically",
     "pair_none": "No pending extension request",
     "cat_video": "Video save path",

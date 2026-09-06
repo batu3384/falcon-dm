@@ -4,20 +4,52 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Falcon DM</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="chrome.css" />
   </head>
   <body class="options">
-    <h1 id="title">Falcon DM</h1>
-    <p class="lead" id="desc"></p>
+    <header class="options-head">
+      <img src="icon48.png" alt="" class="logo" />
+      <div>
+        <h1 id="title">Falcon DM</h1>
+        <p class="lead" id="desc"></p>
+      </div>
+    </header>
+
     <div id="status" class="status-card" role="status" aria-live="polite"></div>
+
+    <section class="setup-card">
+      <div class="section-title" id="id-label"></div>
+      <div class="mono-row">
+        <code id="extension-id" class="mono"></code>
+        <button id="copy-id" class="secondary sm" type="button"></button>
+      </div>
+      <p class="hint" id="id-hint"></p>
+    </section>
+
+    <section class="setup-card">
+      <label class="field-label" for="api-token" id="token-label"></label>
+      <input id="api-token" class="field-input mono" type="password" autocomplete="off" />
+      <p class="hint" id="token-hint"></p>
+      <div class="actions">
+        <button id="save-token" class="primary" type="button"></button>
+      </div>
+    </section>
+
     <div class="actions">
-      <button id="pair" class="primary" type="button"></button>
+      <button id="pair" class="secondary" type="button"></button>
       <button id="test" class="secondary" type="button"></button>
     </div>
-    <div class="check-row options-check">
+
+    <label class="check-row options-check" for="fail-closed">
       <input id="fail-closed" type="checkbox" />
-      <label for="fail-closed" id="fail-closed-label"></label>
-    </div>
+      <span id="fail-closed-label"></span>
+    </label>
     <p class="hint" id="fail-closed-hint"></p>
     <p class="hint" id="hint"></p>
     <script src="options.js"></script>

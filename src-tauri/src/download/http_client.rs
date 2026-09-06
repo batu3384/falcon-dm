@@ -52,6 +52,21 @@ fn same_origin(left: &Url, right: &Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
+fn youtube_referrer_ok(referrer: &str) -> bool {
+    Url::parse(referrer)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+        .is_some_and(|host| crate::util::is_youtube_host(&host))
+}
+
+fn youtube_cdn_capture(url: &Url, headers: &HttpHeaders) -> bool {
+    if url.scheme() != "https" || !crate::util::is_googlevideo_url(url.as_str()) {
+        return false;
+    }
+    headers.cookies.as_deref().is_some_and(|c| !c.trim().is_empty())
+        || headers.referrer.as_deref().is_some_and(youtube_referrer_ok)
+}
+
 pub(crate) fn add_request_headers(
     request: reqwest::RequestBuilder,
     initial: &Url,
@@ -60,7 +75,11 @@ pub(crate) fn add_request_headers(
 ) -> reqwest::RequestBuilder {
     let same_origin = same_origin(initial, current);
     let mut request = request;
-    if same_origin && initial.scheme() == "https" {
+    // Cookie/Referer follow the *current* URL so a googlevideo redirect off-CDN
+    // cannot leak the YouTube session to a third party.
+    let send_session =
+        (same_origin && initial.scheme() == "https") || youtube_cdn_capture(current, headers);
+    if send_session {
         if let Some(value) = headers.cookies.as_deref().map(sanitize_header_value) {
             if !value.is_empty() {
                 request = request.header(reqwest::header::COOKIE, value);
@@ -268,5 +287,19 @@ mod tests {
     #[test]
     fn split_byte_ranges_single_connection() {
         assert_eq!(split_byte_ranges(100, 1), vec![(0, 99)]);
+    }
+
+    #[test]
+    fn youtube_cdn_capture_accepts_cross_origin_session() {
+        let initial =
+            Url::parse("https://rr3---sn-abc.googlevideo.com/videoplayback?id=xyz").unwrap();
+        let headers = HttpHeaders {
+            cookies: Some("VISITOR=1".into()),
+            referrer: Some("https://www.youtube.com/watch?v=abc".into()),
+            ..Default::default()
+        };
+        assert!(youtube_cdn_capture(&initial, &headers));
+        let other = Url::parse("https://cdn.example.com/file.bin").unwrap();
+        assert!(!youtube_cdn_capture(&other, &headers));
     }
 }
