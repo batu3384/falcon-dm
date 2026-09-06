@@ -86,6 +86,23 @@ async function postFalcon(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
 }
 
 async function sendToFalcon(path, body) {
+  // Connected badge: skip health RTT — postFalcon fails fast if socket is dead.
+  if (connectionState === 'connected') {
+    try {
+      return await postFalcon(path, body);
+    } catch (e) {
+      if (!(await appHealthy())) {
+        await withTimeout(wakeFalcon(), 5000, 'Falcon wake');
+        if (!(await waitForHealthy(15000))) {
+          setState('offline');
+          throw new Error(msg('errorWaking', 'Falcon DM başlatılamadı'));
+        }
+        return postFalcon(path, body);
+      }
+      throw e;
+    }
+  }
+
   if (await appHealthy()) {
     return postFalcon(path, body);
   }

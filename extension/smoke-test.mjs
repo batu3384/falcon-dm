@@ -82,33 +82,25 @@ const hijackListen = background.slice(
 );
 assert(
   hijackListen.indexOf('markHijackStarted(item);') <
-    hijackListen.lastIndexOf('runHijack(item, { skipDedupCheck: true })'),
+    hijackListen.lastIndexOf('runHijack(item, { skipDedup: true })'),
   'primary hijack marks dedup before runHijack',
 );
-assert(background.includes('pauseBrowserDownload'), 'hijack pauses Chrome until Falcon accepts');
-assert(background.includes('resumeBrowserDownload'), 'fail-open resumes Chrome download');
+assert(background.includes('fallbackBrowserDownload'), 'fail-open restarts Chrome download');
+assert(!background.includes('pauseBrowserDownload'), 'IDM model does not pause/resume race');
+assert(!background.includes('resumeBrowserDownload'), 'IDM model does not resume cancelled rows');
 assert(
-  /suggest\(\);[\s\S]*?pauseBrowserDownload\(item\.id\);[\s\S]*?runHijack\(item, \{ skipDedupCheck: true \}\)/.test(
+  /suggest\(\);[\s\S]*?abortAndEraseBrowserDownload\(item\.id\);[\s\S]*?runHijack\(item, \{ skipDedup: true \}\)/.test(
     hijackListen,
   ),
-  'hijack pauses Chrome then queues Falcon without early abort',
+  'IDM: cancel Chrome first then enqueue Falcon',
 );
-{
-  const runHijackTry = background.slice(
-    background.indexOf('await sendToFalcon'),
-    background.indexOf('} catch (e)'),
-  );
-  assert(
-    runHijackTry.includes('abortAndEraseBrowserDownload(item.id)'),
-    'success aborts Chrome only after Falcon POST',
-  );
-}
+assert(
+  background.includes('opts.skipDedup || opts.skipDedupCheck') ||
+    background.includes('skipDedup = !!(opts.skipDedup'),
+  'runHijack honors skipDedup from listeners',
+);
 assert(!background.includes('blockBrowser'), 'removed falconReachable kill switch on POST errors');
 assert(background.includes('hijackInFlight'), 'onCreated dedupes against active hijack');
-assert(
-  !/suggest\(\);[\s\S]*?abortAndEraseBrowserDownload\(item\.id\);[\s\S]*?runHijack/.test(hijackListen),
-  'listener does not abort before runHijack',
-);
 const hijackBlock = background.slice(
   background.indexOf('chrome.downloads.onDeterminingFilename.addListener'),
   background.indexOf('chrome.contextMenus.onClicked.addListener'),
@@ -169,7 +161,17 @@ assert(content.includes('Escape'), 'overlay escape close');
 assert(content.includes('fm-fab'), 'isolated video chip');
 assert(background.includes('runHijack'), 'hijack logic centralized');
 assert(background.includes('hijackInFlight'), 'in-flight hijack guard');
-assert(background.includes('hijackRecentlyHandled'), 'onCreated skips duplicate hijack');
+assert(
+  background.includes('scheduleCreatedBackup') && background.includes('awaitingFilename'),
+  'onCreated waits for Chrome filename before Falcon enqueue',
+);
+assert(
+  !/onCreated\.addListener[\s\S]*?markHijackStarted\(item\);\s*\n\s*stashPendingChromeFilename\(item\);\s*\n\s*abortAndEraseBrowserDownload\(item\.id\);\s*\n\s*await runHijack/.test(
+    background,
+  ),
+  'onCreated must not enqueue immediately with empty filename',
+);
+assert(api.includes("connectionState === 'connected'"), 'connected path skips health RTT');
 assert(background.includes('removeFile'), 'complete hijacks delete file from disk');
 assert(!background.includes('queueMicrotask(() => {\n    chrome.downloads'), 'abort does not defer cancel');
 assert(background.includes('downloads.onChanged'), 'watch hijacked ids until purged');

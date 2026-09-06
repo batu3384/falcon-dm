@@ -97,6 +97,29 @@ function basenameFilename(raw) {
   return parts[parts.length - 1] || s;
 }
 
+/** Fail-open: Chrome row already cancelled — start a fresh browser download we own. */
+async function fallbackBrowserDownload(item, filename) {
+  const name =
+    basenameFilename(filename) ||
+    basenameFilename(item.filename) ||
+    basenameFilename(item.url.split('/').pop().split('?')[0]) ||
+    'download';
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download(
+      {
+        url: item.url,
+        filename: name,
+        conflictAction: 'uniquify',
+      },
+      (id) => {
+        const err = chrome.runtime.lastError;
+        if (err) reject(new Error(err.message));
+        else resolve(id);
+      },
+    );
+  });
+}
+
 async function getPageTitle(pageUrl) {
   if (!pageUrl) return '';
   try {
@@ -181,7 +204,10 @@ const pendingChromeNames = new Map();
 const abortedBrowserIds = new Set();
 const hijackWatchIds = new Set();
 const hijackInFlight = new Set();
+/** onCreated often fires before Chrome knows the real filename — wait for onDeterminingFilename. */
+const awaitingFilename = new Map(); // id -> timeoutId
 const HIJACK_DEDUP_MS = 8000;
+const FILENAME_WAIT_MS = 450;
 
 function hijackKey(item) {
   return `${item.url}\0${item.referrer || ''}`;
@@ -203,26 +229,35 @@ function takePendingChromeFilename(item) {
   return name;
 }
 
+function clearAwaitingFilename(id) {
+  if (id == null) return;
+  const t = awaitingFilename.get(id);
+  if (t) clearTimeout(t);
+  awaitingFilename.delete(id);
+}
+
+function scheduleCreatedBackup(item) {
+  if (item.id == null) return;
+  clearAwaitingFilename(item.id);
+  const timeoutId = setTimeout(() => {
+    awaitingFilename.delete(item.id);
+    if (interceptPaused) return;
+    if (hijackRecentlyHandled(item) || hijackInFlight.has(hijackKey(item))) return;
+    markHijackStarted(item);
+    stashPendingChromeFilename(item);
+    abortAndEraseBrowserDownload(item.id);
+    runHijack(item, { skipDedup: true }).catch((err) => console.error(err));
+  }, FILENAME_WAIT_MS);
+  awaitingFilename.set(item.id, timeoutId);
+}
+
 function stashPendingChromeFilename(item) {
   if (item.id == null) return;
   const name = basenameFilename(item.filename);
   if (name) pendingChromeNames.set(item.id, name);
 }
 
-/** Hold Chrome download until Falcon accepts or we fail-closed block. */
-function pauseBrowserDownload(id) {
-  if (id == null) return;
-  hijackWatchIds.add(id);
-  chrome.downloads.pause(id).catch(() => {});
-}
-
-function resumeBrowserDownload(id) {
-  if (id == null) return;
-  chrome.downloads.resume(id).catch(() => {});
-  hijackWatchIds.delete(id);
-}
-
-/** Cancel in-flight download and delete any file Chrome already wrote. */
+/** Delete Chrome history row + any file already written to disk. */
 function purgeBrowserDownload(id) {
   if (id == null) return;
   chrome.downloads
@@ -261,7 +296,7 @@ function purgeBrowserDownload(id) {
     });
 }
 
-/** Sync cancel right after suggest() — async search/microtask is too slow for small files. */
+/** Cancel Chrome immediately (IDM-style). purge deletes any partial/complete file. */
 function abortAndEraseBrowserDownload(id) {
   if (id == null) return;
   hijackWatchIds.add(id);
@@ -276,17 +311,28 @@ function abortAndEraseBrowserDownload(id) {
   });
 }
 
+/**
+ * IDM model: Chrome never owns the file.
+ * 1) Caller already cancelled Chrome (or will).
+ * 2) Enqueue Falcon.
+ * 3) Fail-open restarts a NEW Chrome download (resume is useless after cancel).
+ */
 async function runHijack(item, opts = {}) {
   const key = hijackKey(item);
   if (hijackInFlight.has(key)) return;
-  if (!opts.skipDedup && hijackRecentlyHandled(item)) return;
-  if (!opts.skipDedup) markHijackStarted(item);
+  // Listeners pass skipDedup after markHijackStarted — must not early-return.
+  const skipDedup = !!(opts.skipDedup || opts.skipDedupCheck);
+  if (!skipDedup && hijackRecentlyHandled(item)) return;
+  if (!skipDedup) markHijackStarted(item);
 
   hijackInFlight.add(key);
   const failClosed = await getInterceptFailClosed();
+  let filename = '';
 
   try {
-    const { pageUrl, filename, hijack } = await buildHijackEnqueue(item);
+    const built = await buildHijackEnqueue(item);
+    filename = built.filename;
+    const { pageUrl, hijack } = built;
     const cookieLookup = cookieLookupUrl(item.url, pageUrl);
     const cookiesHeader = await getCookiesHeader(cookieLookup);
 
@@ -310,7 +356,12 @@ async function runHijack(item, opts = {}) {
       abortAndEraseBrowserDownload(item.id);
       notify('Falcon DM', msg('interceptBlocked', 'Falcon DM offline — download blocked'));
     } else {
-      resumeBrowserDownload(item.id);
+      abortAndEraseBrowserDownload(item.id);
+      try {
+        await fallbackBrowserDownload(item, filename);
+      } catch (fallbackErr) {
+        console.error(fallbackErr);
+      }
       notify(
         'Falcon DM',
         e.message || msg('appClosedFallback', 'Falcon DM offline — browser download kept'),
@@ -385,35 +436,34 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
     suggest();
     return;
   }
-  if (hijackRecentlyHandled(item)) {
+  clearAwaitingFilename(item.id);
+  // Chrome's real name is available HERE — stash before any cancel/erase.
+  stashPendingChromeFilename(item);
+  if (hijackRecentlyHandled(item) || hijackInFlight.has(hijackKey(item))) {
     suggest();
-    pauseBrowserDownload(item.id);
-    runHijack(item, { skipDedupCheck: true }).catch((err) => console.error(err));
+    abortAndEraseBrowserDownload(item.id);
     return;
   }
   markHijackStarted(item);
-  stashPendingChromeFilename(item);
   suggest();
-  pauseBrowserDownload(item.id);
-  runHijack(item, { skipDedupCheck: true }).catch((err) => console.error(err));
+  // IDM: cancel Chrome first, then hand URL to Falcon with Chrome's filename.
+  abortAndEraseBrowserDownload(item.id);
+  runHijack(item, { skipDedup: true }).catch((err) => console.error(err));
 });
 
-// ponytail: rare builds skip onDeterminingFilename — backup hijack only, never double-cancel.
+// onCreated fires before filename is known — never enqueue here (wrong URL basename).
 chrome.downloads.onCreated.addListener((item) => {
   if (interceptPaused) return;
   if (item.byExtensionId === chrome.runtime.id) return;
   const key = hijackKey(item);
-  if (hijackInFlight.has(key)) {
+  if (hijackInFlight.has(key) || hijackRecentlyHandled(item) || hijackWatchIds.has(item.id)) {
     abortAndEraseBrowserDownload(item.id);
     return;
   }
-  if (hijackRecentlyHandled(item)) return;
   (async () => {
     if (connectionState !== 'connected' && !(await appHealthy())) return;
-    markHijackStarted(item);
-    stashPendingChromeFilename(item);
-    pauseBrowserDownload(item.id);
-    await runHijack(item, { skipDedupCheck: true });
+    // Wait briefly for onDeterminingFilename to supply the server filename.
+    scheduleCreatedBackup(item);
   })().catch((err) => console.error(err));
 });
 
