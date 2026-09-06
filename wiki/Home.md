@@ -4,6 +4,8 @@ Welcome to the **Falcon DM** documentation wiki.
 
 Falcon DM is a local-only macOS download manager for HTTP(S), HLS, and YouTube — built with Tauri 2 (Rust) and React/TypeScript. No telemetry, no cloud queue.
 
+**Highlights:** multi-connection HTTP (including resume), HLS segment resume, yt-dlp with opt-in cookies, extension fail-closed hijack option, scheduler time windows, GitHub release update check.
+
 ## Quick links
 
 | Page | Description |

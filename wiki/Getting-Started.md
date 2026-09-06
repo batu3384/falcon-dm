@@ -39,11 +39,19 @@ Signed release builds use the GitHub **Release** workflow with Apple signing sec
 2. Load the browser extension (see [Browser Extension](Browser-Extension)).
 3. Approve the extension ID when a pair request appears.
 4. Install the native messaging host (onboarding wizard or Settings → General).
-5. Optional: set download paths, category folders, and `max connections per server`.
+5. Optional network tuning: **Settings → Network** — proxy, speed limit, max connections per server.
+6. Optional YouTube: **Settings → General** — yt-dlp path, **Use browser cookies for yt-dlp** (off by default).
+7. Optional extension: popup **Block when offline** if you prefer fail-closed hijack.
+8. Optional scheduler: toolbar **Scheduler** — start/stop time window (no shutdown/dial-up modes).
 
 ## Verify install
 
 ```bash
 npm run lint && npm test && npm run build
+node extension/smoke-test.mjs
 cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test
 ```
+
+## Check for updates
+
+In the running app: **Settings → General → Check for updates**. Compares the installed version to the latest GitHub Release and opens the release page when newer.

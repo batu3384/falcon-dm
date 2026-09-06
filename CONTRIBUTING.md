@@ -7,11 +7,11 @@ setup and the standards a contribution must meet before merge.
 
 ### Prerequisites
 
-- **Node.js** 20+ and npm
+- **Node.js** 22+ and npm (matches CI)
 - **Rust** stable toolchain (`rustup`)
-- **macOS** (Falcon DM is macOS-only for now)
+- **macOS** (Falcon DM desktop target is macOS-only for now)
 - **Homebrew** dependencies: `brew install aria2 ffmpeg yt-dlp`
-- A **Chrome/Firefox** browser to load the `extension/` folder unpacked
+- **Chrome/Edge** to load the `extension/` folder unpacked
 
 ### First run
 
@@ -47,6 +47,7 @@ npm run lint            # ESLint, --max-warnings 0
 npm run format:check    # Prettier
 npm run test            # Vitest
 npm run build           # tsc + vite build
+node extension/smoke-test.mjs
 
 # Backend (in src-tauri/)
 cargo fmt --check
@@ -72,7 +73,8 @@ Format everything with `npm run format` and `cargo fmt` as needed.
   `store/` (Zustand: downloads, toast), `lib/schema.ts` (zod schemas),
   `components/` (React). State flows store→component, never via prop drilling.
 - **Extension** (`extension/`): MV3 service worker + content script. Talks to
-  the desktop app over the authenticated localhost HTTP API.
+  the desktop app over the authenticated localhost HTTP API. Supports pause,
+  optional fail-closed hijack, and batch enqueue (≤100).
 
 Look for `// ponytail:` comments in the codebase — they document non-obvious
 decisions and the rationale behind them.

@@ -41,23 +41,23 @@
 
 | Area | What you get |
 |------|----------------|
-| **HTTP(S)** | Multi-connection range downloads, DNS-pinned streaming, bounded redirects, atomic completion, priority queue, scheduler |
-| **HLS (m3u8)** | Parallel segment fetch, ffmpeg mux |
-| **YouTube** | Watch URL + <code>yt-dlp</code> (quality via API <code>format</code> field) |
-| **Browser extension** | Download hijack, video quality picker, link grabber (batch ≤20) |
-| **Desktop UI** | Inspector panel, speed graph, EN/TR i18n, category paths |
+| **HTTP(S)** | Multi-connection range downloads (including resume after `.part`), DNS-pinned streaming, speed limit, proxy, scheduler windows |
+| **HLS (m3u8)** | Parallel segment fetch with resume, speed limit, proxy, ffmpeg mux |
+| **YouTube** | Watch URL + `yt-dlp` (optional browser cookies, global proxy/speed limit, custom binary path) |
+| **Browser extension** | Download hijack, optional fail-closed when offline, video quality picker, link grabber (batch ≤100) |
+| **Desktop UI** | Inspector panel, speed graph, EN/TR i18n, category paths, release update check |
 | **Security** | Extension pair approval, SSRF URL block, token + Origin allowlist |
 
 ## Core Architecture
 
 ### Download engine
 
-Ordinary HTTP(S) traffic uses the Rust DNS-pinned streaming path. The bundled `aria2c` binary remains available for legacy session recovery and protocol-specific compatibility. Private targets, unsafe redirects, and magnet URLs are rejected.
+Ordinary HTTP(S) traffic uses the Rust DNS-pinned streaming path. When a `.falcon.part` file already exists, resume tries multi-connection range fetch for the remaining bytes before falling back to a single connection. The bundled `aria2c` binary remains available for legacy session recovery and protocol-specific compatibility. Private targets, unsafe redirects, and magnet URLs are rejected.
 
 ### Stream pipeline (HLS + YouTube)
 
-- **HLS:** Rust downloads segments concurrently; `ffmpeg` sidecar muxes to disk.
-- **YouTube:** CDN (<code>googlevideo</code>) URLs are rewritten to watch URLs; <code>yt-dlp</code> runs as an external tool (PATH or **Settings → yt-dlp path**). Not bundled.
+- **HLS:** Rust downloads segments concurrently (proxy + speed limit from Settings); segment temp dir is reused per download ID for resume; `ffmpeg` sidecar muxes to disk.
+- **YouTube:** CDN (<code>googlevideo</code>) URLs are rewritten to watch URLs; <code>yt-dlp</code> runs as an external tool (PATH or **Settings → yt-dlp path**). Global **proxy** and **speed limit** apply; browser cookies are **opt-in** (**Settings → Use browser cookies for yt-dlp**). Not bundled.
 
 ### Queue & persistence
 
@@ -129,7 +129,7 @@ npm run tauri build    # .app / .dmg (see release.yml for signed builds)
 2. Build/install native host manifests:
 
    ```bash
-   cargo build --manifest-path src-tauri/Cargo.toml --bin falcon-dm-native-host
+   cargo build --manifest-path src-tauri/Cargo.toml -p falcon-dm-native-host
    NATIVE_HOST_BIN="$PWD/src-tauri/target/debug/falcon-dm-native-host" \
    CHROME_EXTENSION_ID="<chrome-id>" \
    EDGE_EXTENSION_ID="<edge-id>" \
@@ -137,8 +137,10 @@ npm run tauri build    # .app / .dmg (see release.yml for signed builds)
    ```
 
 3. Open Falcon DM → **Settings → Approve extension** when pair request appears
-4. YouTube: install `yt-dlp`; optional custom binary path in Settings
-5. **Wake deep link:** `falcondm://wake` only (no download params — avoids token-in-URL leaks). Extension wakes app then uses HTTP API. `tauri dev` may not register the URL scheme.
+4. Extension popup/options: **Pause** stops hijack; **Block when offline** cancels browser download if Falcon cannot receive it (default: fail-open fallback)
+5. YouTube: install `yt-dlp`; optional custom binary path and cookie opt-in in Settings
+6. **Updates:** Settings → **Check for updates** compares against GitHub Releases (opens release page when newer)
+7. **Wake deep link:** `falcondm://wake` only (no download params — avoids token-in-url leaks). Extension wakes app then uses HTTP API. `tauri dev` may not register the URL scheme.
 
 ## Development & contributing
 
@@ -147,6 +149,7 @@ Details: [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECU
 ```bash
 # Frontend
 npm run lint && npm run format:check && npm run test && npm run build
+node extension/smoke-test.mjs
 
 # Backend (src-tauri/)
 cargo fmt --check
@@ -158,13 +161,13 @@ CI on `main` (protected branch) runs: Frontend lint/test/build, Rust fmt/clippy/
 
 ## Security posture
 
-- **Extension trust:** No silent auto-pair; user must approve extension ID in Settings. API token is UUID; legacy default token rejected.
+- **Extension trust:** No silent auto-pair; user must approve extension ID in Settings. API token is UUID; legacy default token rejected. Optional **fail-closed** intercept blocks browser fallback when Falcon is offline (popup/options toggle).
 - **Network boundary:** Download URLs validated (no `file://`, loopback, or private IP SSRF). Local API binds `127.0.0.1` only.
 - **Deep links:** `falcondm://wake` only — enqueue happens over authenticated HTTP, not query strings.
-- **Process isolation:** Shell use limited to declared sidecars (`aria2c`, `ffmpeg`, `yt-dlp`). aria2 PID reclaim only touches Falcon's own `aria2.pid`.
+- **Process isolation:** Shell use limited to declared sidecars (`aria2c`, `ffmpeg`, `yt-dlp`). Native host is a slim standalone crate (`falcon-dm-native-host`, no AppKit). aria2 PID reclaim only touches Falcon's own `aria2.pid`.
 - **Data:** No telemetry. Session cookies stay in backend storage, are never
   serialized into frontend download payloads, and are cleared on terminal
-  download states. yt-dlp does not persist browser cookies.
+  download states. yt-dlp uses browser cookies only when explicitly enabled in Settings.
 
 ## License
 

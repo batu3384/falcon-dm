@@ -1,5 +1,7 @@
 # Falcon DM Hardening and UX Design
 
+> **Historical document (2026-08-09).** For current behavior see [wiki/Architecture.md](../../wiki/Architecture.md), [wiki/Roadmap.md](../../wiki/Roadmap.md), and [README.md](../../README.md).
+
 **Date:** 2026-08-09  
 **Status:** Approved for implementation  
 **Scope:** macOS desktop application + Chrome/Edge MV3 extension

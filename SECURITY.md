@@ -50,4 +50,9 @@ The API is protected by:
 
 Known accepted risks (e.g. the TOCTOU window between URL validation and the
 fetch) are documented inline in the Rust source. Direct HTTP pause/resume uses
-byte-range requests against `.falcon.part` files.
+byte-range requests against `.falcon.part` files; large remaining parts may
+resume with parallel range segments.
+
+Extension **fail-closed** hijack (user opt-in) cancels a browser download when
+Falcon cannot enqueue — trade-off between data loss risk (cancelled save) and
+unintended fail-open downloads.

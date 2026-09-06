@@ -1,5 +1,7 @@
 # Falcon DM Hardening and UX Implementation Plan
 
+> **Historical document (2026-08-09).** Current behavior: [wiki/Architecture.md](../../wiki/Architecture.md), [wiki/Roadmap.md](../../wiki/Roadmap.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** P0 güvenlik/veri bütünlüğü, P1 frontend/extension akışları ve P2

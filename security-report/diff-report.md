@@ -1,5 +1,7 @@
 # Diff Security Report — Falcon DM roadmap fixes
 
+> **Historical report (2026-07-30).** Current security notes: [wiki/Security.md](../../wiki/Security.md) and [SECURITY.md](../../SECURITY.md).
+
 **Date:** 2026-07-30  
 **Mode:** Incremental (adversarial + targeted security)  
 **Verdict after fixes:** CONCERNS → addressed CRITICAL items
