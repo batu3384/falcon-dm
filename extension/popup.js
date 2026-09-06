@@ -12,8 +12,10 @@ const grabBtn = $('grab');
 const dlUrlBtn = $('dl-url');
 const reconnectBtn = $('reconnect');
 const pauseBtn = $('pause');
+const failClosedEl = $('fail-closed');
 
 let paused = false;
+let failClosed = false;
 
 function setState(state) {
   statusEl.dataset.state = state;
@@ -65,7 +67,9 @@ function applyStatus(resp) {
   if (!resp) return;
   setState(resp.state || 'offline');
   paused = !!resp.paused;
+  failClosed = !!resp.failClosed;
   pauseBtn.textContent = paused ? t('popupResume', 'Resume') : t('popupPause', 'Pause');
+  if (failClosedEl) failClosedEl.checked = failClosed;
   renderQueue(resp.recent || []);
 }
 
@@ -141,6 +145,21 @@ pauseBtn.addEventListener('click', async () => {
   }
   refresh();
 });
+
+if (failClosedEl) {
+  failClosedEl.addEventListener('change', async () => {
+    failClosedEl.disabled = true;
+    const resp = await send('set_fail_closed', { failClosed: failClosedEl.checked });
+    failClosedEl.disabled = false;
+    if (!resp || resp.ok === false) {
+      failClosedEl.checked = failClosed;
+      flash(pauseBtn, t('errorAppOffline', 'Failed'));
+      refresh();
+      return;
+    }
+    refresh();
+  });
+}
 
 $('settings').addEventListener('click', (e) => {
   e.preventDefault();

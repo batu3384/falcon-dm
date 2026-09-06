@@ -6,15 +6,18 @@ Load unpacked from this folder in Chrome/Edge.
 
 - Pair: extension first asks registered `com.falcondm.native` host for a single-use proof, then calls `POST /api/pair` → `200` + token, or `202` pending (approve in Falcon Settings). Extension polls until approved.
 - Downloads: `POST /api/intercept` or `/api/add` with `X-Falcon-Token`.
-- Requests use bounded timeouts. If Falcon cannot be reached, browser downloads stay native.
-- Batch enqueue returns per-item `results`; successful items are removed from retry selection while failed items remain retryable.
+- Requests use bounded timeouts.
+- **Fail-open (default):** if Falcon cannot receive a **browser hijacked** download, `suggest({ cancel: false })` keeps the native browser save.
+- **Fail-closed (opt-in):** enable **Block when offline** in popup or options → `suggest({ cancel: true })` and a blocking notification when hijack fails.
+- **Pause:** popup **Pause** disables hijack entirely (`cancel: false` always).
+- Batch enqueue (link grabber) accepts up to **100** items; returns per-item `results`; successful items are removed from retry selection while failed items remain retryable.
 - YouTube quality: send JSON field `format` (yt-dlp `-f` selector). Do **not** put format in the URL. Legacy `#falconfmt=` still accepted server-side as internal storage.
 - Origin must be `chrome-extension://<id>` and that id must be allowlisted after Settings approve.
-- Native messaging host must be installed for Chrome and Edge. Missing host, timeout, or app rejection keeps native browser downloads intact.
+- Native messaging host must be installed for Chrome and Edge. Missing host, timeout, or app rejection keeps native browser downloads intact (unless fail-closed is enabled on hijack).
 - Development install:
 
   ```bash
-  cargo build --manifest-path src-tauri/Cargo.toml --bin falcon-dm-native-host
+  cargo build --manifest-path src-tauri/Cargo.toml -p falcon-dm-native-host
   NATIVE_HOST_BIN="$PWD/src-tauri/target/debug/falcon-dm-native-host" \
   CHROME_EXTENSION_ID="<chrome-id>" \
   EDGE_EXTENSION_ID="<edge-id>" \
@@ -26,7 +29,7 @@ Load unpacked from this folder in Chrome/Edge.
 
 ## YouTube
 
-Desktop app needs `yt-dlp` on PATH (or set path in Falcon Settings). Extension sends watch URL + `format`; never googlevideo CDN URLs.
+Desktop app needs `yt-dlp` on PATH (or set path in Falcon Settings). Extension sends watch URL + `format`; never googlevideo CDN URLs. Browser cookies reach yt-dlp only when **Settings → Use browser cookies for yt-dlp** is enabled.
 
 ## Permissions
 
@@ -37,6 +40,12 @@ Desktop app needs `yt-dlp` on PATH (or set path in Falcon Settings). Extension s
 
 Session cookies are accepted only on enqueue requests that need them. They are
 not returned in download list payloads, not copied into the frontend model, and
-are cleared when a download reaches a terminal state. If native messaging or
-pair approval fails, the extension leaves the browser's original download
-untouched.
+are cleared when a download reaches a terminal state.
+
+## Smoke test
+
+```bash
+node extension/smoke-test.mjs
+```
+
+Asserts media helpers, hijack contracts, fail-closed handlers, and batch limit constant.

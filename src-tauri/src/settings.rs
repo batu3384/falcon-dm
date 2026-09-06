@@ -83,6 +83,9 @@ pub struct Settings {
     /// Optional absolute path to yt-dlp binary (empty = PATH + common locations).
     #[serde(default)]
     pub ytdlp_path: String,
+    /// When true, pass browser Cookie headers to yt-dlp (opt-in; can break anonymous YT).
+    #[serde(default)]
+    pub ytdlp_use_browser_cookies: bool,
     /// ponytail: per-site download profiles. Empty by default. When a download
     /// URL matches a profile's `url_pattern`, that profile's UA/referer/cookies/
     /// subdir override the request defaults.
@@ -108,6 +111,7 @@ impl Default for Settings {
             schedule_stop: None,
             allowed_extension_ids: Vec::new(),
             ytdlp_path: String::new(),
+            ytdlp_use_browser_cookies: false,
             download_profiles: Vec::new(),
         }
     }

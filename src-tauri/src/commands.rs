@@ -515,3 +515,79 @@ pub fn install_native_host_manifests(
     })?;
     crate::extension_host::install_native_host_manifests(&executable, &chrome, &edge)
 }
+
+#[derive(serde::Serialize)]
+pub struct UpdateCheckResult {
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub release_url: Option<String>,
+}
+
+fn version_newer(latest: &str, current: &str) -> bool {
+    let parse = |raw: &str| -> Vec<u32> {
+        raw.trim()
+            .trim_start_matches(['v', 'V'])
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0))
+            .collect()
+    };
+    let latest_parts = parse(latest);
+    let current_parts = parse(current);
+    let width = latest_parts.len().max(current_parts.len()).max(3);
+    for index in 0..width {
+        let l = *latest_parts.get(index).unwrap_or(&0);
+        let c = *current_parts.get(index).unwrap_or(&0);
+        if l > c {
+            return true;
+        }
+        if l < c {
+            return false;
+        }
+    }
+    false
+}
+
+#[tauri::command]
+pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let client = reqwest::Client::builder()
+        .user_agent("Falcon-DM-Updater")
+        .timeout(std::time::Duration::from_secs(12))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get("https://api.github.com/repos/batu3384/falcon-dm/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("Update check failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Update check HTTP {}", resp.status().as_u16()));
+    }
+    #[derive(serde::Deserialize)]
+    struct GhRelease {
+        tag_name: String,
+        html_url: String,
+    }
+    let release: GhRelease = resp.json().await.map_err(|e| e.to_string())?;
+    let latest = release.tag_name.trim_start_matches(['v', 'V']).to_string();
+    Ok(UpdateCheckResult {
+        update_available: version_newer(&latest, &current),
+        current_version: current,
+        latest_version: Some(latest),
+        release_url: Some(release.html_url),
+    })
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::version_newer;
+
+    #[test]
+    fn version_newer_compares_semver_tuples() {
+        assert!(version_newer("0.2.0", "0.1.0"));
+        assert!(!version_newer("0.1.0", "0.1.0"));
+        assert!(!version_newer("0.1.0", "0.2.0"));
+    }
+}

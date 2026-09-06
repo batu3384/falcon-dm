@@ -76,13 +76,15 @@ pub async fn process_ytdlp(
     _db: Option<Database>,
     format: Option<&str>,
 ) -> Result<(), String> {
-    let preferred = crate::settings::Settings::load(&crate::util::app_data_dir()).ytdlp_path;
+    let preferred = crate::settings::Settings::load(&crate::util::app_data_dir());
+    let settings = preferred.clone();
     // ponytail: find_ytdlp runs `yt-dlp --version` (a subprocess) + filesystem
     // existence checks — all blocking. Run on a blocking-pool thread so we don't
     // stall a tokio worker thread (with max_concurrent downloads, several of these
     // could run concurrently and starve the runtime). Move an owned Option<String>
     // across the thread boundary (borrows can't satisfy 'static).
-    let pref_opt: Option<String> = if preferred.trim().is_empty() { None } else { Some(preferred) };
+    let pref_opt: Option<String> =
+        if preferred.ytdlp_path.trim().is_empty() { None } else { Some(preferred.ytdlp_path) };
     let bin = tokio::task::spawn_blocking(move || find_ytdlp(pref_opt.as_deref()))
         .await
         .map_err(|e| format!("yt-dlp lookup task failed: {e}"))??;
@@ -101,10 +103,6 @@ pub async fn process_ytdlp(
         "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/bv*+ba/b",
     );
 
-    // Cookies intentionally not passed by default — Netscape jar often breaks anonymous YT listing.
-    // Do not write cookie files to disk until a gated opt-in path exists.
-    let _ = &headers.cookies;
-
     let mut cmd = Command::new(&bin);
     cmd.arg("--no-playlist")
         .arg("--newline")
@@ -121,6 +119,26 @@ pub async fn process_ytdlp(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+
+    // Cookies only when user opts in — Netscape jar often breaks anonymous YT listing.
+    if settings.ytdlp_use_browser_cookies {
+        if let Some(ref cookies) = headers.cookies {
+            let value = sanitize_header_value(cookies);
+            if !value.is_empty() {
+                cmd.arg("--add-header").arg(format!("Cookie:{value}"));
+            }
+        }
+    }
+
+    if let Some(ref proxy) = settings.proxy {
+        let proxy = proxy.trim();
+        if !proxy.is_empty() {
+            cmd.arg("--proxy").arg(proxy);
+        }
+    }
+    if settings.speed_limit_kbps > 0 {
+        cmd.arg("--limit-rate").arg(format!("{}K", settings.speed_limit_kbps));
+    }
 
     if let Some(ref ua) = headers.user_agent {
         let ua = sanitize_header_value(ua);

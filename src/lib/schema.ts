@@ -76,6 +76,7 @@ export const SettingsSchema = z.object({
   category_paths: z.record(z.string(), z.string()).optional(),
   allowed_extension_ids: z.array(z.string()).optional(),
   ytdlp_path: z.string().optional(),
+  ytdlp_use_browser_cookies: z.boolean().optional(),
   schedule_active: z.boolean().optional(),
   schedule_start: z.string().nullable().optional(),
   schedule_stop: z.string().nullable().optional(),

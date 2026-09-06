@@ -1,5 +1,9 @@
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import type { SettingsModel } from '../../types';
+import * as api from '../../api/commands';
+import { useToastStore } from '../../store/toast';
 
 type Props = {
   settings: SettingsModel;
@@ -29,6 +33,30 @@ export function GeneralTab({
   installingNativeHost,
 }: Props) {
   const { t } = useTranslation();
+  const showToast = useToastStore((s) => s.showToast);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+
+  const handleCheckUpdates = async () => {
+    setCheckingUpdate(true);
+    try {
+      const result = await api.checkForUpdates();
+      if (result.update_available && result.release_url) {
+        showToast(
+          'info',
+          t('settings.update_available', { version: result.latest_version || '' }),
+        );
+        await openUrl(result.release_url);
+      } else {
+        showToast('success', t('settings.update_current', { version: result.current_version }));
+      }
+    } catch (e) {
+      showToast('error', t('settings.update_check_failed'));
+      console.error(e);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
   return (
     <>
       <div className="field">
@@ -76,6 +104,28 @@ export function GeneralTab({
           placeholder="/opt/homebrew/bin/yt-dlp"
         />
         <p className="field-hint">{t('settings.ytdlp_path_hint')}</p>
+      </div>
+      <div className="field check-row">
+        <input
+          id="set-ytdlp-cookies"
+          type="checkbox"
+          checked={!!settings.ytdlp_use_browser_cookies}
+          onChange={(e) =>
+            setSettings((prev) => ({ ...prev, ytdlp_use_browser_cookies: e.target.checked }))
+          }
+        />
+        <label htmlFor="set-ytdlp-cookies">{t('settings.ytdlp_use_browser_cookies')}</label>
+        <p className="field-hint">{t('settings.ytdlp_use_browser_cookies_hint')}</p>
+      </div>
+      <div className="field">
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={handleCheckUpdates}
+          disabled={checkingUpdate}
+        >
+          {checkingUpdate ? t('settings.checking_updates') : t('settings.check_updates')}
+        </button>
       </div>
       <div className="field">
         <label className="field-label" htmlFor="set-token">

@@ -33,6 +33,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
     category_paths: {},
     allowed_extension_ids: [],
     ytdlp_path: '',
+    ytdlp_use_browser_cookies: false,
     download_profiles: [],
   });
   const [saveError, setSaveError] = useState('');

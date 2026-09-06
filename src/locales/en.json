@@ -208,7 +208,14 @@
     "cat_compressed": "Compressed save path",
     "cat_programs": "Programs save path",
     "ytdlp_path": "yt-dlp binary path",
-    "ytdlp_path_hint": "Leave empty to use PATH. Required for YouTube downloads."
+    "ytdlp_path_hint": "Leave empty to use PATH. Required for YouTube downloads.",
+    "ytdlp_use_browser_cookies": "Use browser cookies for yt-dlp",
+    "ytdlp_use_browser_cookies_hint": "Off by default. Enable for sites that require your session.",
+    "check_updates": "Check for updates",
+    "checking_updates": "Checking...",
+    "update_available": "Update available: {{version}}",
+    "update_current": "Up to date ({{version}})",
+    "update_check_failed": "Could not check for updates"
   },
   "scheduler": {
     "title": "Queue Scheduler",
@@ -220,6 +227,7 @@
     "saving": "Saving...",
     "save_failed": "Failed to save schedule",
     "invalid_time": "Invalid schedule: both times must be HH:MM and differ",
+    "scope_hint": "Downloads run only inside the scheduled window. Shutdown-after-complete and dial-up modes are not supported.",
     "confirm_close": "Discard unsaved schedule changes?"
   },
   "onboarding": {

@@ -71,7 +71,10 @@ assert(/setAttribute\(['"]role['"],\s*['"]dialog['"]\)/.test(content), 'overlay 
 assert(content.includes('aria-modal'), 'overlay aria-modal');
 assert(content.includes('Escape'), 'overlay escape close');
 assert(content.includes('fm-fab'), 'isolated video chip');
-assert(popup.includes('resp.ok === false'), 'pause fail-closed on missing ok');
+assert(background.includes('getInterceptFailClosed'), 'fail-closed preference lookup');
+assert(background.includes('set_fail_closed'), 'fail-closed toggle handler');
+assert(background.includes('GRAB_BATCH_LIMIT'), 'grabber batch limit constant');
+assert(Number(background.match(/GRAB_BATCH_LIMIT = (\d+)/)?.[1]) >= 100, 'grabber batch limit raised');
 assert(popup.includes('refresh();'), 'pause refreshes connection state');
 const popupHtml = readFileSync(path.join(__dirname, 'popup.html'), 'utf8');
 assert(popupHtml.includes('aria-live="polite"'), 'popup status live region');

@@ -1,6 +1,6 @@
 use crate::download::http_client::{
-    add_request_headers, resolve_resource, split_byte_ranges, with_pinned_clients,
-    ResolvedResource, MAX_HTTP_BYTES, MAX_REDIRECTS, MIN_PARALLEL_BYTES,
+    add_request_headers, apply_speed_limit, resolve_resource, split_byte_ranges,
+    with_pinned_clients, ResolvedResource, MIN_PARALLEL_BYTES, MAX_HTTP_BYTES, MAX_REDIRECTS,
 };
 use crate::storage::{models::DownloadStatus, Database};
 use crate::util::{copy_file_exclusive, validate_fetch_url_async};
@@ -139,46 +139,15 @@ impl SpeedGate {
     }
 
     async fn throttle(&self, cancel: &watch::Receiver<bool>) -> Result<(), String> {
-        if self.limit_kbps == 0 {
-            return Ok(());
-        }
-        let downloaded = self.downloaded.load(Ordering::SeqCst);
-        let target = Duration::from_secs_f64(downloaded as f64 / (self.limit_kbps as f64 * 1024.0));
-        if let Some(wait) = target.checked_sub(self.started.elapsed()) {
-            if *cancel.borrow() {
-                return Err("Cancelled".into());
-            }
-            tokio::time::sleep(wait).await;
-            if *cancel.borrow() {
-                return Err("Cancelled".into());
-            }
-        }
-        Ok(())
+        apply_speed_limit(
+            self.limit_kbps,
+            0,
+            self.downloaded.load(Ordering::SeqCst),
+            self.started,
+            cancel,
+        )
+        .await
     }
-}
-
-async fn apply_speed_limit(
-    speed_limit_kbps: u32,
-    baseline: u64,
-    downloaded: u64,
-    started: Instant,
-    cancel: &watch::Receiver<bool>,
-) -> Result<(), String> {
-    if speed_limit_kbps == 0 {
-        return Ok(());
-    }
-    let written = downloaded.saturating_sub(baseline) as f64;
-    let target = Duration::from_secs_f64(written / (speed_limit_kbps as f64 * 1024.0));
-    if let Some(wait) = target.checked_sub(started.elapsed()) {
-        if *cancel.borrow() {
-            return Err("Cancelled".into());
-        }
-        tokio::time::sleep(wait).await;
-        if *cancel.borrow() {
-            return Err("Cancelled".into());
-        }
-    }
-    Ok(())
 }
 
 async fn stream_segment_to_file(
@@ -347,6 +316,148 @@ async fn process_http_parallel(
         .write(true)
         .create(true)
         .truncate(true)
+        .open(&temp)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut guard = TempFileGuard { path: temp.clone(), delete: false };
+    for index in 0..segment_count {
+        if *cancel.borrow() {
+            return Err("Cancelled".into());
+        }
+        let segment_path = segments_root.join(format!("seg_{index:02}"));
+        if !segment_path.exists() {
+            guard.delete = true;
+            return Err("Missing HTTP segment".into());
+        }
+        let bytes = fs::read(&segment_path).await.map_err(|e| e.to_string())?;
+        output.write_all(&bytes).await.map_err(|e| e.to_string())?;
+    }
+    output.sync_all().await.map_err(|e| e.to_string())?;
+    drop(output);
+
+    let temp_for_validation = temp.clone();
+    tokio::task::spawn_blocking(move || crate::util::validate_completed_file(&temp_for_validation))
+        .await
+        .map_err(|e| e.to_string())??;
+    let destination_for_move = destination.clone();
+    tokio::task::spawn_blocking(move || copy_file_exclusive(&temp, &destination_for_move))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(())
+}
+
+async fn process_http_parallel_resume(
+    app_handle: Option<&AppHandle>,
+    download_id: i64,
+    resource: ResolvedResource,
+    resume_from: u64,
+    out_path: &str,
+    cancel: watch::Receiver<bool>,
+    headers: HttpHeaders,
+    db: Option<Database>,
+) -> Result<(), String> {
+    let destination = PathBuf::from(out_path);
+    let temp = temporary_path(&destination, download_id)?;
+    let existing = fs::metadata(&temp).await.map_err(|e| e.to_string())?.len();
+    if existing != resume_from {
+        return Err(format!(
+            "HTTP resume base mismatch: expected {resume_from}, got {existing}"
+        ));
+    }
+    let remaining = resource.total_bytes.saturating_sub(resume_from);
+    if remaining == 0 {
+        let temp_for_validation = temp.clone();
+        tokio::task::spawn_blocking(move || crate::util::validate_completed_file(&temp_for_validation))
+            .await
+            .map_err(|e| e.to_string())??;
+        let destination_for_move = destination.clone();
+        tokio::task::spawn_blocking(move || copy_file_exclusive(&temp, &destination_for_move))
+            .await
+            .map_err(|e| e.to_string())??;
+        return Ok(());
+    }
+
+    let segments_root = segment_dir(&destination, download_id)?;
+    let _segment_guard = TempDirGuard { path: segments_root.clone() };
+    fs::create_dir_all(&segments_root).await.map_err(|e| e.to_string())?;
+
+    let connections = headers.max_connections.clamp(1, 16);
+    let sub_ranges = split_byte_ranges(remaining, connections);
+    let ranges: Vec<(u64, u64)> = sub_ranges
+        .into_iter()
+        .map(|(start, end)| (resume_from.saturating_add(start), resume_from.saturating_add(end)))
+        .collect();
+    let segment_count = ranges.len();
+    let downloaded_bytes = Arc::new(AtomicU64::new(resume_from));
+    let started = Instant::now();
+    let proxy = headers.options.proxy.clone();
+    let initial = resource.initial.clone();
+    let final_url = resource.final_url.clone();
+    let speed_gate = Arc::new(SpeedGate::new(headers.options.speed_limit_kbps));
+
+    let results: Vec<Result<(), String>> = stream::iter(ranges.into_iter().enumerate())
+        .map(|(index, (start, end))| {
+            let headers = headers.clone();
+            let proxy = proxy.clone();
+            let initial = initial.clone();
+            let final_url = final_url.clone();
+            let segments_root = segments_root.clone();
+            let downloaded_bytes = downloaded_bytes.clone();
+            let db = db.clone();
+            let cancel = cancel.clone();
+            let speed_gate = speed_gate.clone();
+            async move {
+                if *cancel.borrow() {
+                    return Err("Cancelled".into());
+                }
+                let segment_path = segments_root.join(format!("seg_{index:02}"));
+                download_http_segment(
+                    &final_url,
+                    &initial,
+                    &headers,
+                    proxy.as_deref(),
+                    start,
+                    end,
+                    &segment_path,
+                    &cancel,
+                    &speed_gate,
+                )
+                .await?;
+
+                if *cancel.borrow() {
+                    return Err("Cancelled".into());
+                }
+                let chunk_len = range_byte_length(start, end);
+                let downloaded =
+                    downloaded_bytes.fetch_add(chunk_len, Ordering::SeqCst) + chunk_len;
+                let speed = downloaded.saturating_sub(resume_from) as f64
+                    / started.elapsed().as_secs_f64().max(0.001);
+                emit_progress(
+                    app_handle,
+                    download_id,
+                    downloaded,
+                    resource.total_bytes,
+                    speed,
+                    connections as u32,
+                    db.as_ref(),
+                );
+                Ok(())
+            }
+        })
+        .buffer_unordered(connections)
+        .collect()
+        .await;
+
+    for result in results {
+        result?;
+    }
+    if *cancel.borrow() {
+        return Err("Cancelled".into());
+    }
+
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .append(true)
         .open(&temp)
         .await
         .map_err(|e| e.to_string())?;
@@ -583,6 +694,38 @@ async fn process_http_dispatch(
     let resume_from =
         fs::metadata(&temp).await.ok().map(|meta| meta.len()).filter(|len| *len > 0).unwrap_or(0);
     if resume_from > 0 {
+        let connections = headers.max_connections.clamp(1, 16);
+        if connections > 1 {
+            if let Ok(initial) = validate_fetch_url_async(url).await {
+                if let Ok(resource) = resolve_resource(&initial, &headers).await {
+                    let remaining = resource.total_bytes.saturating_sub(resume_from);
+                    if resource.accepts_ranges
+                        && remaining >= MIN_PARALLEL_BYTES
+                        && resource.total_bytes > 0
+                    {
+                        match process_http_parallel_resume(
+                            app_handle,
+                            download_id,
+                            resource,
+                            resume_from,
+                            out_path,
+                            cancel.clone(),
+                            headers.clone(),
+                            db.clone(),
+                        )
+                        .await
+                        {
+                            Ok(()) => return Ok(()),
+                            Err(err) => {
+                                log::warn!(
+                                    "parallel HTTP resume failed for {download_id}, falling back to single connection: {err}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
         return process_http_single(app_handle, download_id, url, out_path, cancel, headers, db)
             .await;
     }

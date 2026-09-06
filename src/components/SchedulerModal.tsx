@@ -145,6 +145,7 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
               className="field-input"
             />
           </div>
+          <p className="field-hint">{t('scheduler.scope_hint')}</p>
           {error && <p className="field-error">{error}</p>}
         </div>
 

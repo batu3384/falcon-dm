@@ -23,6 +23,7 @@
   "errorRateLimit": { "message": "Çok fazla istek — kısa süre sonra tekrar deneyin" },
   "errorHttp": { "message": "İstek başarısız" },
   "appClosedFallback": { "message": "Falcon DM çevrimdışı — tarayıcı indirmesi kullanıldı" },
+  "interceptBlocked": { "message": "Falcon DM çevrimdışı — indirme engellendi" },
   "labelFilename": { "message": "Dosya adı" },
   "contextDownload": { "message": "Falcon DM ile indir" },
   "contextGrabber": { "message": "Sayfa linklerini Falcon ile yakala" },
@@ -53,5 +54,9 @@
   "popupTimeNow": { "message": "az önce" },
   "popupTimeMin": { "message": "{n} dk önce" },
   "popupSettings": { "message": "Ayarlar" },
+  "popupFailClosed": { "message": "Çevrimdışıyken engelle" },
+  "popupFailClosedHint": { "message": "Falcon DM alamazsa tarayıcı indirmesini iptal et." },
+  "optionsFailClosed": { "message": "Falcon DM çevrimdışıyken tarayıcı indirmesini engelle" },
+  "optionsFailClosedHint": { "message": "Açıkken yakalanan indirmeler tarayıcıya düşmez, iptal edilir." },
   "popupOnboard": { "message": "Falcon DM'i açın ve eklentiyi Ayarlar'da onaylayın" }
 }

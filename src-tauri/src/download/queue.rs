@@ -305,6 +305,9 @@ impl QueueManager {
                                         max_connections: self
                                             .max_connections
                                             .load(Ordering::SeqCst),
+                                        proxy: lock_or_recover(&self.http_options).proxy.clone(),
+                                        speed_limit_kbps: lock_or_recover(&self.http_options)
+                                            .speed_limit_kbps,
                                     },
                                 },
                                 rx,

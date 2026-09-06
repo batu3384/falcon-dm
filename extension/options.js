@@ -22,6 +22,16 @@ document.getElementById('hint').textContent = t(
   'optionsHint',
   'If blocked: Falcon DM → Settings → Reconnect extension, then click Connect now.',
 );
+document.getElementById('fail-closed-label').textContent = t(
+  'optionsFailClosed',
+  'Block browser download when Falcon DM is offline',
+);
+document.getElementById('fail-closed-hint').textContent = t(
+  'optionsFailClosedHint',
+  'When enabled, intercepted downloads are cancelled instead of falling back to the browser.',
+);
+
+const failClosedEl = document.getElementById('fail-closed');
 
 function refresh() {
   setStatus(t('sending', 'Checking...'), '');
@@ -31,6 +41,9 @@ function refresh() {
     } else {
       setStatus(resp?.error || t('errorAppOffline', 'Falcon DM is not running'), 'err');
     }
+  });
+  chrome.runtime.sendMessage({ action: 'get_status' }, (resp) => {
+    if (resp && failClosedEl) failClosedEl.checked = !!resp.failClosed;
   });
 }
 
@@ -46,5 +59,19 @@ document.getElementById('pair').addEventListener('click', () => {
 });
 
 document.getElementById('test').addEventListener('click', refresh);
+
+if (failClosedEl) {
+  failClosedEl.addEventListener('change', () => {
+    chrome.runtime.sendMessage(
+      { action: 'set_fail_closed', failClosed: failClosedEl.checked },
+      (resp) => {
+        if (!resp || resp.ok === false) {
+          failClosedEl.checked = !failClosedEl.checked;
+          setStatus(resp?.error || t('errorAppOffline', 'Failed'), 'err');
+        }
+      },
+    );
+  });
+}
 
 refresh();

@@ -208,7 +208,14 @@
     "cat_compressed": "Sıkıştırılmış kayıt yolu",
     "cat_programs": "Programlar kayıt yolu",
     "ytdlp_path": "yt-dlp binary yolu",
-    "ytdlp_path_hint": "Boş = PATH. YouTube indirmeleri için gerekli."
+    "ytdlp_path_hint": "Boş = PATH. YouTube indirmeleri için gerekli.",
+    "ytdlp_use_browser_cookies": "yt-dlp için tarayıcı çerezlerini kullan",
+    "ytdlp_use_browser_cookies_hint": "Kapalı önerilir. Açıkken oturum gerektiren sitelerde yardımcı olabilir.",
+    "check_updates": "Güncellemeleri denetle",
+    "checking_updates": "Denetleniyor...",
+    "update_available": "Yeni sürüm: {{version}}",
+    "update_current": "Güncelsiniz ({{version}})",
+    "update_check_failed": "Güncelleme denetlenemedi"
   },
   "scheduler": {
     "title": "Kuyruk Zamanlayıcı",
@@ -220,6 +227,7 @@
     "saving": "Kaydediliyor...",
     "save_failed": "Zamanlama kaydedilemedi",
     "invalid_time": "Geçersiz: her iki saat HH:MM olmalı ve birbirinden farklı olmalı",
+    "scope_hint": "Kuyruk yalnızca belirlenen saat aralığında indirir. Tamamlanınca kapatma ve çevirmeli bağlantı desteklenmiyor.",
     "confirm_close": "Kaydedilmemiş zamanlama değişiklikleri silinsin mi?"
   },
   "onboarding": {

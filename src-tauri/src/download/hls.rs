@@ -1,3 +1,4 @@
+use crate::download::http_client::apply_speed_limit;
 use crate::storage::{models::DownloadStatus, Database};
 use crate::util::{sanitize_header_value, validate_fetch_url_async, with_pinned_http_clients};
 use futures::stream::{self, StreamExt, TryStreamExt};
@@ -19,6 +20,7 @@ struct TempDirGuard {
     path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         if self.path.exists() {
@@ -33,6 +35,8 @@ pub struct HlsHeaders {
     pub referrer: Option<String>,
     pub user_agent: Option<String>,
     pub max_connections: usize,
+    pub proxy: Option<String>,
+    pub speed_limit_kbps: u32,
 }
 
 const MAX_PLAYLIST_BYTES: usize = 16 * 1024 * 1024;
@@ -101,7 +105,7 @@ async fn send_hls_request(
     for redirect_count in 0..=5 {
         let response = with_pinned_http_clients(
             &current,
-            None,
+            headers.proxy.as_deref(),
             std::time::Duration::from_secs(30),
             Some(default_headers.clone()),
             |client| {
@@ -287,22 +291,15 @@ pub async fn process_hls_stream(
     }
 
     let total_segments = segment_urls.len() as u64;
-    let out_path = Path::new(save_path);
+    let _out_path = Path::new(save_path);
     // ponytail: temp dir lives under <data_dir>/downloads_temp/, NOT under the
     // save dir (Downloads). Crash leftovers there are swept by
     // cleanup_stale_temp_dirs on startup; previously those lived in Downloads and
     // were never cleaned (the sweep scanned the data dir root).
     let temp_root = crate::util::app_data_dir().join("downloads_temp");
     let _ = std::fs::create_dir_all(&temp_root);
-    let temp_dir = temp_root.join(format!(
-        "{}-{}.falcondm-temp",
-        out_path.file_name().unwrap_or_default().to_string_lossy(),
-        uuid::Uuid::new_v4()
-    ));
-
+    let temp_dir = temp_root.join(format!("hls-{download_id}"));
     fs::create_dir_all(&temp_dir).await.map_err(|e| e.to_string())?;
-
-    let _guard = TempDirGuard { path: temp_dir.clone() };
 
     let concurrency_limit = headers.max_connections.clamp(1, 16);
     let downloaded_bytes = Arc::new(AtomicU64::new(0));
@@ -311,6 +308,28 @@ pub async fn process_hls_stream(
     // actually-downloaded bytes (guard against >100% progress).
     let total_size_estimate = Arc::new(AtomicU64::new(estimated_total_bytes.unwrap_or(0)));
     let started = Instant::now();
+
+    // Seed resume progress from segment files left by a prior attempt.
+    for idx in 0..segment_urls.len() {
+        let seg_path = temp_dir.join(format!("seg_{idx:05}.ts"));
+        if let Ok(meta) = fs::metadata(&seg_path).await {
+            if meta.len() > 0 {
+                let seg_len = meta.len();
+                let previous = downloaded_bytes
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                        current.checked_add(seg_len).filter(|next| *next <= MAX_OUTPUT_BYTES)
+                    })
+                    .map_err(|_| "HLS output exceeds maximum size".to_string())?;
+                let _ = completed_segs.fetch_add(1, Ordering::Relaxed);
+                let bytes_so_far = previous + seg_len;
+                let done = completed_segs.load(Ordering::Relaxed).max(1);
+                let avg = bytes_so_far / done;
+                let projected = avg.saturating_mul(total_segments);
+                let cur = total_size_estimate.load(Ordering::Relaxed);
+                total_size_estimate.store(projected.max(cur).max(bytes_so_far), Ordering::Relaxed);
+            }
+        }
+    }
 
     let segment_paths: Vec<PathBuf> = stream::iter(segment_urls.into_iter().enumerate())
         .map(|(idx, seg_url)| {
@@ -322,12 +341,19 @@ pub async fn process_hls_stream(
             let app_handle = app_handle.clone();
             let source_url = base_url.clone();
             let headers = headers.clone();
+            let speed_limit_kbps = headers.speed_limit_kbps;
+            let speed_started = started;
             async move {
                 if *rx_clone.borrow() {
                     return Err("Cancelled".to_string());
                 }
 
                 let seg_path = temp_dir.join(format!("seg_{:05}.ts", idx));
+                if let Ok(meta) = fs::metadata(&seg_path).await {
+                    if meta.len() > 0 {
+                        return Ok(seg_path);
+                    }
+                }
                 // ponytail: cancel-safe segment download. If cancellation is
                 // signalled mid-fetch, abort the request instead of waiting for
                 // the whole segment to arrive (previous code always completed the
@@ -449,6 +475,10 @@ pub async fn process_hls_stream(
 
                 let mut file = fs::File::create(&seg_path).await.map_err(|e| e.to_string())?;
                 file.write_all(&bytes).await.map_err(|e| e.to_string())?;
+                if speed_limit_kbps > 0 {
+                    let total = downloaded_bytes.load(Ordering::Relaxed);
+                    apply_speed_limit(speed_limit_kbps, 0, total, speed_started, &rx_clone).await?;
+                }
                 Ok::<PathBuf, String>(seg_path)
             }
         })
@@ -568,6 +598,8 @@ pub async fn process_hls_stream(
     })
     .await
     .map_err(|e| format!("HLS output move task failed: {e}"))??;
+
+    let _ = fs::remove_dir_all(&temp_dir).await;
 
     Ok(())
 }

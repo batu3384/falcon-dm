@@ -1,7 +1,8 @@
 use crate::util::{sanitize_header_value, validate_fetch_url_async, with_pinned_http_clients};
 use reqwest::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE};
 use reqwest::{Client, StatusCode};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::watch;
 use url::Url;
 
 #[derive(Clone, Default)]
@@ -97,6 +98,30 @@ fn total_from_content_range(
         return total;
     }
     resume_from.saturating_add(content_length.unwrap_or(0))
+}
+
+pub(crate) async fn apply_speed_limit(
+    speed_limit_kbps: u32,
+    baseline: u64,
+    downloaded: u64,
+    started: Instant,
+    cancel: &watch::Receiver<bool>,
+) -> Result<(), String> {
+    if speed_limit_kbps == 0 {
+        return Ok(());
+    }
+    let written = downloaded.saturating_sub(baseline) as f64;
+    let target = Duration::from_secs_f64(written / (speed_limit_kbps as f64 * 1024.0));
+    if let Some(wait) = target.checked_sub(started.elapsed()) {
+        if *cancel.borrow() {
+            return Err("Cancelled".into());
+        }
+        tokio::time::sleep(wait).await;
+        if *cancel.borrow() {
+            return Err("Cancelled".into());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn split_byte_ranges(total: u64, connections: usize) -> Vec<(u64, u64)> {

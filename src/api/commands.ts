@@ -225,6 +225,17 @@ export async function installNativeHostManifests(
   });
 }
 
+export interface UpdateCheckResult {
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string | null;
+}
+
+export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  return invoke<UpdateCheckResult>('check_for_updates');
+}
+
 /// Build a cURL command string from a download's URL + headers. For the "Copy as
 /// cURL" context-menu action — lets users replicate the request in a terminal.
 export function buildCurlCommand(dl: {

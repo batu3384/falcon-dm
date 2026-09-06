@@ -23,6 +23,7 @@
   "errorRateLimit": { "message": "Too many requests — try again shortly" },
   "errorHttp": { "message": "Request failed" },
   "appClosedFallback": { "message": "Falcon DM offline — using browser download" },
+  "interceptBlocked": { "message": "Falcon DM offline — download blocked" },
   "labelFilename": { "message": "File name" },
   "contextDownload": { "message": "Download with Falcon DM" },
   "contextGrabber": { "message": "Grab page links with Falcon" },
@@ -53,5 +54,9 @@
   "popupTimeNow": { "message": "just now" },
   "popupTimeMin": { "message": "{n}m ago" },
   "popupSettings": { "message": "Settings" },
+  "popupFailClosed": { "message": "Block when offline" },
+  "popupFailClosedHint": { "message": "Cancel browser download if Falcon DM cannot receive it." },
+  "optionsFailClosed": { "message": "Block browser download when Falcon DM is offline" },
+  "optionsFailClosedHint": { "message": "When enabled, intercepted downloads are cancelled instead of falling back to the browser." },
   "popupOnboard": { "message": "Open Falcon DM and approve this extension in Settings" }
 }

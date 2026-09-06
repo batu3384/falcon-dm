@@ -1,5 +1,7 @@
 importScripts('media-utils.js', 'shared.js', 'pairing.js', 'api.js');
 
+const GRAB_BATCH_LIMIT = 100;
+
 function setupMenus() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
@@ -111,10 +113,13 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
       notify('Falcon DM', msg('sentToApp', 'Download sent to Falcon DM'));
     } catch (e) {
       console.error(e);
-      suggest({ cancel: false });
+      const failClosed = await getInterceptFailClosed();
+      suggest({ cancel: failClosed });
       notify(
         'Falcon DM',
-        e.message || msg('appClosedFallback', 'Falcon DM offline — browser download kept'),
+        failClosed
+          ? msg('interceptBlocked', 'Falcon DM offline — download blocked')
+          : e.message || msg('appClosedFallback', 'Falcon DM offline — browser download kept'),
       );
     }
   })();
@@ -164,6 +169,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({
         state: connectionState,
         paused: interceptPaused,
+        failClosed: interceptFailClosed,
         recent: RECENT.slice(0, 3),
       });
     })();
@@ -174,6 +180,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({
       state: connectionState,
       paused: interceptPaused,
+      failClosed: interceptFailClosed,
       recent: RECENT.slice(0, 3),
     });
     return true;
@@ -186,6 +193,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     interceptPaused = next;
     chrome.storage.session.set({ falconInterceptPaused: next }).catch(() => {});
     sendResponse({ ok: true, paused: interceptPaused });
+    return true;
+  }
+
+  if (request.action === 'set_fail_closed') {
+    (async () => {
+      try {
+        const next = await setInterceptFailClosed(!!request.failClosed);
+        sendResponse({ ok: true, failClosed: next });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message || 'Failed' });
+      }
+    })();
     return true;
   }
 
@@ -386,7 +405,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'batch_download') {
-    const items = (request.items || []).slice(0, 20);
+    const items = (request.items || []).slice(0, GRAB_BATCH_LIMIT);
     (async () => {
       const settled = await Promise.allSettled(
         items.map(async (it) => {
