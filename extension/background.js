@@ -392,12 +392,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     const finish = async (extraUrls) => {
       const merged = [...new Set([...(urls || []), ...(extraUrls || [])])];
+      const cookiePage = (pageUrl || '').split('#')[0];
+      const cookies = cookiePage ? await getCookiesHeader(cookiePage) : '';
       sendResponse({
         url: merged[merged.length - 1] || null,
         urls: merged,
         metaMap,
         title,
-        cookies: '',
+        cookies,
         userAgent: navigator.userAgent,
       });
     };

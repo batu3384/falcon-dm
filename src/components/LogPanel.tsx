@@ -200,12 +200,13 @@ export function LogPanel({ onClose }: LogPanelProps) {
               <span className="empty-title">{t('logs.empty')}</span>
             </div>
           ) : (
-            filtered.map((entry, i) => {
-              const { Icon, cls, color } = levelMeta(entry.level);
+            filtered.map((entry) => {
+              const { Icon, cls } = levelMeta(entry.level);
+              const rowKey = `${entry.ts}-${entry.level}-${entry.target}-${entry.message.length}`;
               return (
-                <div key={i} className={`log-row log-${cls}`}>
+                <div key={rowKey} className={`log-row log-${cls}`}>
                   <span className="log-ts mono">{formatTs(entry.ts)}</span>
-                  <span className="log-level-badge" style={{ color }}>
+                  <span className={`log-level-badge ${cls}`}>
                     <Icon size={11} />
                     {entry.level}
                   </span>

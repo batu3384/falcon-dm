@@ -74,8 +74,8 @@ assert(
   'module split',
 );
 const popup = readFileSync(path.join(__dirname, 'popup.js'), 'utf8');
-assert(content.includes('pageUrl.split'), 'YouTube watch URL fallback');
-assert(content.includes('hasCdn'), 'YouTube CDN direct capture');
+assert(content.includes('pageUrl.split'), 'YouTube watch URL for yt-dlp');
+assert(!content.includes('hasCdn'), 'YouTube skips raw CDN download URL');
 assert(content.includes('normalizeMediaUrl(selected.url)'), 'CDN URL normalized');
 assert(/setAttribute\(['"]role['"],\s*['"]dialog['"]\)/.test(content), 'overlay dialog role');
 assert(content.includes('aria-modal'), 'overlay aria-modal');
@@ -102,7 +102,8 @@ assert(chromeCss.includes('.check-row'), 'popup checkbox row');
 assert(manifest.permissions.includes('tabs'), 'tabs permission');
 assert(Array.isArray(manifest.content_scripts) && manifest.content_scripts.length, 'youtube content_scripts');
 assert(content.includes('youtubeFallbackSources'), 'youtube fallback tiers');
-assert(content.includes('ensureYoutubePageChip'), 'youtube page chip');
+assert(content.includes('syncVideoFab'), 'single video fab sync');
+assert(content.includes('pickLargestVideo'), 'largest video only');
 assert(content.includes("'ping'"), 'content script ping');
 assert(popupHtml.includes('id="notice"'), 'popup error notice');
 assert(optionsHtml.includes('options-head'), 'options header');

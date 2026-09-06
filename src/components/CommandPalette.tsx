@@ -69,26 +69,24 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
 
   return (
     <div
-      className="modal-overlay"
+      className="modal-overlay palette-overlay"
       onClick={onClose}
       role="presentation"
-      style={{ alignItems: 'flex-start', paddingTop: '12vh' }}
     >
       <div
         ref={panelRef}
-        className="modal-panel modal-md"
+        className="modal-panel modal-md palette-panel"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-labelledby="palette-title"
       >
-        <div className="modal-head" style={{ padding: 0, borderBottom: '1px solid var(--border)' }}>
-          <div className="search-wrap" style={{ width: '100%', height: 44 }}>
+        <div className="modal-head">
+          <div className="search-wrap palette-search">
             <Search size={16} />
             <input
               ref={inputRef}
               className="search-input"
-              style={{ height: 44, borderRadius: 0, border: 'none', paddingLeft: 36, fontSize: 15 }}
               placeholder={t('commandPalette.placeholder')}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -107,17 +105,16 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
           </div>
         </div>
         <div
-          className="modal-body"
+          className="modal-body palette-body"
           id="palette-listbox"
           role="listbox"
           aria-label={t('commandPalette.title')}
-          style={{ padding: '6px', gap: 1, maxHeight: 360 }}
         >
           <span id="palette-title" className="sr-only">
             {t('commandPalette.title')}
           </span>
           {filtered.length === 0 ? (
-            <div className="empty-state" style={{ height: 80 }}>
+            <div className="empty-state palette-empty">
               <span className="empty-title">{t('commandPalette.no_results')}</span>
             </div>
           ) : (

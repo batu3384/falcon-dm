@@ -135,7 +135,7 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
                   token never reaches the frontend now — it only leaves the app
                   via the authenticated /api/pair HTTP flow after the user
                   explicitly approves a specific extension ID. */}
-              <div className="field" style={{ marginTop: 12 }}>
+              <div className="field field-spaced">
                 <div
                   className="pair-status"
                   data-state={paired ? 'paired' : pending ? 'pending' : 'waiting'}
@@ -158,7 +158,7 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
                   )}
                 </div>
               </div>
-              <div className="field" style={{ marginTop: 12 }}>
+              <div className="field field-spaced">
                 <label className="field-label" htmlFor="onboard-ext-id">
                   {t('onboarding.native_host_id')}
                 </label>
@@ -172,8 +172,7 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
                 <p className="field-hint">{t('onboarding.native_host_hint')}</p>
                 <button
                   type="button"
-                  className="btn-secondary"
-                  style={{ marginTop: 8 }}
+                  className="btn-secondary field-gap-sm"
                   onClick={handleInstallNativeHost}
                   disabled={installingHost}
                 >

@@ -59,6 +59,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
       value: stats?.active ?? 0,
       Icon: Activity,
       dot: 'active',
+      tone: 'active',
     },
     {
       key: 'queued',
@@ -66,13 +67,15 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
       value: stats?.queued ?? 0,
       Icon: Clock,
       dot: 'queued',
+      tone: 'queued',
     },
     {
       key: 'paused',
       label: t('stats.paused'),
       value: stats?.paused ?? 0,
       Icon: Pause,
-      dot: 'queued',
+      dot: 'paused',
+      tone: 'paused',
     },
     {
       key: 'completed',
@@ -80,6 +83,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
       value: stats?.completed ?? 0,
       Icon: CheckCircle2,
       dot: 'completed',
+      tone: 'completed',
     },
     {
       key: 'failed',
@@ -87,6 +91,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
       value: stats?.failed ?? 0,
       Icon: AlertCircle,
       dot: 'failed',
+      tone: 'failed',
     },
   ] as const;
 
@@ -144,7 +149,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
             <>
               <div className="stats-grid">
                 {cards.map((c) => (
-                  <div className="kpi-card" key={c.key}>
+                  <div className="kpi-card" key={c.key} data-tone={c.tone}>
                     <div className="kpi-card-head">
                       <c.Icon size={13} />
                       <span className={`kpi-dot ${c.dot}`} />
@@ -158,10 +163,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
               <div className="stats-totals">
                 <div className="stats-total-item">
                   <span className="stats-total-label">
-                    <Database
-                      size={11}
-                      style={{ display: 'inline', verticalAlign: '-1px', marginRight: 4 }}
-                    />
+                    <Database size={11} className="stats-inline-icon" />
                     {t('stats.total_downloaded')}
                   </span>
                   <span className="stats-total-value">
@@ -170,10 +172,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
                 </div>
                 <div className="stats-total-item">
                   <span className="stats-total-label">
-                    <Gauge
-                      size={11}
-                      style={{ display: 'inline', verticalAlign: '-1px', marginRight: 4 }}
-                    />
+                    <Gauge size={11} className="stats-inline-icon" />
                     {t('stats.current_speed')}
                   </span>
                   <span className="stats-total-value">
@@ -183,10 +182,10 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
               </div>
 
               <div className="stats-chart">
-                <div className="stats-total-label" style={{ marginBottom: 8 }}>
+                <div className="stats-total-label stats-chart-head">
                   {t('stats.speed_over_time')}
                 </div>
-                <div style={{ width: '100%', display: 'flex', justifyContent: 'center' }}>
+                <div className="stats-chart-wrap">
                   <SpeedGraph speed={stats?.current_speed ?? 0} />
                 </div>
               </div>

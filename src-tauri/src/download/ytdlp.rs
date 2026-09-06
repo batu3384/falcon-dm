@@ -120,13 +120,10 @@ pub async fn process_ytdlp(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    // Cookies only when user opts in — Netscape jar often breaks anonymous YT listing.
-    if settings.ytdlp_use_browser_cookies {
-        if let Some(ref cookies) = headers.cookies {
-            let value = sanitize_header_value(cookies);
-            if !value.is_empty() {
-                cmd.arg("--add-header").arg(format!("Cookie:{value}"));
-            }
+    if let Some(ref cookies) = headers.cookies {
+        let value = sanitize_header_value(cookies);
+        if !value.is_empty() {
+            cmd.arg("--add-header").arg(format!("Cookie:{value}"));
         }
     }
 

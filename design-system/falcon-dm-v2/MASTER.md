@@ -36,7 +36,7 @@ Falcon DM is a **1100×700 desktop download manager** window. This is a utility 
 
 ### Typography
 
-- **Font:** Inter (weights 300-700), `--font-mono: "Geist Mono"`
+- **Font:** Plus Jakarta Sans (weights 400–700), `--font-mono: "Geist Mono"`
 - **Base size:** 13px (dense dashboard), line-height 1.45
 - **Numerical text:** `tabular-nums` (speed, sizes, counts)
 - **Mood:** dark, cinematic, technical, precision, clean, premium, developer, professional

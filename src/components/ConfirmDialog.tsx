@@ -1,4 +1,5 @@
 import { useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useModalA11y } from '../hooks/useModalA11y';
 
@@ -23,9 +24,9 @@ export function ConfirmDialog({
   const panelRef = useRef<HTMLDivElement>(null);
   useModalA11y(panelRef, onCancel);
 
-  return (
+  return createPortal(
     <div
-      className="modal-overlay"
+      className="modal-overlay modal-overlay-root"
       onClick={(e) => {
         e.stopPropagation();
         if (e.target === e.currentTarget) onCancel();
@@ -58,6 +59,7 @@ export function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

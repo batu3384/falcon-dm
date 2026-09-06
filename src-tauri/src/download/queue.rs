@@ -6,7 +6,7 @@ use crate::storage::{
     Database,
 };
 use crate::util::{
-    is_googlevideo_url, is_hls_url, is_youtube_direct_cdn_url, is_youtube_watch_url, lock_or_recover,
+    is_googlevideo_url, is_hls_url, is_youtube_watch_url, lock_or_recover,
     split_falcon_format, youtube_page_url_for_download,
 };
 use chrono::{Local, NaiveTime};
@@ -61,11 +61,10 @@ pub(crate) fn route_queued_download(
     has_aria2_gid: bool,
 ) -> DownloadRoute {
     let (clean, _) = split_falcon_format(url);
-    // IDM path: browser-signed progressive googlevideo + session headers → native HTTP.
-    if is_googlevideo_url(&clean) && is_youtube_direct_cdn_url(&clean) {
-        return DownloadRoute::Http;
+    // googlevideo tickets 403 outside the browser — always yt-dlp via watch/referrer.
+    if is_googlevideo_url(&clean) {
+        return DownloadRoute::YtDlp;
     }
-    // yt-dlp fallback when only a watch/shorts/live URL is available (or sabr CDN ticket).
     if is_youtube_watch_url(&clean) || youtube_page_url_for_download(url, referrer).is_some() {
         return DownloadRoute::YtDlp;
     }
@@ -666,7 +665,7 @@ mod tests {
                 Some("https://www.youtube.com/watch?v=abc"),
                 false,
             ),
-            DownloadRoute::Http
+            DownloadRoute::YtDlp
         );
         assert_eq!(
             route_queued_download(

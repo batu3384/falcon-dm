@@ -94,7 +94,7 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
       <aside className="inspector">
         <div className="inspector-head">
           <div className="inspector-head-title">
-            <HardDrive size={16} style={{ color: 'var(--text-3)' }} />
+            <HardDrive size={16} />
             <span>{t('inspector.title')}</span>
           </div>
           <button
@@ -115,9 +115,7 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
             </h4>
             <div className="insp-file-row">
               <span className={`badge ${statusCls}`}>{statusLabel}</span>
-              <span className="mono" style={{ fontSize: 12, color: 'var(--text-2)' }}>
-                {formatBytes(download.total_size)}
-              </span>
+              <span className="mono insp-file-size">{formatBytes(download.total_size)}</span>
             </div>
           </div>
 
@@ -125,7 +123,7 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
             <div className="insp-label">
               <Activity size={12} /> {t('inspector.connections')}
             </div>
-            <div className="thread-info" style={{ marginTop: 8 }}>
+            <div className="thread-info insp-block-gap">
               <span>
                 {download.aria2_gid
                   ? 'aria2'
@@ -143,7 +141,7 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
                     : t('inspector.idle')}
               </span>
             </div>
-            <div className="dl-track" style={{ marginTop: 8 }}>
+            <div className="dl-track insp-block-gap">
               <div
                 className={`dl-fill ${isCompleted ? 'done' : isDownloading ? 'active' : ''}`}
                 style={{ width: `${pct}%` }}
@@ -188,21 +186,8 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
               <div className="insp-label">
                 <AlertTriangle size={12} /> {t('inspector.error_reason')}
               </div>
-              <div
-                className="insp-card"
-                style={{ padding: '10px 12px', borderColor: 'var(--danger-soft)' }}
-              >
-                <span
-                  className="mono"
-                  style={{
-                    fontSize: 11,
-                    wordBreak: 'break-all',
-                    color: 'var(--danger)',
-                    lineHeight: 1.5,
-                  }}
-                >
-                  {download.error_message}
-                </span>
+              <div className="insp-card insp-card-compact insp-card-danger">
+                <span className="mono insp-error-text">{download.error_message}</span>
               </div>
             </div>
           )}
@@ -234,9 +219,8 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
             </button>
             {capabilities.remove && (
               <button
-                className="btn-ghost"
+                className="btn-ghost btn-danger-text"
                 onClick={() => setConfirmRemove(true)}
-                style={{ color: 'var(--danger)' }}
               >
                 <Trash2 size={14} /> {t('inspector.remove')}
               </button>
@@ -247,18 +231,8 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
             <div className="insp-label">
               <Link2 size={12} /> {t('inspector.source_url')}
             </div>
-            <div className="insp-card" style={{ padding: '10px 12px' }}>
-              <span
-                className="mono"
-                style={{
-                  fontSize: 11,
-                  wordBreak: 'break-all',
-                  color: 'var(--text-2)',
-                  lineHeight: 1.5,
-                }}
-              >
-                {download.url}
-              </span>
+            <div className="insp-card insp-card-compact">
+              <span className="mono insp-url-text">{download.url}</span>
             </div>
           </div>
         </div>

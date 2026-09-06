@@ -100,7 +100,7 @@ export default function DownloadList({
         )}
       </div>
 
-      <div className="dl-list" role="list" ref={scrollRef} style={{ overflowY: 'auto', flex: 1 }}>
+      <div className="dl-list" role="list" ref={scrollRef}>
         {error && downloads.length > 0 && (
           <div className="diagnostic-error" role="alert">
             <span title={error}>{t('downloadList.load_error_desc')}</span>
@@ -171,22 +171,17 @@ export default function DownloadList({
             )}
           </div>
         ) : (
-          <div style={{ height: totalHeight, position: 'relative', width: '100%' }}>
+          <div className="dl-virtual-spacer" style={{ height: totalHeight }}>
             {items.map((virtualItem) => {
               const dl = filtered[virtualItem.index];
               if (!dl) return null;
               return (
                 <div
                   key={dl.id}
+                  className="dl-virtual-row"
                   data-index={virtualItem.index}
                   ref={virtualizer.measureElement}
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    transform: `translateY(${virtualItem.start}px)`,
-                  }}
+                  style={{ transform: `translateY(${virtualItem.start}px)` }}
                 >
                   <DownloadItem
                     item={dl}

@@ -151,8 +151,8 @@ export function GeneralTab({
         <p className="field-hint">{t('settings.extension_hint')}</p>
         {pendingPairs.length > 0 ? (
           pendingPairs.map((extensionId) => (
-            <div className="input-action" style={{ marginBottom: 8 }} key={extensionId}>
-              <code className="field-hint" style={{ flex: 1 }}>
+            <div className="input-action pair-pending-row" key={extensionId}>
+              <code className="field-hint pair-pending-id">
                 {extensionId}
               </code>
               <button
@@ -170,7 +170,7 @@ export function GeneralTab({
         <button type="button" className="btn-secondary" onClick={handleRelinkExtension}>
           {t('settings.relink_extension')}
         </button>
-        <div className="field" style={{ marginTop: 12 }}>
+        <div className="field field-spaced">
           <label className="field-label" htmlFor="set-extension-id">
             {t('onboarding.native_host_id')}
           </label>
