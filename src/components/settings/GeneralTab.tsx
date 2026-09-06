@@ -41,10 +41,7 @@ export function GeneralTab({
     try {
       const result = await api.checkForUpdates();
       if (result.update_available && result.release_url) {
-        showToast(
-          'info',
-          t('settings.update_available', { version: result.latest_version || '' }),
-        );
+        showToast('info', t('settings.update_available', { version: result.latest_version || '' }));
         await openUrl(result.release_url);
       } else {
         showToast('success', t('settings.update_current', { version: result.current_version }));

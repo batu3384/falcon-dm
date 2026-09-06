@@ -1,6 +1,6 @@
 use crate::download::http_client::{
     add_request_headers, apply_speed_limit, resolve_resource, split_byte_ranges,
-    with_pinned_clients, ResolvedResource, MIN_PARALLEL_BYTES, MAX_HTTP_BYTES, MAX_REDIRECTS,
+    with_pinned_clients, ResolvedResource, MAX_HTTP_BYTES, MAX_REDIRECTS, MIN_PARALLEL_BYTES,
 };
 use crate::storage::{models::DownloadStatus, Database};
 use crate::util::{copy_file_exclusive, validate_fetch_url_async};
@@ -360,16 +360,16 @@ async fn process_http_parallel_resume(
     let temp = temporary_path(&destination, download_id)?;
     let existing = fs::metadata(&temp).await.map_err(|e| e.to_string())?.len();
     if existing != resume_from {
-        return Err(format!(
-            "HTTP resume base mismatch: expected {resume_from}, got {existing}"
-        ));
+        return Err(format!("HTTP resume base mismatch: expected {resume_from}, got {existing}"));
     }
     let remaining = resource.total_bytes.saturating_sub(resume_from);
     if remaining == 0 {
         let temp_for_validation = temp.clone();
-        tokio::task::spawn_blocking(move || crate::util::validate_completed_file(&temp_for_validation))
-            .await
-            .map_err(|e| e.to_string())??;
+        tokio::task::spawn_blocking(move || {
+            crate::util::validate_completed_file(&temp_for_validation)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let destination_for_move = destination.clone();
         tokio::task::spawn_blocking(move || copy_file_exclusive(&temp, &destination_for_move))
             .await
