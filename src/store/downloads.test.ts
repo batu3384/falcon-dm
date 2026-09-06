@@ -75,6 +75,35 @@ describe('useDownloadsStore', () => {
     expect(list.find((d) => d.id === 2)?.downloaded_size).toBe(0);
   });
 
+  it('applyProgress keeps monotonic downloaded_size', () => {
+    useDownloadsStore.setState({
+      downloads: [{ ...baseDownload, downloaded_size: 800, status: 'Downloading' }],
+    });
+    useDownloadsStore.getState().applyProgress({
+      id: 1,
+      downloaded_size: 200,
+      total_size: 1000,
+      speed: 50,
+      status: 'Downloading',
+      connections: 8,
+    });
+    expect(useDownloadsStore.getState().downloads[0].downloaded_size).toBe(800);
+  });
+
+  it('fetchDownloads preserves live progress when poll returns stale status', async () => {
+    useDownloadsStore.setState({
+      downloads: [{ ...baseDownload, downloaded_size: 600, status: 'Downloading', speed: 120 }],
+    });
+    mockedGetDownloads.mockResolvedValueOnce([
+      { ...baseDownload, downloaded_size: 0, status: 'Queued', speed: 0 },
+    ]);
+    await useDownloadsStore.getState().fetchDownloads();
+    const row = useDownloadsStore.getState().downloads[0];
+    expect(row.status).toBe('Downloading');
+    expect(row.downloaded_size).toBe(600);
+    expect(row.speed).toBe(120);
+  });
+
   it('applyProgress ignores unknown ids', () => {
     useDownloadsStore.getState().addDownload(baseDownload);
     useDownloadsStore.getState().applyProgress({

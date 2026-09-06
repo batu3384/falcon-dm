@@ -32,8 +32,20 @@ assert(FM.isBlobUrl('blob:https://example.com/u'), 'blob url detect');
 assert(FM.isJunkUrl('https://x.com/no_input.mp3'), 'junk no_input');
 assert(!FM.isJunkUrl('blob:https://example.com/u'), 'blob not junk');
 assert(FM.isCapturableMedia('https://x.com/stream.mpd', 'application/dash+xml'), 'dash capturable');
+assert(!FM.isCapturableMedia('https://x.com/app/manifest/config.json', 'application/json'), 'reject generic manifest path');
+assert(!FM.isCapturableMedia('https://x.com/manual.pdf', 'application/pdf'), 'reject pdf sniff');
+assert(FM.shouldSniffInject('https://x.com/beacon.mp4', 'video/mp4', 512) === false, 'reject tiny progressive beacon');
+assert(FM.shouldSniffInject('https://x.com/a.m3u8', 'application/vnd.apple.mpegurl', 0), 'hls inject');
+assert(FM.shouldSniffInject('https://x.com/stream', 'video/mp4', 0) === false, 'reject CT-only without content-length');
+const hijack = FM.hijackPayloadForFalcon(
+  'https://rr1---sn.googlevideo.com/videoplayback?itag=18&id=abc',
+  'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+);
+assert(hijack.url.includes('watch?v='), 'hijack maps googlevideo to watch page');
+assert(hijack.format === null, 'hijack defers yt-dlp format to backend');
+assert(background.includes('byExtensionId'), 'skip re-hijack on fail-open fallback');
+assert(background.includes('hijackPayloadForFalcon'), 'hijack payload normalization');
 assert(!FM.isJunkUrl('https://cdn.example.com/video.mp4'), 'real mp4');
-assert(FM.isCapturableMedia('https://x.com/a.m3u8', 'application/vnd.apple.mpegurl'), 'hls');
 const norm = FM.normalizeMediaUrl(
   'https://googlevideo.com/videoplayback?id=abc&range=0-100&other=1',
 );
@@ -53,6 +65,13 @@ assert(
   'bounded request timeout',
 );
 assert(background.includes('suggest({ cancel: false })'), 'download fallback');
+assert(background.includes('fallbackBrowserDownload'), 'fail-open browser re-download');
+assert(
+  background.indexOf('suggest({ cancel: true })') < background.indexOf("sendToFalcon('/api/add'"),
+  'hijack cancels browser before falcon post',
+);
+assert(background.includes('shouldSniffInject'), 'strict overlay sniff gate');
+assert(background.includes('media_updated'), 'overlay refresh on sniff');
 assert(background.includes('Promise.allSettled'), 'batch partial results');
 assert(shared.includes('getCookiesHeader'), 'target cookie lookup');
 assert(shared.includes('cookieLookupUrl'), 'YouTube CDN cookie lookup');
@@ -127,7 +146,10 @@ assert(content.includes('syncVideoFab'), 'single video fab sync');
 assert(content.includes('bindFabDrag'), 'fab drag reposition');
 assert(content.includes('fabManualPos'), 'fab manual position state');
 assert(content.includes('syncFabPageContext'), 'fab manual pos reset on navigation');
-assert(content.includes('pickLargestVideo'), 'largest video only');
+assert(content.includes('pickEligibleVideo'), 'eligible video only');
+assert(content.includes('isEligibleVideoElement'), 'fab eligibility guard');
+assert(content.includes('media_updated'), 'fab resync on sniff');
+assert(content.includes('pickLargestVideo') === false, 'removed naive largest-video fab');
 assert(content.includes("'ping'"), 'content script ping');
 assert(popupHtml.includes('id="notice"'), 'popup error notice');
 assert(optionsHtml.includes('options-head'), 'options header');

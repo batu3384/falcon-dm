@@ -21,7 +21,7 @@ import {
 import SpeedGraph from './SpeedGraph';
 import { ConfirmDialog } from './ConfirmDialog';
 import type { DownloadModel } from '../types';
-import { formatBytes, calculateETA, progressPercent, fileExtension, fileFullPath } from '../types';
+import { formatBytes, calculateETA, progressPercent, progressIndeterminate, progressTotalLabel, fileExtension, fileFullPath } from '../types';
 import { getDownloadCapabilities } from '../lib/downloadCapabilities';
 import { useToastStore } from '../store/toast';
 import * as api from '../api/commands';
@@ -60,11 +60,13 @@ function DownloadItemInner({
   const [moveOpen, setMoveOpen] = useState(false);
 
   const pct = progressPercent(item);
-  const isDownloading = item.status === 'Downloading';
+  const indeterminate = progressIndeterminate(item);
+  const isDownloading = item.status === 'Downloading' || item.status === 'Merging';
   const isCompleted = item.status === 'Completed';
   const isFailed = item.status === 'Failed';
   const capabilities = getDownloadCapabilities(item.status);
-  const remainingBytes = item.total_size - item.downloaded_size;
+  const remainingBytes =
+    item.total_size > item.downloaded_size ? item.total_size - item.downloaded_size : 0;
   const etaText = isDownloading ? calculateETA(remainingBytes, item.speed) : '';
   const ext = fileExtension(item.filename);
   const { icon: ThumbIcon, cls: thumbCls } = getThumb(item.filename);
@@ -198,16 +200,19 @@ function DownloadItemInner({
             )}
           </div>
 
-          <div className="dl-track">
-            <div className={`dl-fill ${fillCls}`} style={{ width: `${pct}%` }} />
+          <div className={`dl-track${indeterminate ? ' indeterminate' : ''}`}>
+            <div
+              className={`dl-fill ${fillCls}${indeterminate ? ' pulse' : ''}`}
+              style={indeterminate ? undefined : { width: `${pct}%` }}
+            />
           </div>
 
           <div className="dl-meta">
             <span>
-              {formatBytes(item.downloaded_size)} / {formatBytes(item.total_size)}
+              {formatBytes(item.downloaded_size)} / {progressTotalLabel(item)}
             </span>
             <span className="meta-sep">/</span>
-            <span>{pct}%</span>
+            <span>{indeterminate ? '…' : `${pct}%`}</span>
             {isDownloading && item.speed > 0 && (
               <>
                 <span className="meta-sep">/</span>
@@ -467,7 +472,13 @@ function DownloadItemInner({
 const DownloadItem = memo(
   DownloadItemInner,
   (prev, next) =>
-    prev.item === next.item &&
+    prev.item.id === next.item.id &&
+    prev.item.downloaded_size === next.item.downloaded_size &&
+    prev.item.total_size === next.item.total_size &&
+    prev.item.speed === next.item.speed &&
+    prev.item.status === next.item.status &&
+    prev.item.filename === next.item.filename &&
+    prev.item.error_message === next.item.error_message &&
     prev.isSelected === next.isSelected &&
     prev.isBatchSelected === next.isBatchSelected &&
     prev.onSelect === next.onSelect &&

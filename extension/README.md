@@ -7,8 +7,8 @@ Load unpacked from this folder in Chrome/Edge.
 - Pair: extension first asks registered `com.falcondm.native` host for a single-use proof, then calls `POST /api/pair` → `200` + token, or `202` pending (approve in Falcon Settings). Extension polls until approved.
 - Downloads: `POST /api/intercept` or `/api/add` with `X-Falcon-Token`.
 - Requests use bounded timeouts.
-- **Fail-open (default):** if Falcon cannot receive a **browser hijacked** download, `suggest({ cancel: false })` keeps the native browser save.
-- **Fail-closed (opt-in):** enable **Block when offline** in popup or options → `suggest({ cancel: true })` and a blocking notification when hijack fails.
+- **Fail-open (default):** hijack cancels the browser save first; if Falcon cannot receive it, the extension re-queues the same URL via `chrome.downloads.download`.
+- **Fail-closed (opt-in):** enable **Block when offline** in popup or options → hijack stays cancelled and a blocking notification is shown when Falcon is offline.
 - **Pause:** popup **Pause** disables hijack entirely (`cancel: false` always).
 - Batch enqueue (link grabber) accepts up to **100** items; returns per-item `results`; successful items are removed from retry selection while failed items remain retryable.
 - Link grabber scans `<a href>`, `download` attributes, and `<video>/<audio>` `src`/`source` tags (documents, archives, media extensions).

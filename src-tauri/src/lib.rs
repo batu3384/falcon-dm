@@ -140,8 +140,22 @@ pub(crate) async fn enqueue_download(
         return Err("not a real media url".into());
     }
 
-    let url =
-        util::attach_falcon_format(&normalize_media_url(&payload.url), payload.format.as_deref());
+    const DEFAULT_YTDLP_FORMAT: &str =
+        "bestvideo[height<=1080]+bestaudio/best[height<=1080]/bv*+ba/b";
+    let watch_url =
+        util::youtube_page_url_for_download(&payload.url, payload.referrer.as_deref());
+    let base = watch_url
+        .clone()
+        .unwrap_or_else(|| normalize_media_url(&payload.url));
+    let format = payload
+        .format
+        .as_deref()
+        .or(if watch_url.is_some() {
+            Some(DEFAULT_YTDLP_FORMAT)
+        } else {
+            None
+        });
+    let url = util::attach_falcon_format(&base, format);
     let force_hls = is_hls_url(&url);
     let filename = resolve_download_filename(
         &url,

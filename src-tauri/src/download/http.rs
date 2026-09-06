@@ -100,6 +100,7 @@ fn emit_progress(
         let _ = db.update_download_progress(
             download_id,
             downloaded,
+            Some(total.max(downloaded)),
             speed,
             &DownloadStatus::Downloading,
         );

@@ -684,12 +684,13 @@
     return host;
   }
 
-  function pickLargestVideo() {
+  function pickEligibleVideo() {
     let best = null;
     let bestArea = 0;
+    const pageUrl = location.href;
     document.querySelectorAll('video').forEach((v) => {
+      if (!FM || !FM.isEligibleVideoElement(v, pageUrl)) return;
       const r = v.getBoundingClientRect();
-      if (r.width < 48 || r.height < 48 || r.bottom < 0 || r.top > window.innerHeight) return;
       const area = r.width * r.height;
       if (area > bestArea) {
         bestArea = area;
@@ -706,8 +707,9 @@
       return;
     }
     if (!fabVideo) return;
+    const minPx = (FM && FM.MIN_FAB_PX) || 120;
     const r = fabVideo.getBoundingClientRect();
-    if (r.width < 48 || r.height < 48) {
+    if (r.width < minPx || r.height < minPx) {
       fabHost.style.display = 'none';
       return;
     }
@@ -730,8 +732,10 @@
       if (fabHost) fabHost.style.display = 'none';
       return;
     }
-    const video = pickLargestVideo();
+    const video = pickEligibleVideo();
     if (!video) {
+      fabVideo = null;
+      teardownFabListeners();
       if (fabHost) fabHost.style.display = 'none';
       return;
     }
@@ -940,6 +944,11 @@
 
   chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
     if (req.action === 'ping') {
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (req.action === 'media_updated') {
+      scheduleFabSync();
       sendResponse({ ok: true });
       return true;
     }

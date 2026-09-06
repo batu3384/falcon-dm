@@ -1,5 +1,6 @@
 use super::database::{Database, DatabaseError, Result};
 use super::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
+use crate::util::youtube_dedup_base;
 use chrono::Utc;
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Row, TransactionBehavior};
@@ -78,8 +79,20 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(DatabaseError::from)?;
-        let existing = tx
-            .query_row(
+        let existing = if let Some(base) = youtube_dedup_base(&download.url) {
+            tx.query_row(
+                "SELECT id FROM downloads
+                 WHERE (url = ?1 OR url = ?2 OR url LIKE ?2 || '#falconfmt=%')
+                   AND status IN ('Queued', 'Downloading', 'Paused', 'Merging')
+                   AND archived = 0
+                 ORDER BY id DESC
+                 LIMIT 1",
+                params![download.url, base],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        } else {
+            tx.query_row(
                 "SELECT id FROM downloads
                  WHERE url = ?1
                    AND status IN ('Queued', 'Downloading', 'Paused', 'Merging')
@@ -89,7 +102,8 @@ impl Database {
                 params![download.url],
                 |row| row.get::<_, i64>(0),
             )
-            .optional()?;
+            .optional()?
+        };
         if let Some(id) = existing {
             tx.commit().map_err(DatabaseError::from)?;
             return Ok(InsertDownloadResult::Existing(id));
@@ -454,15 +468,29 @@ impl Database {
         &self,
         id: i64,
         downloaded_size: u64,
+        total_size: Option<u64>,
         speed: f64,
         status: &DownloadStatus,
     ) -> Result<bool> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
-        let rows = conn.execute(
-            "UPDATE downloads SET downloaded_size = ?1, speed = ?2, status = ?3
-             WHERE id = ?4 AND status IN ('Downloading', 'Merging')",
-            params![downloaded_size as i64, speed, status.as_str(), id],
-        )?;
+        let rows = if let Some(total) = total_size {
+            conn.execute(
+                "UPDATE downloads SET
+                 downloaded_size = CASE WHEN ?1 > downloaded_size THEN ?1 ELSE downloaded_size END,
+                 total_size = CASE WHEN ?2 > total_size THEN ?2 ELSE total_size END,
+                 speed = ?3, status = ?4
+                 WHERE id = ?5 AND status IN ('Downloading', 'Merging')",
+                params![downloaded_size as i64, total as i64, speed, status.as_str(), id],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE downloads SET
+                 downloaded_size = CASE WHEN ?1 > downloaded_size THEN ?1 ELSE downloaded_size END,
+                 speed = ?2, status = ?3
+                 WHERE id = ?4 AND status IN ('Downloading', 'Merging')",
+                params![downloaded_size as i64, speed, status.as_str(), id],
+            )?
+        };
         Ok(rows == 1)
     }
 

@@ -62,6 +62,10 @@
   const GRABBER_EXT_RE = new RegExp(`\\.(${GRABBER_EXTENSIONS})(\\?|#|$)`, 'i');
 
   const BLOB_MAX_BYTES = 32 * 1024 * 1024;
+  const MIN_FAB_PX = 120;
+  const STREAM_PATH_RE = /\.(m3u8|mpd)(\?|#|$)/i;
+  const PROGRESSIVE_MEDIA_RE =
+    /\.(mp4|webm|mkv|m4v|mov|avi|wmv|flac|m4a|mp3|ogg|wav|aac|wma)(\?|#|$)/i;
 
   function formatBytes(n) {
     if (!n || n <= 0) return '';
@@ -161,33 +165,113 @@
     return GRABBER_EXT_RE.test(String(url || ''));
   }
 
-  function isCapturableMedia(url, contentType) {
-    if (!url || url.startsWith('data:')) return false;
-    if (url.startsWith('blob:')) return true;
-    if (isJunkUrl(url)) return false;
+  function isStreamContentType(contentType) {
     const ct = (contentType || '').toLowerCase();
-    const u = url.toLowerCase();
     return (
-      u.includes('.m3u8') ||
-      u.includes('.mpd') ||
-      u.includes('/manifest/') ||
-      u.includes('videoplayback') ||
-      u.includes('googlevideo.com') ||
-      u.includes('mime=video') ||
-      u.includes('mime=audio') ||
-      /\.(mp4|webm|mkv|m4a|mp3|flac|ogg|mov|avi|wmv|pdf|zip|rar|7z)(\?|#|$)/i.test(url) ||
-      ct.includes('video/') ||
-      ct.includes('audio/') ||
       ct.includes('mpegurl') ||
       ct.includes('dash+xml') ||
       ct.includes('application/vnd.apple.mpegurl')
     );
   }
 
+  /** Network sniff + overlay: streams and progressive media only (not pdf/zip/webpack manifest). */
+  function isSniffableMedia(url, contentType) {
+    if (!url || url.startsWith('data:') || url.startsWith('blob:')) return false;
+    if (isJunkUrl(url)) return false;
+    const ct = (contentType || '').toLowerCase();
+    const u = url.toLowerCase();
+    return (
+      u.includes('videoplayback') ||
+      isGooglevideoUrl(url) ||
+      u.includes('mime=video') ||
+      u.includes('mime=audio') ||
+      STREAM_PATH_RE.test(url) ||
+      PROGRESSIVE_MEDIA_RE.test(url) ||
+      isStreamContentType(ct) ||
+      ct.includes('video/') ||
+      ct.includes('audio/')
+    );
+  }
+
+  function isCapturableMedia(url, contentType) {
+    return isSniffableMedia(url, contentType);
+  }
+
+  function shouldSniffInject(url, contentType, contentLength) {
+    if (!isSniffableMedia(url, contentType)) return false;
+    if (STREAM_PATH_RE.test(url) || isGooglevideoUrl(url) || isStreamContentType(contentType)) {
+      return true;
+    }
+    if (PROGRESSIVE_MEDIA_RE.test(url)) {
+      if (contentLength > 0 && contentLength < 8192) return false;
+      return true;
+    }
+    // ponytail: CT-only sniff without extension needs Content-Length to avoid beacons
+    if (contentLength <= 0) return false;
+    if (contentLength < 8192) return false;
+    return true;
+  }
+
+  /** Align hijacked browser downloads with overlay/yt-dlp routing. */
+  function hijackPayloadForFalcon(downloadUrl, pageUrl) {
+    const raw = String(downloadUrl || '').trim();
+    const page = String(pageUrl || '').split('#')[0];
+    if (isGooglevideoUrl(raw) || raw.includes('videoplayback')) {
+      if (isYoutubeWatchPage(page)) {
+        return { url: page, format: null };
+      }
+    }
+    if (isYoutubeWatchUrl(raw)) {
+      return { url: raw.split('#')[0], format: null };
+    }
+    if (/\.mpd(\?|#|$)/i.test(raw)) {
+      return { url: raw, format: 'best' };
+    }
+    return { url: raw, format: null };
+  }
+
+  function isMainYoutubePlayerVideo(video) {
+    if (video.closest('ytd-ad-slot-renderer, .ytp-ad-module, .video-ads')) return false;
+    return !!video.closest('#movie_player, .html5-video-player, ytd-player');
+  }
+
+  function videoElementSrc(el) {
+    if (!el) return '';
+    return el.currentSrc || el.src || '';
+  }
+
+  function isYoutubeWatchPage(url) {
+    if (isYoutubeWatchUrl(url)) return true;
+    try {
+      const u = new URL(url);
+      return u.hostname === 'youtu.be' || u.pathname.startsWith('/shorts/');
+    } catch {
+      return false;
+    }
+  }
+
+  /** FAB target: main player on watch pages, otherwise video must carry capturable src. */
+  function isEligibleVideoElement(video, pageUrl) {
+    if (!video || video.tagName !== 'VIDEO') return false;
+    const r = video.getBoundingClientRect();
+    if (r.width < MIN_FAB_PX || r.height < MIN_FAB_PX) return false;
+    if (r.bottom < 0 || r.top > window.innerHeight) return false;
+    const page = pageUrl || '';
+    try {
+      if (isYoutubeHost(new URL(page).hostname) && !isYoutubeWatchPage(page)) return false;
+    } catch (_) {}
+    if (isYoutubeWatchPage(page)) return isMainYoutubePlayerVideo(video);
+    const src = videoElementSrc(video);
+    if (!src || src.startsWith('data:')) return false;
+    if (isBlobUrl(src)) return true;
+    if (/^https?:/i.test(src)) return isSniffableMedia(src, video.getAttribute('type') || '');
+    return false;
+  }
+
   function detectFormat(url) {
     const u = url.toLowerCase();
-    if (u.includes('.m3u8') || u.includes('/manifest/')) return { fmt: 'HLS', type: 'stream' };
-    if (u.includes('.mpd')) return { fmt: 'DASH', type: 'stream' };
+    if (/\.m3u8(\?|#|$)/i.test(u)) return { fmt: 'HLS', type: 'stream' };
+    if (/\.mpd(\?|#|$)/i.test(u)) return { fmt: 'DASH', type: 'stream' };
     if (u.includes('.webm')) return { fmt: 'WebM', type: 'video' };
     if (u.includes('.mp4') || u.includes('mime=video%2fmp4') || u.includes('mime=video/mp4')) {
       return { fmt: 'MP4', type: 'video' };
@@ -255,8 +339,9 @@
     const yt = itag ? YT_ITAG[itag] : null;
     const fmt = yt ? { fmt: yt.fmt, type: yt.type } : detectFormat(clean);
     const quality = yt ? yt.q : detectQuality(clean, meta);
-    const isHls = clean.includes('.m3u8') || (clean.includes('/manifest/') && !clean.includes('.mpd'));
-    const isDash = clean.includes('.mpd');
+    const ct = (meta.contentType || '').toLowerCase();
+    const isHls = /\.m3u8(\?|#|$)/i.test(clean) || ct.includes('mpegurl');
+    const isDash = /\.mpd(\?|#|$)/i.test(clean) || ct.includes('dash+xml');
     const isAudio = fmt.type === 'audio' || (yt && yt.type === 'audio');
     const muxed = yt ? !!yt.muxed : !isAudio && !isHls && !isDash;
     const size = meta.contentLength || 0;
@@ -440,6 +525,14 @@
     BLOB_MAX_BYTES,
     collectPageBlobSources,
     isCapturableMedia,
+    isSniffableMedia,
+    shouldSniffInject,
+    isEligibleVideoElement,
+    isYoutubeWatchPage,
+    isMainYoutubePlayerVideo,
+    hijackPayloadForFalcon,
+    videoElementSrc,
+    MIN_FAB_PX,
     isYoutubeHost,
     isGooglevideoUrl,
     isDirectGooglevideoUrl,

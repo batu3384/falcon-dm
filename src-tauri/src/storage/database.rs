@@ -219,7 +219,7 @@ mod tests {
         // Update progress
         db.set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Downloading)
             .unwrap();
-        db.update_download_progress(id, 512 * 1024, 1024.5, &DownloadStatus::Downloading)
+        db.update_download_progress(id, 512 * 1024, None, 1024.5, &DownloadStatus::Downloading)
             .expect("Update progress failed");
         let updated_progress = db.get_download(id).expect("Get after progress update failed");
         assert_eq!(updated_progress.downloaded_size, 512 * 1024);
@@ -255,10 +255,10 @@ mod tests {
 
         db.set_status_if_current(id1, &[DownloadStatus::Queued], &DownloadStatus::Downloading)
             .unwrap();
-        db.update_download_progress(id1, 100, 50.0, &DownloadStatus::Downloading).unwrap();
+        db.update_download_progress(id1, 100, None, 50.0, &DownloadStatus::Downloading).unwrap();
         db.set_status_if_current(id2, &[DownloadStatus::Queued], &DownloadStatus::Downloading)
             .unwrap();
-        db.update_download_progress(id2, 100, 0.0, &DownloadStatus::Paused).unwrap();
+        db.update_download_progress(id2, 100, None, 0.0, &DownloadStatus::Paused).unwrap();
 
         // Filter by category
         let video_filter =
@@ -375,7 +375,7 @@ mod tests {
         let id = db.insert_download(&create_test_download("priority.zip")).unwrap();
         db.set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Downloading)
             .unwrap();
-        db.update_download_progress(id, 512, 42.0, &DownloadStatus::Downloading).unwrap();
+        db.update_download_progress(id, 512, None, 42.0, &DownloadStatus::Downloading).unwrap();
 
         assert!(db.adjust_priority(id, true).unwrap());
         let updated = db.get_download(id).unwrap();

@@ -12,6 +12,8 @@ export {
   formatBytes,
   calculateETA,
   progressPercent,
+  progressIndeterminate,
+  progressTotalLabel,
   fileExtension,
   fileFullPath,
 } from './lib/format';

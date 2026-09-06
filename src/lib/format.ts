@@ -26,6 +26,25 @@ export function progressPercent(dl: { total_size: number; downloaded_size: numbe
   return Math.min(100, Math.round((dl.downloaded_size / dl.total_size) * 100));
 }
 
+/** True when bytes are moving but total file size is not known yet. */
+export function progressIndeterminate(dl: {
+  total_size: number;
+  downloaded_size: number;
+  status: string;
+}): boolean {
+  return (
+    (dl.status === 'Downloading' || dl.status === 'Merging') &&
+    dl.total_size <= 0 &&
+    dl.downloaded_size > 0
+  );
+}
+
+export function progressTotalLabel(dl: { total_size: number; downloaded_size: number }): string {
+  if (dl.total_size > 0) return formatBytes(dl.total_size);
+  if (dl.downloaded_size > 0) return '…';
+  return formatBytes(0);
+}
+
 export function fileExtension(filename: string): string {
   return filename.includes('.') ? filename.split('.').pop()?.toUpperCase() || '' : '';
 }

@@ -331,6 +331,7 @@ pub async fn process_hls_stream(
         }
     }
 
+    let db_for_segments = db.clone();
     let segment_paths: Vec<PathBuf> = stream::iter(segment_urls.into_iter().enumerate())
         .map(|(idx, seg_url)| {
             let temp_dir = temp_dir.clone();
@@ -339,6 +340,7 @@ pub async fn process_hls_stream(
             let completed_segs = completed_segs.clone();
             let total_size_estimate = total_size_estimate.clone();
             let app_handle = app_handle.clone();
+            let db = db_for_segments.clone();
             let source_url = base_url.clone();
             let headers = headers.clone();
             let speed_limit_kbps = headers.speed_limit_kbps;
@@ -461,6 +463,9 @@ pub async fn process_hls_stream(
                 let elapsed = started.elapsed().as_secs_f64().max(0.001);
                 let speed = bytes_so_far as f64 / elapsed;
 
+                let mut file = fs::File::create(&seg_path).await.map_err(|e| e.to_string())?;
+                file.write_all(&bytes).await.map_err(|e| e.to_string())?;
+
                 let _ = app_handle.emit(
                     "download-progress",
                     HlsProgressEvent {
@@ -472,9 +477,15 @@ pub async fn process_hls_stream(
                         connections: concurrency_limit as u32,
                     },
                 );
-
-                let mut file = fs::File::create(&seg_path).await.map_err(|e| e.to_string())?;
-                file.write_all(&bytes).await.map_err(|e| e.to_string())?;
+                if let Some(ref db) = db {
+                    let _ = db.update_download_progress(
+                        download_id,
+                        bytes_so_far,
+                        Some(new_total),
+                        speed,
+                        &DownloadStatus::Downloading,
+                    );
+                }
                 if speed_limit_kbps > 0 {
                     let total = downloaded_bytes.load(Ordering::Relaxed);
                     apply_speed_limit(speed_limit_kbps, 0, total, speed_started, &rx_clone).await?;
@@ -506,6 +517,7 @@ pub async fn process_hls_stream(
         let _ = db.update_download_progress(
             download_id,
             downloaded_final,
+            Some(total_final),
             0.0,
             &DownloadStatus::Merging,
         );

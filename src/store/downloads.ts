@@ -4,6 +4,30 @@ import { getDownloads } from '../api/commands';
 
 export const DOWNLOAD_PAGE_SIZE = 200;
 
+function mergeLiveProgress(fresh: DownloadModel, existing?: DownloadModel): DownloadModel {
+  if (!existing || existing.id !== fresh.id) return fresh;
+  const freshLive = fresh.status === 'Downloading' || fresh.status === 'Merging';
+  const existingLive = existing.status === 'Downloading' || existing.status === 'Merging';
+  if (existingLive && !freshLive) {
+    return {
+      ...fresh,
+      status: existing.status,
+      downloaded_size: Math.max(fresh.downloaded_size, existing.downloaded_size),
+      total_size: Math.max(fresh.total_size, existing.total_size),
+      speed: Math.max(fresh.speed, existing.speed),
+    };
+  }
+  if (freshLive && existingLive) {
+    return {
+      ...fresh,
+      downloaded_size: Math.max(fresh.downloaded_size, existing.downloaded_size),
+      total_size: Math.max(fresh.total_size, existing.total_size),
+      speed: Math.max(fresh.speed, existing.speed),
+    };
+  }
+  return fresh;
+}
+
 // ponytail: downloads store absorbs the download list + selection state that
 // used to live as 4 separate useStates in App.tsx and was prop-drilled into
 // DownloadList, InspectorPanel, StatusBar, Sidebar. Components now subscribe
@@ -92,11 +116,17 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       set((state) => {
         const liveIds = new Set(data.map((download) => download.id));
         const selectedIds = new Set([...state.selectedIds].filter((id) => liveIds.has(id)));
+        const merged = data.map((row) =>
+          mergeLiveProgress(
+            row,
+            state.downloads.find((download) => download.id === row.id),
+          ),
+        );
         const selectedDownload = state.selectedDownload
-          ? (data.find((download) => download.id === state.selectedDownload?.id) ?? null)
+          ? (merged.find((download) => download.id === state.selectedDownload?.id) ?? null)
           : null;
         return {
-          downloads: data,
+          downloads: merged,
           loading: false,
           error: null,
           hasMore: pages[pages.length - 1]?.length === DOWNLOAD_PAGE_SIZE,
@@ -129,11 +159,16 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       if (get().requestSequence !== sequence) return;
       set((current) => {
         const existingIds = new Set(current.downloads.map((download) => download.id));
+        const appended = rows
+          .filter((download) => !existingIds.has(download.id))
+          .map((row) =>
+            mergeLiveProgress(
+              row,
+              current.downloads.find((download) => download.id === row.id),
+            ),
+          );
         return {
-          downloads: [
-            ...current.downloads,
-            ...rows.filter((download) => !existingIds.has(download.id)),
-          ],
+          downloads: [...current.downloads, ...appended],
           loadedPages: current.loadedPages + 1,
           hasMore: rows.length === DOWNLOAD_PAGE_SIZE,
           loadingMore: false,
@@ -155,20 +190,22 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
   applyProgress: (p) => {
     set((state) => {
       if (!state.downloads.some((d) => d.id === p.id)) return state;
-      return {
-        downloads: state.downloads.map((d) =>
-          d.id === p.id
-            ? {
-                ...d,
-                downloaded_size: p.downloaded_size,
-                total_size: p.total_size,
-                speed: p.speed,
-                status: p.status,
-                segments: p.connections || d.segments,
-              }
-            : d,
-        ),
-      };
+      const downloads = state.downloads.map((d) => {
+        if (d.id !== p.id) return d;
+        return {
+          ...d,
+          downloaded_size: Math.max(p.downloaded_size, d.downloaded_size),
+          total_size: Math.max(p.total_size, d.total_size),
+          speed: Math.max(p.speed, d.speed),
+          status: p.status,
+          segments: p.connections || d.segments,
+        };
+      });
+      const selectedDownload =
+        state.selectedDownload?.id === p.id
+          ? (downloads.find((d) => d.id === p.id) ?? state.selectedDownload)
+          : state.selectedDownload;
+      return { downloads, selectedDownload };
     });
   },
 

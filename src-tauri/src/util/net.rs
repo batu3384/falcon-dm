@@ -285,6 +285,15 @@ pub fn is_youtube_watch_url(url: &str) -> bool {
         || u.path().starts_with("/live/")
 }
 
+/// Watch-page base URL for dedup — same video, different `#falconfmt` counts as one active job.
+pub fn youtube_dedup_base(url: &str) -> Option<String> {
+    let (clean, _) = split_falcon_format(url);
+    if !is_youtube_watch_url(&clean) {
+        return None;
+    }
+    Some(clean.split('#').next().unwrap_or(&clean).to_string())
+}
+
 pub fn is_googlevideo_url(url: &str) -> bool {
     let host = url::Url::parse(url)
         .ok()
@@ -630,6 +639,16 @@ mod tests {
         );
         assert_eq!(base, "https://www.youtube.com/watch?v=abc");
         assert!(fmt.unwrap().contains("height"));
+    }
+
+    #[test]
+    fn youtube_dedup_base_strips_format_fragment() {
+        let base = youtube_dedup_base(
+            "https://www.youtube.com/watch?v=abc#falconfmt=best%5Bheight%3C%3D720%5D",
+        )
+        .unwrap();
+        assert_eq!(base, "https://www.youtube.com/watch?v=abc");
+        assert!(youtube_dedup_base("https://cdn.example.com/a.mp4").is_none());
     }
 
     #[test]

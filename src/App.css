@@ -1219,6 +1219,18 @@ select {
 .dl-fill.failed {
   background: var(--danger);
 }
+.dl-track.indeterminate .dl-fill.pulse {
+  width: 35%;
+  animation: dl-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes dl-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
 .dl-meta {
   display: flex;
   align-items: center;

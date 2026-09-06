@@ -40,10 +40,12 @@ The in-app installer also writes manifests on **Linux** and **Windows** Chromium
 
 When the browser starts a file download, the extension can send it to Falcon instead.
 
+**Overlay FAB** appears only on YouTube watch/Shorts pages or when a visible `<video>` (≥120×120 px) plays a capturable `http(s)`/blob source. Generic PDF/ZIP/manifest responses do not inject the overlay.
+
 | Control | Where | Effect |
 |---------|-------|--------|
 | **Pause** | Popup | Hijack off — browser downloads normally |
-| **Block when offline** | Popup or extension options | If Falcon cannot receive the hijacked download, cancel browser save instead of fail-open fallback (default: fail-open) |
+| **Block when offline** | Popup or extension options | Hijack stays cancelled when Falcon cannot receive the download (default fail-open re-downloads via Chrome) |
 
 Fail-closed applies to **`chrome.downloads.onDeterminingFilename`** only. Context menu, media overlay, and manual URL sends show an error but do not cancel a browser download (there is none).
 

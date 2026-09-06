@@ -87,13 +87,46 @@ function headerValue(headers, name) {
   return h ? h.value : '';
 }
 
+function fallbackBrowserDownload(item) {
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download(
+      {
+        url: item.url,
+        filename: item.filename,
+        conflictAction: 'uniquify',
+      },
+      (id) => {
+        const err = chrome.runtime.lastError;
+        if (err) reject(new Error(err.message));
+        else resolve(id);
+      },
+    );
+  });
+}
+
+async function notifyOverlayMedia(tabId) {
+  if (!tabId || tabId < 0) return;
+  const injected = await ensureContentScript(tabId);
+  if (!injected) return;
+  try {
+    await chrome.tabs.sendMessage(tabId, { action: 'media_updated' });
+  } catch (_) {
+    /* ponytail: tab may be navigating — FAB resyncs on next sniff */
+  }
+}
+
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     const url = details.url;
     const ct = headerValue(details.responseHeaders, 'content-type').toLowerCase();
     const cl = parseInt(headerValue(details.responseHeaders, 'content-length'), 10) || 0;
 
-    if (!self.FalconMedia || !self.FalconMedia.isCapturableMedia(url, ct)) return;
+    if (
+      !self.FalconMedia ||
+      !self.FalconMedia.shouldSniffInject(url, ct, cl)
+    ) {
+      return;
+    }
 
     const clean = self.FalconMedia.normalizeMediaUrl(url);
     if (!clean || self.FalconMedia.isJunkUrl(clean)) return;
@@ -111,7 +144,6 @@ chrome.webRequest.onHeadersReceived.addListener(
 
       const metaMap = MEDIA_META.get(details.tabId) || new Map();
       const prev = metaMap.get(clean);
-      // Keep largest content-length seen for this URL
       metaMap.set(clean, {
         contentLength: Math.max(cl, (prev && prev.contentLength) || 0),
         contentType: ct || (prev && prev.contentType) || '',
@@ -119,8 +151,7 @@ chrome.webRequest.onHeadersReceived.addListener(
       });
       MEDIA_META.set(details.tabId, metaMap);
 
-      // Inject the on-demand overlay so the user sees the Falcon button on this media.
-      ensureContentScript(details.tabId);
+      notifyOverlayMedia(details.tabId);
     }
   },
   { urls: ['<all_urls>'] },
@@ -129,32 +160,45 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   if (interceptPaused) {
-    // Paused: let the browser handle the download natively.
     suggest({ cancel: false });
     return;
   }
+  // Fail-open fallback uses chrome.downloads.download — must not re-hijack our own item.
+  if (item.byExtensionId === chrome.runtime.id) {
+    suggest({ cancel: false });
+    return;
+  }
+  suggest({ cancel: true });
   (async () => {
     try {
       const pageUrl = item.referrer || item.url;
       const cookieLookup = cookieLookupUrl(item.url, pageUrl);
       const cookiesHeader = await getCookiesHeader(cookieLookup);
-
       const filename = item.filename || item.url.split('/').pop().split('?')[0] || 'download';
+      const hijack = self.FalconMedia?.hijackPayloadForFalcon
+        ? self.FalconMedia.hijackPayloadForFalcon(item.url, pageUrl)
+        : { url: item.url, format: null };
 
       await sendToFalcon('/api/add', {
-        url: item.url,
+        url: hijack.url,
         filename,
         referrer: item.referrer || '',
         user_agent: navigator.userAgent,
         cookies: cookiesHeader,
         cookie_url: cookieLookup,
+        format: hijack.format || undefined,
       });
-      suggest({ cancel: true });
       notify('Falcon DM', msg('sentToApp', 'Download sent to Falcon DM'));
     } catch (e) {
       console.error(e);
       const failClosed = await getInterceptFailClosed();
-      suggest({ cancel: failClosed });
+      if (!failClosed) {
+        try {
+          await fallbackBrowserDownload(item);
+        } catch (fallbackErr) {
+          console.error(fallbackErr);
+        }
+      }
       notify(
         'Falcon DM',
         failClosed

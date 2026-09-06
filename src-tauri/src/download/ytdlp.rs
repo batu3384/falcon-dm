@@ -1,3 +1,4 @@
+use crate::storage::models::DownloadStatus;
 use crate::storage::Database;
 use crate::util::sanitize_header_value;
 use std::path::{Path, PathBuf};
@@ -73,7 +74,7 @@ pub async fn process_ytdlp(
     out_path: &str,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     headers: YtDlpHeaders,
-    _db: Option<Database>,
+    db: Option<Database>,
     format: Option<&str>,
 ) -> Result<(), String> {
     let preferred = crate::settings::Settings::load(&crate::util::app_data_dir());
@@ -158,6 +159,7 @@ pub async fn process_ytdlp(
         let downloaded_c = downloaded.clone();
         let total_c = total.clone();
         let stderr_c = stderr_buf.clone();
+        let db_c = db.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(err).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -168,20 +170,35 @@ pub async fn process_ytdlp(
                         buf.push('\n');
                     }
                 }
+                let mut progress_line = false;
+                if let Some(sz) = parse_total_size(&line) {
+                    total_c.store(sz, Ordering::Relaxed);
+                    progress_line = true;
+                }
                 if let Some(pct) = parse_percent(&line) {
                     let tot = total_c.load(Ordering::Relaxed);
                     if tot > 0 {
-                        let cur = ((pct / 100.0) * tot as f64) as u64;
-                        downloaded_c.store(cur, Ordering::Relaxed);
+                        let next = ((pct / 100.0) * tot as f64) as u64;
+                        downloaded_c.fetch_max(next, Ordering::Relaxed);
+                        progress_line = true;
                     }
                 }
-                if let Some(sz) = parse_total_size(&line) {
-                    total_c.store(sz, Ordering::Relaxed);
+                if !progress_line {
+                    continue;
                 }
                 let cur = downloaded_c.load(Ordering::Relaxed);
-                let tot = total_c.load(Ordering::Relaxed);
+                let tot = total_c.load(Ordering::Relaxed).max(cur);
                 let elapsed = start.elapsed().as_secs_f64().max(0.001);
                 let speed = cur as f64 / elapsed;
+                if let Some(ref db) = db_c {
+                    let _ = db.update_download_progress(
+                        dl_id,
+                        cur,
+                        Some(tot),
+                        speed,
+                        &DownloadStatus::Downloading,
+                    );
+                }
                 let _ = app.emit(
                     "download-progress",
                     serde_json::json!({
@@ -278,10 +295,13 @@ fn parse_percent(line: &str) -> Option<f64> {
 }
 
 fn parse_total_size(line: &str) -> Option<u64> {
-    // "of  70.17MiB"
+    // "[download]  12.3% of ~  70.17MiB at ..." or "of  70.17MiB"
     let lower = line.to_lowercase();
     let of = lower.find(" of ")?;
-    let rest = line[of + 4..].trim_start();
+    let mut rest = line[of + 4..].trim_start();
+    if rest.starts_with('~') {
+        rest = rest[1..].trim_start();
+    }
     let end = rest.find(' ').unwrap_or(rest.len());
     parse_size_token(&rest[..end])
 }
@@ -327,6 +347,17 @@ fn cleanup_partial_outputs(run_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_total_size_handles_tilde_estimate() {
+        let sz = parse_total_size("[download]  12.3% of ~  70.17MiB at  2.50MiB/s ETA 00:12").unwrap();
+        assert!(sz > 70_000_000);
+    }
+
+    #[test]
+    fn parse_percent_reads_trailing_number() {
+        assert!((parse_percent("[download]  45.2% of ~  70.17MiB").unwrap() - 45.2).abs() < 0.01);
+    }
 
     #[test]
     fn cleanup_partial_outputs_only_removes_requested_stem() {
