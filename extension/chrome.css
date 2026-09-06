@@ -73,6 +73,10 @@ button:disabled {
   cursor: default;
 }
 
+button.primary.is-blocked {
+  opacity: 0.72;
+}
+
 body.popup {
   width: 380px;
   max-height: min(600px, 90vh);

@@ -18,7 +18,7 @@
         <img src="icon48.png" alt="" class="logo" />
         <strong id="app-name">Falcon DM</strong>
       </div>
-      <span id="status" class="pill" data-state="offline" aria-live="polite">…</span>
+      <span id="status" class="pill" data-state="checking" aria-live="polite">…</span>
     </header>
 
     <div id="banner" class="banner" hidden role="alert">
@@ -40,6 +40,8 @@
       <p id="grab-hint" class="help"></p>
     </section>
 
+    <p id="notice" class="notice" hidden role="alert" tabindex="-1"></p>
+
     <details class="more" id="more">
       <summary id="more-label"></summary>
 
@@ -47,7 +49,7 @@
         <div class="section-title" id="tab-label"></div>
         <div class="url-row">
           <span id="page-url" class="url" title=""></span>
-          <button id="dl-url" class="secondary sm" type="button"></button>
+          <button id="dl-url" class="secondary sm" type="button" disabled></button>
         </div>
       </section>
 
@@ -78,8 +80,6 @@
         </span>
       </label>
     </details>
-
-    <p id="notice" class="notice" hidden></p>
 
     <footer>
       <a id="settings" href="#"></a>

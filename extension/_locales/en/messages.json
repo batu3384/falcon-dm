@@ -40,6 +40,7 @@
   "errorWaking": { "message": "Could not start Falcon DM — install the app or open it manually" },
   "errorExtensionReload": { "message": "Extension reloaded — refresh this page" },
   "errorMediaUtils": { "message": "Falcon module failed to load — reload extension" },
+  "errorNoActiveTab": { "message": "No browser tab — click the page, then try again" },
   "errorAppOffline": { "message": "Falcon DM is not running — open the desktop app" },
   "errorTokenInvalid": { "message": "Connection lost — will re-pair automatically" },
   "errorExtensionBlocked": {
@@ -52,6 +53,9 @@
   "errorHttp": { "message": "Request failed" },
   "appClosedFallback": { "message": "Falcon DM offline — using browser download" },
   "interceptBlocked": { "message": "Falcon DM offline — download blocked" },
+  "interceptQueued": {
+    "message": "Browser download cancelled — queued in Falcon DM (file saves in Falcon, not Chrome Downloads)"
+  },
   "labelFilename": { "message": "File name" },
   "contextDownload": { "message": "Download with Falcon DM" },
   "contextGrabber": { "message": "Grab page links with Falcon" },
@@ -86,8 +90,10 @@
   "popupTimeNow": { "message": "just now" },
   "popupTimeMin": { "message": "{n}m ago" },
   "popupSettings": { "message": "Settings" },
-  "popupFailClosed": { "message": "Block when offline" },
-  "popupFailClosedHint": { "message": "Cancel browser download if Falcon DM cannot receive it." },
+  "popupFailClosed": { "message": "Allow browser fallback when offline" },
+  "popupFailClosedHint": {
+    "message": "Off (default): Falcon owns hijacked downloads — Chrome does not save the file. On: if Falcon is closed, retry in Chrome."
+  },
   "optionsFailClosed": { "message": "Block browser download when Falcon DM is offline" },
   "optionsFailClosedHint": {
     "message": "When enabled, intercepted downloads are cancelled instead of falling back to the browser."

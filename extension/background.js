@@ -21,6 +21,7 @@ chrome.runtime.onInstalled.addListener(() => {
   setupMenus();
   refreshBadge();
   chrome.alarms.create('falconClipboard', { periodInMinutes: 1 });
+  reinitContentScriptsAfterReload();
   ensurePaired(true).catch(() => {
     setState('offline');
     notify(
@@ -32,6 +33,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   refreshBadge();
+  reinitContentScriptsAfterReload();
   ensurePaired(false).catch(() => {});
   chrome.alarms.create('falconClipboard', { periodInMinutes: 1 });
 });
@@ -87,12 +89,16 @@ function headerValue(headers, name) {
   return h ? h.value : '';
 }
 
-function fallbackBrowserDownload(item) {
+async function fallbackBrowserDownload(item) {
+  const filename =
+    (await resolveHijackFilename(item)) ||
+    basenameFilename(item.url.split('/').pop().split('?')[0]) ||
+    'download';
   return new Promise((resolve, reject) => {
     chrome.downloads.download(
       {
         url: item.url,
-        filename: item.filename,
+        filename,
         conflictAction: 'uniquify',
       },
       (id) => {
@@ -102,6 +108,163 @@ function fallbackBrowserDownload(item) {
       },
     );
   });
+}
+
+function basenameFilename(raw) {
+  if (!raw) return '';
+  const s = String(raw).trim();
+  if (!s) return '';
+  const parts = s.split(/[/\\]/);
+  return parts[parts.length - 1] || s;
+}
+
+async function getPageTitle(pageUrl) {
+  if (!pageUrl) return '';
+  try {
+    const key = pageUrl.split('#')[0];
+    const tabs = await chrome.tabs.query({});
+    const tab = tabs.find((t) => t.url && t.url.split('#')[0] === key);
+    return (tab && tab.title) || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+async function resolveHijackFilename(item) {
+  const FM = self.FalconMedia;
+  const sourceUrl = item.url || '';
+  const pick = (raw) => {
+    const name = basenameFilename(raw);
+    if (!name) return '';
+    if (FM && FM.isJunkHijackFilename && FM.isJunkHijackFilename(name, sourceUrl)) return '';
+    return name;
+  };
+
+  let name = pick(item.filename);
+  if (name) return name;
+
+  if (item.id != null) {
+    try {
+      const rows = await chrome.downloads.search({ id: item.id });
+      const row = rows && rows[0];
+      name = pick(row && row.filename);
+      if (name) return name;
+    } catch (_) {}
+  }
+
+  try {
+    const seg = decodeURIComponent(new URL(sourceUrl).pathname.split('/').pop() || '');
+    if (seg.includes('.') && (!FM || !FM.isJunkHijackFilename || !FM.isJunkHijackFilename(seg, sourceUrl))) {
+      return seg;
+    }
+  } catch (_) {}
+
+  return '';
+}
+
+async function buildHijackEnqueue(item) {
+  const pageUrl = item.referrer || item.url;
+  const FM = self.FalconMedia;
+  const hijack = FM && FM.hijackPayloadForFalcon
+    ? FM.hijackPayloadForFalcon(item.url, pageUrl)
+    : { url: item.url, format: null };
+  const urlRewritten = hijack.url !== item.url;
+
+  let filename = takePendingChromeFilename(item) || (await resolveHijackFilename(item));
+
+  // Title rewrite only when URL becomes a YouTube watch page and Chrome had no real name.
+  if (
+    urlRewritten &&
+    (!filename || (FM && FM.isJunkHijackFilename && FM.isJunkHijackFilename(filename, item.url))) &&
+    FM &&
+    FM.defaultFilename
+  ) {
+    const pageTitle = await getPageTitle(pageUrl);
+    const ext =
+      FM.guessExtensionFromDownloadUrl ? FM.guessExtensionFromDownloadUrl(item.url) : 'mp4';
+    filename = FM.defaultFilename(pageTitle, { ext });
+  }
+
+  if (!filename) {
+    try {
+      filename = decodeURIComponent(new URL(item.url).pathname.split('/').pop() || '');
+    } catch (_) {
+      filename = basenameFilename(item.url.split('/').pop().split('?')[0]) || 'download';
+    }
+  }
+
+  return { pageUrl, filename, hijack, urlRewritten };
+}
+
+const hijackDedup = new Map();
+/** Sync capture from onDeterminingFilename — async runHijack must not lose Chrome's name. */
+const pendingChromeNames = new Map();
+
+function takePendingChromeFilename(item) {
+  if (item.id == null) return '';
+  const name = pendingChromeNames.get(item.id) || '';
+  if (name) pendingChromeNames.delete(item.id);
+  return name;
+}
+
+function stashPendingChromeFilename(item) {
+  if (item.id == null) return;
+  const name = basenameFilename(item.filename);
+  if (name) pendingChromeNames.set(item.id, name);
+}
+
+function hijackKey(item) {
+  return `${item.url}\0${item.referrer || ''}`;
+}
+
+async function runHijack(item) {
+  const key = hijackKey(item);
+  const now = Date.now();
+  const prev = hijackDedup.get(key);
+  if (prev && now - prev < 8000) return;
+  hijackDedup.set(key, now);
+
+  // Snapshot before sendToFalcon — postFalcon may flip connectionState offline on transient errors.
+  const falconReachable = await appHealthy();
+  const failClosed = await getInterceptFailClosed();
+
+  try {
+    const { pageUrl, filename, hijack } = await buildHijackEnqueue(item);
+    const cookieLookup = cookieLookupUrl(item.url, pageUrl);
+    const cookiesHeader = await getCookiesHeader(cookieLookup);
+
+    await sendToFalcon('/api/add', {
+      url: hijack.url,
+      filename,
+      referrer: item.referrer || '',
+      user_agent: navigator.userAgent,
+      cookies: cookiesHeader,
+      cookie_url: cookieLookup,
+      format: hijack.format || undefined,
+    });
+    cancelBrowserDownload(item.id);
+    eraseBrowserDownload(item.id);
+    notify(
+      'Falcon DM',
+      msg('interceptQueued', 'Browser download cancelled — queued in Falcon DM'),
+    );
+  } catch (e) {
+    console.error(e);
+    const allowFallback = !falconReachable && !failClosed;
+    if (allowFallback) {
+      try {
+        await fallbackBrowserDownload(item);
+      } catch (fallbackErr) {
+        console.error(fallbackErr);
+      }
+    }
+    notify(
+      'Falcon DM',
+      allowFallback
+        ? e.message || msg('appClosedFallback', 'Falcon DM offline — browser download kept')
+        : msg('interceptBlocked', 'Falcon DM offline — download blocked'),
+    );
+  }
 }
 
 async function notifyOverlayMedia(tabId) {
@@ -160,54 +323,33 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   if (interceptPaused) {
-    suggest({ cancel: false });
+    suggest();
     return;
   }
   // Fail-open fallback uses chrome.downloads.download — must not re-hijack our own item.
   if (item.byExtensionId === chrome.runtime.id) {
-    suggest({ cancel: false });
+    suggest();
     return;
   }
-  suggest({ cancel: true });
-  (async () => {
-    try {
-      const pageUrl = item.referrer || item.url;
-      const cookieLookup = cookieLookupUrl(item.url, pageUrl);
-      const cookiesHeader = await getCookiesHeader(cookieLookup);
-      const filename = item.filename || item.url.split('/').pop().split('?')[0] || 'download';
-      const hijack = self.FalconMedia?.hijackPayloadForFalcon
-        ? self.FalconMedia.hijackPayloadForFalcon(item.url, pageUrl)
-        : { url: item.url, format: null };
+  stashPendingChromeFilename(item);
+  // ponytail: suggest() completes filename phase; cancel only works after that (no cancel: key in API).
+  suggest();
+  cancelBrowserDownload(item.id);
+  runHijack(item).catch((err) => console.error(err));
+});
 
-      await sendToFalcon('/api/add', {
-        url: hijack.url,
-        filename,
-        referrer: item.referrer || '',
-        user_agent: navigator.userAgent,
-        cookies: cookiesHeader,
-        cookie_url: cookieLookup,
-        format: hijack.format || undefined,
-      });
-      notify('Falcon DM', msg('sentToApp', 'Download sent to Falcon DM'));
-    } catch (e) {
-      console.error(e);
-      const failClosed = await getInterceptFailClosed();
-      if (!failClosed) {
-        try {
-          await fallbackBrowserDownload(item);
-        } catch (fallbackErr) {
-          console.error(fallbackErr);
-        }
-      }
-      notify(
-        'Falcon DM',
-        failClosed
-          ? msg('interceptBlocked', 'Falcon DM offline — download blocked')
-          : e.message || msg('appClosedFallback', 'Falcon DM offline — browser download kept'),
-      );
-    }
-  })();
-  return true;
+// ponytail: some Chrome builds still create a download row after cancel — kill it while connected.
+chrome.downloads.onCreated.addListener((item) => {
+  if (interceptPaused) return;
+  if (item.byExtensionId === chrome.runtime.id) return;
+  (async () => {
+    if (connectionState !== 'connected' && !(await appHealthy())) return;
+    cancelBrowserDownload(item.id);
+    const key = hijackKey(item);
+    const prev = hijackDedup.get(key);
+    if (prev && Date.now() - prev < 8000) return;
+    await runHijack(item);
+  })().catch((err) => console.error(err));
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -397,9 +539,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'grab_tab_media') {
     (async () => {
       try {
-        const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        const fromPopup = !sender.tab;
+        const requested = Number(request.tabId);
+        const active = fromPopup && Number.isInteger(requested) && requested > 0
+          ? { id: requested }
+          : sender.tab || (await getActiveBrowserTab());
         if (!active || !active.id) {
-          sendResponse({ ok: false, error: msg('errorInvalidUrl', 'No active tab') });
+          sendResponse({
+            ok: false,
+            error: msg('errorNoActiveTab', 'No browser tab — click the page, then try again'),
+          });
           return;
         }
         const injected = await ensureContentScript(active.id);
@@ -407,9 +556,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           sendResponse({ ok: false, error: msg('errorMediaUtils', 'Cannot run on this page') });
           return;
         }
-        chrome.tabs.sendMessage(active.id, { action: 'open_download_modal' }, () => {
+        chrome.tabs.sendMessage(active.id, { action: 'open_download_modal' }, (resp) => {
           if (chrome.runtime.lastError) {
             sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+          } else if (resp && resp.ok === false) {
+            sendResponse({ ok: false, error: resp.error || msg('errorAppOffline', 'Failed') });
           } else {
             sendResponse({ ok: true });
           }
@@ -430,7 +581,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
     (async () => {
       try {
-        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        const tab = await getActiveBrowserTab();
         const pageUrl = (tab && tab.url) || rawUrl;
         const cookieLookup = cookieLookupUrl(rawUrl, pageUrl);
         const cookies = await getCookiesHeader(cookieLookup);

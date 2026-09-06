@@ -35,6 +35,7 @@ const blockedTextEl = $('blocked-text');
 let paused = false;
 let failClosed = false;
 let currentTabUrl = '';
+let currentTabId = 0;
 
 function isYoutubeUrl(url) {
   try {
@@ -124,7 +125,9 @@ function setState(state) {
 
   if (bannerActionEl) bannerActionEl.hidden = state !== 'offline';
   const connected = state === 'connected';
-  grabBtn.disabled = state === 'offline' || state === 'blocked';
+  // Overlay still opens offline — never mark the CTA disabled (HTML/ARIA both swallow or lie).
+  grabBtn.removeAttribute('aria-disabled');
+  grabBtn.classList.remove('is-blocked');
   if (reconnectBtn) reconnectBtn.hidden = connected;
   const grabHint = $('grab-hint');
   if (grabHint) {
@@ -176,11 +179,12 @@ function showNotice(text) {
   if (!notice) return;
   notice.hidden = false;
   notice.textContent = text;
+  notice.focus();
   clearTimeout(showNotice._t);
   showNotice._t = setTimeout(() => {
     notice.hidden = true;
     notice.textContent = '';
-  }, 4000);
+  }, 6000);
 }
 
 function applyStatus(resp) {
@@ -196,31 +200,48 @@ function applyStatus(resp) {
 
 function send(action, payload) {
   return new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), 12000);
     try {
       chrome.runtime.sendMessage({ action, ...payload }, (resp) => {
-        if (chrome.runtime.lastError) resolve(null);
-        else resolve(resp);
+        clearTimeout(timer);
+        finish(chrome.runtime.lastError ? null : resp);
       });
     } catch (_) {
-      resolve(null);
+      clearTimeout(timer);
+      finish(null);
     }
   });
 }
 
 async function refresh() {
+  if (statusEl) statusEl.textContent = '…';
   let resp = await send('check_status');
+  if (!resp) {
+    setState('offline');
+    showNotice(t('errorAppOffline', 'Falcon DM is not running — open the desktop app'));
+    return;
+  }
   applyStatus(resp);
-  if (resp && (resp.state === 'offline' || resp.state === 'pending')) {
-    await send('auto_pair');
-    resp = await send('check_status');
-    applyStatus(resp);
+  if (resp.state === 'offline' || resp.state === 'pending') {
+    send('auto_pair').then(async (pair) => {
+      if (pair && pair.ok === false && pair.error) showNotice(pair.error);
+      const next = await send('check_status');
+      if (next) applyStatus(next);
+    });
   }
 }
 
 async function initPage() {
   try {
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     currentTabUrl = tab && tab.url ? tab.url : '';
+    currentTabId = tab && tab.id ? tab.id : 0;
     pageUrlEl.textContent = currentTabUrl || '—';
     pageUrlEl.title = currentTabUrl || '';
     const okUrl = /^https?:/i.test(currentTabUrl);
@@ -235,17 +256,33 @@ async function initPage() {
 
 async function openMediaPicker() {
   grabBtn.disabled = true;
-  const resp = await send('grab_tab_media');
-  grabBtn.disabled = false;
-  if (resp && resp.ok) {
-    window.close();
-    return true;
+  try {
+    const resp = await send('grab_tab_media', { tabId: currentTabId || undefined });
+    if (resp && resp.ok) {
+      window.close();
+      return true;
+    }
+    showNotice((resp && resp.error) || t('errorAppOffline', 'Failed'));
+    return false;
+  } finally {
+    grabBtn.disabled = false;
   }
-  showNotice((resp && resp.error) || t('errorAppOffline', 'Failed'));
-  return false;
 }
 
 grabBtn.addEventListener('click', () => {
+  const state = statusEl?.dataset?.state || 'offline';
+  if (state === 'offline' || state === 'pending' || state === 'blocked') {
+    showNotice(
+      state === 'blocked'
+        ? t('popupBlockedHelp', 'Extension not approved. Open Settings in extension options.')
+        : state === 'pending'
+          ? t('popupPendingHelp', 'Falcon DM → Settings → approve the extension.')
+          : t('popupOfflineHelp', 'Falcon DM is offline or not paired. Open the app, then reconnect.'),
+    );
+    if (state === 'offline' || state === 'pending') {
+      send('auto_pair').then(() => refresh());
+    }
+  }
   openMediaPicker();
 });
 

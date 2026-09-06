@@ -176,10 +176,8 @@ fn spawn_local_api(app_handle: tauri::AppHandle) {
                     false
                 }
             }))
-            // ponytail: least-privilege — the API only accepts POSTs and the
-            // two headers the extension actually sends (JSON content type + our
-            // auth token). Any-method/Any-header widened the attack surface.
-            .allow_methods([Method::POST])
+            // Health is GET; browsers may OPTIONS-preflight localhost (private network).
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_headers([header::CONTENT_TYPE, HeaderName::from_static("x-falcon-token")])
             .allow_private_network(true);
 

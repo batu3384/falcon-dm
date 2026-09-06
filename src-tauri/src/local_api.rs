@@ -53,6 +53,7 @@ pub(crate) struct AddDownloadRequest {
     cookies: Option<String>,
     cookie_url: Option<String>,
     format: Option<String>,
+    title: Option<String>,
 }
 
 pub(crate) async fn handle_api_add(
@@ -74,7 +75,7 @@ pub(crate) async fn handle_api_add(
         user_agent: payload.user_agent,
         cookies: payload.cookies,
         cookie_url: payload.cookie_url,
-        title: None,
+        title: payload.title,
         format: payload.format,
         save_path: None,
     };

@@ -61,11 +61,25 @@ const INJECTED = new Set(); // tab ids that already have the on-demand content s
 async function getInterceptFailClosed() {
   try {
     const { falconInterceptFailClosed } = await chrome.storage.local.get({
-      falconInterceptFailClosed: false,
+      falconInterceptFailClosed: true,
     });
     interceptFailClosed = !!falconInterceptFailClosed;
   } catch (_) {}
   return interceptFailClosed;
+}
+
+function eraseBrowserDownload(id) {
+  if (id == null) return;
+  try {
+    chrome.downloads.erase({ id }, () => void chrome.runtime.lastError);
+  } catch (_) {}
+}
+
+function cancelBrowserDownload(id) {
+  if (id == null) return;
+  try {
+    chrome.downloads.cancel(id, () => void chrome.runtime.lastError);
+  } catch (_) {}
 }
 
 async function setInterceptFailClosed(next) {
@@ -111,6 +125,51 @@ function trackDownload(filename, url, kind) {
   if (RECENT.length > 8) RECENT.length = 8;
 }
 
+/** Popup window is last-focused while open — never query lastFocusedWindow for page tabs. */
+async function getActiveBrowserTab() {
+  try {
+    const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
+    if (win && win.id != null) {
+      const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
+      if (tab) return tab;
+    }
+  } catch (_) {}
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, windowType: 'normal' });
+    if (tab) return tab;
+  } catch (_) {}
+  return null;
+}
+
+/** Inject the on-demand content script once per tab. Idempotent. */
+async function resetContentScriptGuard(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        delete window.__falconDmReady;
+        document.querySelectorAll('[data-falcon-fab]').forEach((node) => node.remove());
+      },
+    });
+  } catch (_) {}
+}
+
+async function reinitContentScriptsAfterReload() {
+  INJECTED.clear();
+  try {
+    const tabs = await chrome.tabs.query({
+      url: [
+        '*://*.youtube.com/*',
+        '*://youtu.be/*',
+        '*://*.youtube-nocookie.com/*',
+      ],
+    });
+    for (const tab of tabs) {
+      if (tab.id) ensureContentScript(tab.id).catch(() => {});
+    }
+  } catch (_) {}
+}
+
 /** Inject the on-demand content script once per tab. Idempotent. */
 async function ensureContentScript(tabId) {
   if (!tabId || tabId < 0) return false;
@@ -124,6 +183,7 @@ async function ensureContentScript(tabId) {
   }
   INJECTED.add(tabId);
   try {
+    await resetContentScriptGuard(tabId);
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ['media-utils.js', 'content.js'],

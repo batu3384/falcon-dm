@@ -468,6 +468,22 @@ pub fn guess_extension_from_url(url: &str) -> Option<String> {
 }
 
 /// Resolve final filename: explicit > URL > title+ext > generic.
+pub fn is_generic_download_filename(name: &str) -> bool {
+    let base = name
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if base.is_empty() {
+        return true;
+    }
+    matches!(
+        base.as_str(),
+        "download" | "download.bin" | "index.html" | "videoplayback" | "watch" | "watch.html"
+    ) || base.starts_with("videoplayback.")
+}
+
 pub fn resolve_download_filename(
     url: &str,
     explicit: Option<&str>,
@@ -475,7 +491,9 @@ pub fn resolve_download_filename(
     force_hls_mp4: bool,
 ) -> String {
     if let Some(f) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
-        return sanitize_filename(f);
+        if !is_generic_download_filename(f) {
+            return sanitize_filename(f);
+        }
     }
     if let Some(inferred) = infer_filename_from_url(url) {
         return sanitize_filename(&inferred);
@@ -692,6 +710,20 @@ mod tests {
         assert!(!n.contains("range="));
         assert!(!n.contains("sq="));
         assert!(n.contains("itag=18"));
+    }
+
+    #[test]
+    fn generic_download_filename_is_ignored_for_resolve() {
+        assert!(is_generic_download_filename("videoplayback"));
+        assert!(is_generic_download_filename("download.bin"));
+        let name = resolve_download_filename(
+            "https://www.youtube.com/watch?v=abc",
+            Some("videoplayback"),
+            Some("My Video Title"),
+            false,
+        );
+        assert!(name.contains("My_Video_Title") || name.contains("My Video Title"));
+        assert!(!name.starts_with("videoplayback"));
     }
 
     #[test]

@@ -1,10 +1,17 @@
 (function () {
   const CS_KEY = '__falconDmContentScript';
+  const CS_READY = '__falconDmReady';
   const extId = chrome?.runtime?.id;
-  if (extId && window[CS_KEY] === extId) return;
-  if (extId) window[CS_KEY] = extId;
+  if (!extId) return;
+  // ponytail: extId alone is not enough — after MV3 reload executeScript must re-bind listeners.
+  if (window[CS_KEY] === extId && window[CS_READY] === extId) return;
+  window[CS_KEY] = extId;
+  document.querySelectorAll('[data-falcon-fab]').forEach((node) => node.remove());
 
-  const FM = window.FalconMedia;
+  function mediaApi() {
+    return window.FalconMedia;
+  }
+  let FM = mediaApi();
   const TOKENS = {
     primary: '#2563EB',
     accent: '#D97706',
@@ -68,6 +75,30 @@
     return node;
   }
 
+  function showFabError(text) {
+    const toast = el('div', {
+      position: 'fixed',
+      bottom: '24px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: '2147483647',
+      maxWidth: 'min(92vw, 420px)',
+      padding: '12px 16px',
+      borderRadius: '12px',
+      background: 'rgba(30,36,48,.96)',
+      color: '#fecaca',
+      border: '1px solid rgba(239,68,68,.4)',
+      fontSize: '13px',
+      lineHeight: '1.45',
+      boxShadow: '0 12px 32px rgba(0,0,0,.35)',
+      pointerEvents: 'none',
+    });
+    toast.textContent = text;
+    toast.setAttribute('role', 'alert');
+    document.documentElement.appendChild(toast);
+    setTimeout(() => toast.remove(), 5000);
+  }
+
   function sendBg(payload) {
     return new Promise((resolve, reject) => {
       if (!chrome?.runtime?.id) {
@@ -76,8 +107,14 @@
       }
       chrome.runtime.sendMessage(payload, (response) => {
         const err = chrome.runtime.lastError;
-        if (err) reject(new Error(err.message));
-        else resolve(response);
+        if (err) {
+          const m = err.message || '';
+          if (/invalidated|context/i.test(m)) {
+            reject(new Error(msg('errorExtensionReload', 'Eklenti yenilendi — sayfayı yenileyin')));
+            return;
+          }
+          reject(new Error(m));
+        } else resolve(response);
       });
     });
   }
@@ -299,8 +336,10 @@
   }
 
   function createModal(pageTitle, pageUrl, cookies, ua, sources) {
+    FM = mediaApi() || FM;
     if (!FM) {
-      return;
+      showFabError(msg('errorMediaUtils', 'Falcon module failed to load — reload extension'));
+      throw new Error(msg('errorMediaUtils', 'Falcon module failed to load — reload extension'));
     }
 
     let selected = FM.pickBest(sources) || sources[0] || null;
@@ -378,12 +417,14 @@
         cards.innerHTML = '';
         sources.forEach((item) => {
           const card = el('label');
-          card.className = 'fm-card' + (selected && selected.url === item.url ? ' active' : '');
+          // YouTube fallback cards share the watch URL — identity, not url, is the selection key.
+          const on = selected === item;
+          card.className = 'fm-card' + (on ? ' active' : '');
 
           const radio = el('input');
           radio.type = 'radio';
           radio.name = 'falcon-quality';
-          radio.checked = !!(selected && selected.url === item.url);
+          radio.checked = on;
 
           const body = el('div');
           body.className = 'fm-card-body';
@@ -454,23 +495,11 @@
       goBtn.disabled = true;
       goBtn.textContent = msg('sending', 'Sending...');
 
-      const isYtPage = (() => {
-        try {
-          return FM.isYoutubeHost(new URL(pageUrl).hostname);
-        } catch {
-          return false;
-        }
-      })();
-      let downloadUrl = selected.url;
-      let format = null;
-      if (isYtPage) {
-        downloadUrl = pageUrl.split('#')[0];
-        const h = Number(selected.height) || Number(selected.label) || 720;
-        const height = Math.min(Math.max(h, 144), 2160);
-        format = `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/bv*+ba/b`;
-      } else if (FM.isDirectGooglevideoUrl(selected.url || '')) {
-        downloadUrl = FM.normalizeMediaUrl(selected.url);
-      }
+      const payload =
+        typeof FM.overlayEnqueuePayload === 'function'
+          ? FM.overlayEnqueuePayload(pageUrl, selected)
+          : { url: selected.url, format: null };
+      const { url: downloadUrl, format } = payload;
 
       try {
         const action = selected.isBlob || FM.isBlobUrl(selected.url) ? 'download_blob' : 'download_video';
@@ -509,29 +538,12 @@
   }
 
   async function openDownloadModal() {
-    if (!FM) return;
-
-    let resp;
-    try {
-      resp = await sendBg({ action: 'get_real_media_url', page_url: location.href });
-    } catch (e) {
-      const sheet = openSheet(msg('errorAppOffline', 'Connection failed'));
-      const err = el('div');
-      err.className = 'fm-error';
-      err.textContent = e.message;
-      const closeBtn = el('button');
-      closeBtn.className = 'fm-btn fm-btn-primary';
-      closeBtn.textContent = msg('cancel', 'Close');
-      closeBtn.onclick = sheet.close;
-      sheet.panel.appendChild(err);
-      sheet.panel.appendChild(closeBtn);
-      closeBtn.focus();
-      return;
+    FM = mediaApi() || FM;
+    if (!FM) {
+      const err = msg('errorMediaUtils', 'Falcon module failed to load — reload extension');
+      showFabError(err);
+      throw new Error(err);
     }
-
-    let sources = FM.groupSources([...((resp && resp.urls) || [])], (resp && resp.metaMap) || {});
-    const blobSources = FM.collectPageBlobSources ? FM.collectPageBlobSources() : [];
-    if (blobSources.length) sources = [...blobSources, ...sources];
 
     let isYtWatch = false;
     try {
@@ -543,14 +555,45 @@
           u.pathname.startsWith('/shorts/'));
     } catch (_) {}
 
+    // YouTube watch: overlay from yt-dlp cards immediately — sniff wait was thrown away anyway.
     if (isYtWatch) {
+      createModal(
+        document.title,
+        location.href,
+        '',
+        navigator.userAgent,
+        FM.youtubeFallbackSources(location.href),
+      );
+      return;
+    }
+
+    const loading = openSheet(msg('downloadVideo', 'Download with Falcon DM'));
+    const status = el('div');
+    status.className = 'fm-info';
+    status.textContent = msg('sending', 'Loading...');
+    loading.panel.appendChild(status);
+
+    let resp;
+    try {
+      resp = await sendBg({ action: 'get_real_media_url', page_url: location.href });
+    } catch (e) {
+      status.className = 'fm-error';
+      status.textContent = e.message;
+      const closeBtn = el('button');
+      closeBtn.className = 'fm-btn fm-btn-primary';
+      closeBtn.textContent = msg('cancel', 'Close');
+      closeBtn.onclick = loading.close;
+      loading.panel.appendChild(closeBtn);
+      closeBtn.focus();
+      return;
+    }
+
+    let sources = FM.groupSources([...((resp && resp.urls) || [])], (resp && resp.metaMap) || {});
+    const blobSources = FM.collectPageBlobSources ? FM.collectPageBlobSources() : [];
+    if (blobSources.length) sources = [...blobSources, ...sources];
+
+    if (!sources.length && /youtube\.com|youtu\.be/i.test(location.href)) {
       sources = FM.youtubeFallbackSources(location.href);
-    } else if (!sources.length && /youtube\.com|youtu\.be/i.test(location.href)) {
-      await new Promise((r) => setTimeout(r, 1500));
-      try {
-        resp = await sendBg({ action: 'get_real_media_url', page_url: location.href });
-        sources = FM.groupSources([...((resp && resp.urls) || [])], (resp && resp.metaMap) || {});
-      } catch (_) {}
     }
 
     const muxed = sources.filter((s) => s.muxed && !s.isAudio);
@@ -565,6 +608,7 @@
       sources = FM.youtubeFallbackSources(location.href);
     }
 
+    loading.close();
     createModal(
       (resp && resp.title) || document.title,
       location.href,
@@ -607,9 +651,6 @@
         ol: fabManualPos.left,
         moved: false,
       };
-      wrap.classList.add('fm-dragging');
-      wrap.setPointerCapture(e.pointerId);
-      e.preventDefault();
     });
 
     wrap.addEventListener('pointermove', (e) => {
@@ -617,7 +658,13 @@
       const dx = e.clientX - drag.sx;
       const dy = e.clientY - drag.sy;
       if (!drag.moved && Math.hypot(dx, dy) < 5) return;
-      drag.moved = true;
+      if (!drag.moved) {
+        drag.moved = true;
+        wrap.classList.add('fm-dragging');
+        try {
+          wrap.setPointerCapture(e.pointerId);
+        } catch (_) {}
+      }
       fabManualPos = clampFabPos(drag.ot + dy, drag.ol + dx);
       applyFabPos(fabManualPos);
     });
@@ -645,7 +692,10 @@
       }
       e.preventDefault();
       e.stopPropagation();
-      openDownloadModal().catch((err) => console.error('[Falcon DM]', err));
+      openDownloadModal().catch((err) => {
+        console.error('[Falcon DM]', err);
+        showFabError(err?.message || msg('errorAppOffline', 'Connection failed'));
+      });
     });
   }
 
@@ -655,6 +705,7 @@
       zIndex: '2147483646',
       pointerEvents: 'none',
     });
+    host.setAttribute('data-falcon-fab', '1');
     const shadow = host.attachShadow({ mode: 'open' });
     injectStyles(shadow);
     const wrap = el('div');
@@ -685,6 +736,7 @@
   }
 
   function pickEligibleVideo() {
+    FM = mediaApi() || FM;
     let best = null;
     let bestArea = 0;
     const pageUrl = location.href;
@@ -958,10 +1010,16 @@
       return true;
     }
     if (req.action === 'open_download_modal') {
-      openDownloadModal().catch(() => {});
-      sendResponse({ ok: true });
+      openDownloadModal()
+        .then(() => sendResponse({ ok: true }))
+        .catch((e) => {
+          showFabError(e?.message || msg('errorAppOffline', 'Failed'));
+          sendResponse({ ok: false, error: e?.message || 'Failed' });
+        });
       return true;
     }
     return false;
   });
+
+  window.__falconDmReady = extId;
 })();

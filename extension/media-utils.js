@@ -230,9 +230,30 @@
     return { url: raw, format: null };
   }
 
+  function overlayEnqueuePayload(pageUrl, selected) {
+    const page = String(pageUrl || '').split('#')[0];
+    const src = String((selected && selected.url) || '').trim();
+    if (selected && (selected.isBlob || isBlobUrl(src))) {
+      return { url: src, format: null };
+    }
+    if (isYoutubeWatchPage(page)) {
+      const h = Number(selected && selected.height) || Number(selected && selected.label) || 720;
+      const height = Math.min(Math.max(h, 144), 2160);
+      return {
+        url: page,
+        format: `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/bv*+ba/b`,
+      };
+    }
+    if (isDirectGooglevideoUrl(src)) {
+      return { url: normalizeMediaUrl(src), format: null };
+    }
+    return { url: src, format: null };
+  }
+
   function isMainYoutubePlayerVideo(video) {
     if (video.closest('ytd-ad-slot-renderer, .ytp-ad-module, .video-ads')) return false;
-    return !!video.closest('#movie_player, .html5-video-player, ytd-player');
+    if (video.classList.contains('html5-main-video')) return true;
+    return !!video.closest('#movie_player, .html5-video-player, ytd-player, #ytd-player');
   }
 
   function videoElementSrc(el) {
@@ -424,11 +445,15 @@
 
   function pickBest(items, preferVideo) {
     if (!items.length) return null;
-    // Prefer muxed progressive video
     const muxed = items.filter((i) => i.muxed && !i.isAudio);
-    if (muxed.length) return muxed[0];
-    const pool = preferVideo !== false ? items.filter((i) => !i.isAudio) : items;
-    return (pool.length ? pool : items)[0];
+    const pool =
+      muxed.length > 0
+        ? muxed
+        : preferVideo !== false
+          ? items.filter((i) => !i.isAudio)
+          : items;
+    const list = pool.length ? pool : items;
+    return list.reduce((best, item) => (item.score > best.score ? item : best));
   }
 
   function defaultFilename(pageTitle, item) {
@@ -441,6 +466,43 @@
     const ext = item ? item.ext : 'bin';
     if (/\.[a-z0-9]{2,5}$/i.test(base)) return base;
     return `${base}.${ext}`;
+  }
+
+  /** CDN/stream placeholders only — never reject a real server filename. */
+  function isJunkHijackFilename(name, url) {
+    const base = String(name || '')
+      .trim()
+      .split(/[/\\]/)
+      .pop()
+      .toLowerCase();
+    if (!base) return true;
+    if (base === 'videoplayback' || base.startsWith('videoplayback.')) return true;
+    if (base === 'watch' || base === 'watch.html') return true;
+    if (base === 'download' || base === 'download.bin') return true;
+    if (base === 'index.html') return true;
+    return false;
+  }
+
+  function guessExtensionFromDownloadUrl(url) {
+    const lower = String(url || '').toLowerCase();
+    if (/\.mpd(\?|#|$)/.test(lower)) return 'mp4';
+    if (/\.m3u8(\?|#|$)/.test(lower)) return 'mp4';
+    const mime = lower.match(/mime=([a-z0-9%/._-]+)/);
+    if (mime) {
+      const m = decodeURIComponent(mime[1]);
+      if (m.includes('video/mp4') || m.includes('audio/mp4')) return 'mp4';
+      if (m.includes('video/webm')) return 'webm';
+      if (m.includes('audio/mpeg')) return 'mp3';
+      if (m.includes('audio/mp4') || m.includes('audio/m4a')) return 'm4a';
+      if (m.includes('application/pdf')) return 'pdf';
+      if (m.includes('application/zip')) return 'zip';
+    }
+    for (const ext of [
+      'mp4', 'webm', 'mkv', 'm4a', 'mp3', 'flac', 'zip', 'rar', '7z', 'pdf', 'exe', 'dmg', 'pkg',
+    ]) {
+      if (lower.includes(`.${ext}`)) return ext;
+    }
+    return 'bin';
   }
 
   /** yt-dlp tiers when CDN capture is empty (modern YouTube uses SABR/cipher). */
@@ -468,7 +530,7 @@
       subtitle: hint,
       quality: `${height}p`,
       format: 'MP4',
-      muxed: false,
+      muxed: true,
       isAudio: false,
       isHls: false,
       height,
@@ -516,6 +578,8 @@
     groupSources,
     pickBest,
     defaultFilename,
+    isJunkHijackFilename,
+    guessExtensionFromDownloadUrl,
     formatBytes,
     normalizeMediaUrl,
     isJunkUrl,
@@ -531,6 +595,7 @@
     isYoutubeWatchPage,
     isMainYoutubePlayerVideo,
     hijackPayloadForFalcon,
+    overlayEnqueuePayload,
     videoElementSrc,
     MIN_FAB_PX,
     isYoutubeHost,

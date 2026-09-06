@@ -3,6 +3,7 @@
  * Usage: node extension/smoke-test.mjs
  */
 import { readFileSync } from 'fs';
+import { spawnSync } from 'child_process';
 import vm from 'vm';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -43,13 +44,23 @@ const hijack = FM.hijackPayloadForFalcon(
 );
 assert(hijack.url.includes('watch?v='), 'hijack maps googlevideo to watch page');
 assert(hijack.format === null, 'hijack defers yt-dlp format to backend');
+const fallback = FM.youtubeFallbackSources('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+assert(fallback.length >= 4, 'watch page yt-dlp quality cards');
+assert(fallback.every((s) => s.muxed && s.url.includes('watch?v=')), 'fallback is muxed watch URL');
+assert(FM.youtubeFallbackSources('https://www.youtube.com/').length === 0, 'home has no fallback cards');
+assert(FM.isYoutubeWatchPage('https://www.youtube.com/watch?v=abc'), 'watch page detect');
+assert(!FM.isYoutubeWatchPage('https://www.youtube.com/'), 'home is not watch');
 assert(background.includes('byExtensionId'), 'skip re-hijack on fail-open fallback');
 assert(background.includes('hijackPayloadForFalcon'), 'hijack payload normalization');
 assert(!FM.isJunkUrl('https://cdn.example.com/video.mp4'), 'real mp4');
 const norm = FM.normalizeMediaUrl(
   'https://googlevideo.com/videoplayback?id=abc&range=0-100&other=1',
 );
-assert(FM.isDirectGooglevideoUrl('https://rr1---sn.googlevideo.com/videoplayback?itag=18&id=1'), 'direct cdn');
+assert(FM.isJunkHijackFilename('videoplayback', 'https://googlevideo.com/videoplayback?id=1'), 'cdn placeholder junk');
+assert(!FM.isJunkHijackFilename('report.pdf', 'https://x.com/report.pdf'), 'real filename kept');
+assert(!FM.isJunkHijackFilename('My Setup (2024).exe', 'https://x.com/a'), 'parens kept not junk');
+assert(background.includes('stashPendingChromeFilename'), 'sync chrome filename before async hijack');
+assert(background.includes('pendingChromeNames'), 'preserve determining filename');
 assert(!FM.isDirectGooglevideoUrl('https://rr1---sn.googlevideo.com/videoplayback?sabr=1&itag=18&id=1'), 'reject sabr cdn');
 assert(!FM.isGooglevideoUrl('https://cdn.example.com/videoplayback?id=1'), 'reject videoplayback spoof');
 assert(FM.isYoutubeHost('www.youtube.com'), 'youtube host');
@@ -64,12 +75,38 @@ assert(
   background.includes('withTimeout') || shared.includes('withTimeout'),
   'bounded request timeout',
 );
-assert(background.includes('suggest({ cancel: false })'), 'download fallback');
+assert(background.includes('suggest();'), 'download passthrough uses bare suggest()');
 assert(background.includes('fallbackBrowserDownload'), 'fail-open browser re-download');
-assert(
-  background.indexOf('suggest({ cancel: true })') < background.indexOf("sendToFalcon('/api/add'"),
-  'hijack cancels browser before falcon post',
+const hijackListen = background.slice(
+  background.indexOf('chrome.downloads.onDeterminingFilename.addListener'),
+  background.indexOf('chrome.downloads.onCreated.addListener'),
 );
+assert(
+  hijackListen.indexOf('stashPendingChromeFilename(item);') <
+    hijackListen.indexOf('cancelBrowserDownload(item.id);') &&
+    hijackListen.indexOf('cancelBrowserDownload(item.id);') <
+      hijackListen.indexOf('runHijack(item).catch'),
+  'hijack stash then cancel before falcon post',
+);
+assert(
+  /stashPendingChromeFilename\(item\);[\s\S]*?suggest\(\);[\s\S]*?cancelBrowserDownload\(item\.id\);/.test(
+    hijackListen,
+  ),
+  'hijack uses suggest() then cancelBrowserDownload',
+);
+const hijackBlock = background.slice(
+  background.indexOf('chrome.downloads.onDeterminingFilename.addListener'),
+  background.indexOf('chrome.contextMenus.onClicked.addListener'),
+);
+assert(
+  !/suggest\(\{\s*cancel:/.test(hijackBlock),
+  'hijack must not use invalid suggest({ cancel }) API',
+);
+assert(
+  shared.includes("windowTypes: ['normal']") || shared.includes('windowType: \'normal\''),
+  'active tab lookup ignores extension popup window',
+);
+assert(background.includes('request.tabId'), 'grab_tab_media uses popup-provided tabId');
 assert(background.includes('shouldSniffInject'), 'strict overlay sniff gate');
 assert(background.includes('media_updated'), 'overlay refresh on sniff');
 assert(background.includes('Promise.allSettled'), 'batch partial results');
@@ -84,7 +121,12 @@ assert(
   'download uses watch-page cookies for googlevideo',
 );
 assert(background.includes('/api/intercept'), 'media intercept endpoint');
-assert(background.includes('suggest({ cancel: true })'), 'download intercept cancels browser save');
+assert(
+  /stashPendingChromeFilename\(item\);[\s\S]*?suggest\(\);[\s\S]*?cancelBrowserDownload\(item\.id\);/.test(
+    background,
+  ),
+  'download intercept suggest then cancel',
+);
 assert(background.includes('cookie_url: cookieLookup'), 'download intercept cookie origin');
 const optionsHtml = readFileSync(path.join(__dirname, 'options.html'), 'utf8');
 assert(optionsHtml.includes('aria-live="polite"'), 'options status live region');
@@ -98,14 +140,30 @@ assert(
   'module split',
 );
 const popup = readFileSync(path.join(__dirname, 'popup.js'), 'utf8');
-assert(content.includes('pageUrl.split'), 'YouTube watch URL for yt-dlp');
+assert(popup.includes('currentWindow: true'), 'popup queries opener window not lastFocused');
+assert(popup.includes('tabId:'), 'popup sends tabId with grab_tab_media');
+assert(!/grabBtn\.disabled = state === 'offline'/.test(popup), 'offline must not disable primary CTA clicks');
+assert(!/setAttribute\(['"]aria-disabled['"],\s*connected \? ['"]false['"] : ['"]true['"]\)/.test(popup), 'CTA must not lie aria-disabled when clickable');
+assert(popup.includes('12000'), 'popup sendMessage is bounded');
+const grabClick = popup.slice(
+  popup.indexOf('grabBtn.addEventListener'),
+  popup.indexOf('dlUrlBtn.addEventListener'),
+);
+assert(grabClick.includes('openMediaPicker()'), 'primary CTA opens overlay');
+assert(!/return;\n\s*}\n\s*openMediaPicker/.test(grabClick), 'overlay not skipped when disconnected');
+assert(!grabClick.includes("if (state !== 'connected')") || grabClick.includes('openMediaPicker()'), 'disconnected still opens overlay');
+assert(content.includes('selected === item'), 'quality selection uses object identity');
 assert(!content.includes('hasCdn'), 'YouTube skips raw CDN download URL');
-assert(content.includes('normalizeMediaUrl(selected.url)'), 'CDN URL normalized');
 assert(/setAttribute\(['"]role['"],\s*['"]dialog['"]\)/.test(content), 'overlay dialog role');
 assert(content.includes('aria-modal'), 'overlay aria-modal');
 assert(content.includes('Escape'), 'overlay escape close');
 assert(content.includes('fm-fab'), 'isolated video chip');
-assert(background.includes('getInterceptFailClosed'), 'fail-closed preference lookup');
+assert(background.includes('runHijack'), 'hijack logic centralized');
+assert(background.includes('falconReachable'), 'fallback uses health snapshot not stale badge');
+assert(background.includes('downloads.onCreated'), 'backup cancel stray Chrome downloads');
+assert(shared.includes('cancelBrowserDownload'), 'can abort in-flight browser download');
+assert(background.includes('eraseBrowserDownload'), 'hijack clears ghost Chrome download row');
+assert(background.includes('interceptQueued'), 'hijack success explains Chrome cancel');
 assert(background.includes('set_fail_closed'), 'fail-closed toggle handler');
 assert(background.includes('GRAB_BATCH_LIMIT'), 'grabber batch limit constant');
 assert(
@@ -115,8 +173,9 @@ assert(
 assert(popup.includes('refresh();'), 'pause refreshes connection state');
 const popupHtml = readFileSync(path.join(__dirname, 'popup.html'), 'utf8');
 assert(popupHtml.includes('aria-live="polite"'), 'popup status live region');
-assert(content.includes('Math.min(Math.max(h, 144), 2160)'), 'bounded YouTube height');
-assert(content.includes('isDirectGooglevideoUrl'), 'YouTube CDN direct guard');
+assert(popupHtml.includes('role="alert"'), 'popup error is announced');
+assert(src.includes('Math.min(Math.max(h, 144), 2160)'), 'bounded YouTube height');
+assert(src.includes('isDirectGooglevideoUrl'), 'YouTube CDN direct guard');
 assert(content.includes('videoOnlyHint'), 'video-only audio warning');
 assert(content.includes('grabberSelectAll'), 'grabber select-all');
 assert(content.includes('fm-warn'), 'overlay warning style');
@@ -144,14 +203,41 @@ assert(content.includes('dismissFabForPage'), 'page-scoped fab dismiss');
 assert(content.includes('fm-fab-dismiss'), 'fab dismiss control');
 assert(content.includes('syncVideoFab'), 'single video fab sync');
 assert(content.includes('bindFabDrag'), 'fab drag reposition');
+{
+  const bind = content.slice(
+    content.indexOf('function bindFabDrag'),
+    content.indexOf('function createDownloadButton'),
+  );
+  const down = bind.slice(bind.indexOf('pointerdown'), bind.indexOf('pointermove'));
+  assert(!down.includes('preventDefault'), 'FAB pointerdown must not swallow click');
+  assert(!down.includes('setPointerCapture'), 'FAB capture only after drag, not on click');
+  assert(bind.includes('openDownloadModal'), 'FAB click opens overlay');
+}
+{
+  const open = content.slice(
+    content.indexOf('async function openDownloadModal'),
+    content.indexOf('function clampFabPos'),
+  );
+  assert(
+    open.indexOf('youtubeFallbackSources') < open.indexOf('get_real_media_url'),
+    'YouTube overlay opens before media sniff wait',
+  );
+}
 assert(content.includes('fabManualPos'), 'fab manual position state');
 assert(content.includes('syncFabPageContext'), 'fab manual pos reset on navigation');
-assert(content.includes('pickEligibleVideo'), 'eligible video only');
+assert(content.includes('__falconDmReady'), 'content script reload guard');
+assert(shared.includes('resetContentScriptGuard'), 'clear stale content guard before inject');
+assert(shared.includes('reinitContentScriptsAfterReload'), 'rebind content scripts after extension reload');
+assert(background.includes('reinitContentScriptsAfterReload'), 'reload youtube tabs on install');
 assert(content.includes('isEligibleVideoElement'), 'fab eligibility guard');
 assert(content.includes('media_updated'), 'fab resync on sniff');
 assert(content.includes('pickLargestVideo') === false, 'removed naive largest-video fab');
 assert(content.includes("'ping'"), 'content script ping');
 assert(popupHtml.includes('id="notice"'), 'popup error notice');
+assert(popupHtml.includes('id="dl-url"') && /id="dl-url"[^>]*disabled/.test(popupHtml), 'dl-url starts disabled until tab url ready');
 assert(optionsHtml.includes('options-head'), 'options header');
+
+const flow = spawnSync(process.execPath, [path.join(__dirname, 'flow-test.mjs')], { encoding: 'utf8' });
+assert(flow.status === 0, (flow.stderr || flow.stdout || 'flow-test failed').trim());
 
 console.log('extension smoke ok');

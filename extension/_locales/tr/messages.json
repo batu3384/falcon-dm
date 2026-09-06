@@ -40,6 +40,7 @@
   "errorWaking": { "message": "Falcon DM başlatılamadı — uygulamayı kurun veya manuel açın" },
   "errorExtensionReload": { "message": "Eklenti yenilendi — sayfayı yenileyin" },
   "errorMediaUtils": { "message": "Falcon modülü yüklenemedi — eklentiyi yenileyin" },
+  "errorNoActiveTab": { "message": "Aktif sekme yok — sayfaya tıklayıp tekrar dene" },
   "errorAppOffline": { "message": "Falcon DM çalışmıyor — masaüstü uygulamasını açın" },
   "errorTokenInvalid": { "message": "Bağlantı koptu — otomatik yeniden bağlanılacak" },
   "errorExtensionBlocked": {
@@ -52,6 +53,9 @@
   "errorHttp": { "message": "İstek başarısız" },
   "appClosedFallback": { "message": "Falcon DM çevrimdışı — tarayıcı indirmesi kullanıldı" },
   "interceptBlocked": { "message": "Falcon DM çevrimdışı — indirme engellendi" },
+  "interceptQueued": {
+    "message": "Chrome indirmesi iptal — Falcon kuyruğuna alındı (dosya Falcon'da, Chrome İndirilenler'de değil)"
+  },
   "labelFilename": { "message": "Dosya adı" },
   "contextDownload": { "message": "Falcon DM ile indir" },
   "contextGrabber": { "message": "Sayfa linklerini Falcon ile yakala" },
@@ -86,8 +90,10 @@
   "popupTimeNow": { "message": "az önce" },
   "popupTimeMin": { "message": "{n} dk önce" },
   "popupSettings": { "message": "Ayarlar" },
-  "popupFailClosed": { "message": "Çevrimdışıyken engelle" },
-  "popupFailClosedHint": { "message": "Falcon DM alamazsa tarayıcı indirmesini iptal et." },
+  "popupFailClosed": { "message": "Çevrimdışıyken tarayıcıya düş" },
+  "popupFailClosedHint": {
+    "message": "Kapalı (varsayılan): indirme yalnız Falcon'da — Chrome dosyayı kaydetmez. Açık: Falcon kapalıysa Chrome'da dene."
+  },
   "optionsFailClosed": { "message": "Falcon DM çevrimdışıyken tarayıcı indirmesini engelle" },
   "optionsFailClosedHint": {
     "message": "Açıkken yakalanan indirmeler tarayıcıya düşmez, iptal edilir."
