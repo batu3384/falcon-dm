@@ -3,7 +3,7 @@ use crate::log_buffer;
 use crate::settings::Settings;
 use crate::storage::models::{Download, DownloadFilter, DownloadStatus};
 use crate::util::{
-    app_data_dir, copy_file_exclusive, full_file_path, lock_or_recover, resolve_download_target,
+    app_data_dir, copy_file_exclusive, lock_or_recover, resolve_download_target,
     sanitize_filename, validate_open_path, LEGACY_DEFAULT_API_TOKEN,
 };
 use crate::{
@@ -109,15 +109,12 @@ pub async fn remove_download(
     if !state.queue.cancel_and_wait_stream(id).await {
         return Err("Download is still stopping; try removing it again shortly".into());
     }
-    // ponytail: optionally delete the downloaded file from disk (default: keep,
-    // preserving the user's data). Best-effort — a missing/unwritable file must
-    // not block DB row removal.
     if delete_file.unwrap_or(false) {
-        let file_path = full_file_path(&dl.save_path, &dl.filename);
+        let file_path = resolve_download_target(&dl.save_path, &dl.filename)?;
         if file_path.exists() {
-            if let Err(e) = std::fs::remove_file(&file_path) {
-                log::warn!("remove_download: could not delete {}: {}", file_path.display(), e);
-            }
+            std::fs::remove_file(&file_path).map_err(|e| {
+                format!("Could not delete file from disk: {e}")
+            })?;
         }
     }
     if let Some(id) = dl.id {

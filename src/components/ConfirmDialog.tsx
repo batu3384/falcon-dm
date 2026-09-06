@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useModalA11y } from '../hooks/useModalA11y';
@@ -8,7 +8,8 @@ interface ConfirmDialogProps {
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
-  onConfirm: () => void;
+  deleteFileOption?: boolean;
+  onConfirm: (deleteFromDisk?: boolean) => void;
   onCancel: () => void;
 }
 
@@ -17,11 +18,13 @@ export function ConfirmDialog({
   confirmLabel,
   cancelLabel,
   danger = true,
+  deleteFileOption = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
   const panelRef = useRef<HTMLDivElement>(null);
+  const [deleteFromDisk, setDeleteFromDisk] = useState(false);
   useModalA11y(panelRef, onCancel);
 
   return createPortal(
@@ -45,6 +48,19 @@ export function ConfirmDialog({
           <p id="confirm-msg" className="confirm-msg">
             {message}
           </p>
+          {deleteFileOption && (
+            <label className="check-row confirm-delete-file">
+              <input
+                type="checkbox"
+                checked={deleteFromDisk}
+                onChange={(e) => setDeleteFromDisk(e.target.checked)}
+              />
+              <span>
+                <span>{t('confirm.delete_from_disk')}</span>
+                <span className="field-hint">{t('confirm.delete_from_disk_hint')}</span>
+              </span>
+            </label>
+          )}
         </div>
         <div className="modal-foot">
           <button type="button" className="btn-secondary" data-modal-cancel onClick={onCancel}>
@@ -53,7 +69,7 @@ export function ConfirmDialog({
           <button
             type="button"
             className={`btn-primary${danger ? ' danger' : ''}`}
-            onClick={onConfirm}
+            onClick={() => onConfirm(deleteFileOption ? deleteFromDisk : undefined)}
           >
             {confirmLabel || t('inspector.remove')}
           </button>

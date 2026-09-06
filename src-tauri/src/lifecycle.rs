@@ -189,6 +189,7 @@ fn spawn_local_api(app_handle: tauri::AppHandle) {
             .route("/api/ping", post(crate::local_api::handle_ping))
             .route("/api/add", post(crate::local_api::handle_api_add))
             .route("/api/intercept", post(crate::local_api::handle_intercept))
+            .route("/api/upload", post(crate::local_api::handle_api_upload))
             .layer(from_fn_with_state(
                 axum_app_handle.clone(),
                 crate::local_api::rate_limit_middleware,

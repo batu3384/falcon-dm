@@ -145,10 +145,15 @@ function DownloadItemInner({
     }
   };
 
-  const doRemove = () => {
+  const doRemove = async (deleteFromDisk = false) => {
     setConfirmRemove(false);
     setMenu(null);
-    call(() => api.removeDownload(item.id), t('downloadItem.action_failed'));
+    try {
+      await api.removeDownload(item.id, deleteFromDisk);
+      onRefresh?.();
+    } catch (e) {
+      showToast('error', api.extractTauriError(e) || t('downloadItem.action_failed'));
+    }
   };
 
   const copyText = async (value: string, successMessage?: string) => {
@@ -430,6 +435,7 @@ function DownloadItemInner({
       {confirmRemove && (
         <ConfirmDialog
           message={t('inspector.confirm_remove')}
+          deleteFileOption
           onConfirm={doRemove}
           onCancel={() => setConfirmRemove(false)}
         />

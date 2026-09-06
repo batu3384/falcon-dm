@@ -1,8 +1,9 @@
 use crate::native_messaging::PairRequest;
 use crate::util::{lock_or_recover, LEGACY_DEFAULT_API_TOKEN};
 use crate::{
-    check_api_token, enqueue_download, extension_id_from_origin, is_valid_extension_id, AppState,
-    ExternalDownloadPayload, MAX_PENDING_PAIR_REQUESTS,
+    check_api_token, enqueue_download, extension_id_from_origin, ingest_uploaded_file,
+    is_valid_extension_id, validate_upload_b64_len, AppState, ExternalDownloadPayload,
+    MAX_PENDING_PAIR_REQUESTS,
 };
 use axum::{
     body::Body,
@@ -128,6 +129,58 @@ pub(crate) async fn handle_intercept(
     };
 
     match enqueue_download(&app, ext).await {
+        Ok(id) => {
+            (StatusCode::OK, Json(serde_json::json!({ "success": true, "id": id }))).into_response()
+        }
+        Err(e) => {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "success": false, "error": e })))
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct UploadRequest {
+    filename: String,
+    data_base64: String,
+    page_url: Option<String>,
+}
+
+pub(crate) async fn handle_api_upload(
+    AxumState(app): AxumState<AppHandle>,
+    headers: HeaderMap,
+    Json(payload): Json<UploadRequest>,
+) -> Response {
+    let state = app.state::<AppState>();
+    if let Err(status) =
+        check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))
+    {
+        return status.into_response();
+    }
+
+    if let Err(e) = validate_upload_b64_len(payload.data_base64.len()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "success": false, "error": e })),
+        )
+            .into_response();
+    }
+
+    let bytes = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        payload.data_base64.trim(),
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "success": false, "error": format!("invalid upload data: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    match ingest_uploaded_file(&app, &payload.filename, bytes, payload.page_url).await {
         Ok(id) => {
             (StatusCode::OK, Json(serde_json::json!({ "success": true, "id": id }))).into_response()
         }

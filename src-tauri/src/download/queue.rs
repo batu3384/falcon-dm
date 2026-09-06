@@ -6,8 +6,8 @@ use crate::storage::{
     Database,
 };
 use crate::util::{
-    is_googlevideo_url, is_hls_url, is_youtube_watch_url, lock_or_recover,
-    split_falcon_format, youtube_page_url_for_download,
+    is_dash_url, is_googlevideo_url, is_hls_url, is_youtube_watch_url, lock_or_recover,
+    split_falcon_format, youtube_page_url_for_download, ytdlp_source_url_for_download,
 };
 use chrono::{Local, NaiveTime};
 use serde::{Deserialize, Serialize};
@@ -66,6 +66,9 @@ pub(crate) fn route_queued_download(
         return DownloadRoute::YtDlp;
     }
     if is_youtube_watch_url(&clean) || youtube_page_url_for_download(url, referrer).is_some() {
+        return DownloadRoute::YtDlp;
+    }
+    if is_dash_url(url) {
         return DownloadRoute::YtDlp;
     }
     if is_hls_url(url) {
@@ -251,8 +254,8 @@ impl QueueManager {
                         dl.aria2_gid.is_some(),
                     ) {
                         DownloadRoute::YtDlp => {
-                            let Some(watch) =
-                                youtube_page_url_for_download(&dl.url, dl.referrer.as_deref())
+                            let Some(source) =
+                                ytdlp_source_url_for_download(&dl.url, dl.referrer.as_deref())
                             else {
                                 continue;
                             };
@@ -260,7 +263,9 @@ impl QueueManager {
                                 continue;
                             };
                             dl.status = DownloadStatus::Downloading;
-                            let (clean_url, ytdlp_fmt) = split_falcon_format(&watch);
+                            let (clean_url, ytdlp_fmt) = split_falcon_format(&source);
+                            let dash_fmt = is_dash_url(&clean_url).then(|| "best".to_string());
+                            let chosen_fmt = ytdlp_fmt.or(dash_fmt);
                             let mut fname = dl.filename.clone();
                             if !fname.to_lowercase().ends_with(".mp4") {
                                 if let Some(stem) = std::path::Path::new(&fname).file_stem() {
@@ -285,7 +290,7 @@ impl QueueManager {
                                         cookies: dl.cookies.clone(),
                                         user_agent: dl.user_agent.clone(),
                                     },
-                                    format: ytdlp_fmt,
+                                    format: chosen_fmt,
                                 },
                                 rx,
                             );
@@ -654,6 +659,10 @@ mod tests {
         assert_eq!(
             route_queued_download("https://cdn.example.com/live.m3u8", None, false),
             DownloadRoute::Hls
+        );
+        assert_eq!(
+            route_queued_download("https://cdn.example.com/stream.mpd", None, false),
+            DownloadRoute::YtDlp
         );
         assert_eq!(
             route_queued_download("https://www.youtube.com/watch?v=abc", None, false),

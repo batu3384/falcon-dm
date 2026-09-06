@@ -206,6 +206,19 @@ export function GeneralTab({
           <p className="field-hint">{t('onboarding.native_host_hint')}</p>
         </div>
       </div>
+      <section className="settings-format-card" aria-labelledby="format-support-title">
+        <h3 id="format-support-title" className="section-title">
+          {t('settings.format_support_title')}
+        </h3>
+        <ul className="settings-format-list">
+          <li>{t('settings.format_support_http')}</li>
+          <li>{t('settings.format_support_hls')}</li>
+          <li>{t('settings.format_support_dash')}</li>
+          <li>{t('settings.format_support_youtube')}</li>
+          <li>{t('settings.format_support_blob')}</li>
+          <li>{t('settings.format_support_unsupported')}</li>
+        </ul>
+      </section>
       <div className="field">
         <label className="field-label" htmlFor="cat-video">
           {t('settings.cat_video')}

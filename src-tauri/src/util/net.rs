@@ -49,6 +49,14 @@ pub fn is_hls_url(url: &str) -> bool {
     path.ends_with(".m3u8") || path.contains(".m3u8/")
 }
 
+pub fn is_dash_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let path = parsed.path().to_lowercase();
+    path.ends_with(".mpd") || path.contains(".mpd/")
+}
+
 /// True if a resolved IP lands in a non-routable/private range (SSRF target).
 /// Covers loopback, RFC1918, link-local, unspecified, CGNAT (100.64.0.0/10),
 /// IPv6 ULA/link-local, and IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1).
@@ -143,6 +151,9 @@ pub fn validate_download_url(url: &str) -> Result<(), String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return Err("URL is empty".into());
+    }
+    if trimmed.to_lowercase().starts_with("magnet:") {
+        return Err("ERR_UNSUPPORTED_MAGNET".into());
     }
     let parsed = url::Url::parse(trimmed).map_err(|e| format!("Invalid URL: {e}"))?;
     match parsed.scheme() {
@@ -378,6 +389,18 @@ pub fn youtube_page_url_for_download(url: &str, referrer: Option<&str>) -> Optio
     None
 }
 
+/// Resolve the URL passed to yt-dlp (watch page, DASH manifest, or None).
+pub fn ytdlp_source_url_for_download(url: &str, referrer: Option<&str>) -> Option<String> {
+    if let Some(watch) = youtube_page_url_for_download(url, referrer) {
+        return Some(watch);
+    }
+    let (clean, selected_format) = split_falcon_format(url);
+    if is_dash_url(&clean) {
+        return Some(attach_falcon_format(&clean, selected_format.as_deref()));
+    }
+    None
+}
+
 /// Pull a filename segment from URL path or query.
 pub fn infer_filename_from_url(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
@@ -400,6 +423,7 @@ pub fn infer_filename_from_url(url: &str) -> Option<String> {
 pub fn guess_extension_from_url(url: &str) -> Option<String> {
     let lower = url.to_lowercase();
     if is_hls_url(url)
+        || is_dash_url(url)
         || url::Url::parse(url)
             .map(|parsed| parsed.path().to_lowercase().contains("/manifest/"))
             .unwrap_or(false)
@@ -424,7 +448,8 @@ pub fn guess_extension_from_url(url: &str) -> Option<String> {
     }
     for ext in [
         "mp4", "webm", "mkv", "avi", "mov", "m4a", "mp3", "flac", "ogg", "wav", "zip", "rar", "7z",
-        "pdf", "exe", "dmg", "pkg", "iso", "torrent", "png", "jpg", "jpeg", "gif",
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub", "exe", "dmg", "pkg", "iso",
+        "torrent", "png", "jpg", "jpeg", "gif", "webp", "deb", "rpm", "msi",
     ] {
         if lower.contains(&format!(".{ext}")) {
             return Some(ext.into());
@@ -446,7 +471,7 @@ pub fn resolve_download_filename(
     if let Some(inferred) = infer_filename_from_url(url) {
         return sanitize_filename(&inferred);
     }
-    let ext = if force_hls_mp4 || is_hls_url(url) {
+    let ext = if force_hls_mp4 || is_hls_url(url) || is_dash_url(url) {
         "mp4".to_string()
     } else {
         guess_extension_from_url(url).unwrap_or_else(|| "bin".into())
@@ -472,6 +497,10 @@ mod tests {
     fn test_validate_url() {
         assert!(validate_download_url("https://example.com/a").is_ok());
         assert!(validate_download_url("magnet:?xt=urn:btih:abc").is_err());
+        assert_eq!(
+            validate_download_url("magnet:?xt=urn:btih:abc").unwrap_err(),
+            "ERR_UNSUPPORTED_MAGNET"
+        );
         assert!(validate_download_url("file:///etc/passwd").is_err());
         assert!(validate_download_url("javascript:alert(1)").is_err());
         assert!(validate_download_url("http://127.0.0.1/secret").is_err());
@@ -571,6 +600,13 @@ mod tests {
     }
 
     #[test]
+    fn ytdlp_source_url_accepts_dash_manifest() {
+        let mpd = "https://cdn.example.com/stream/index.mpd?token=1";
+        let source = ytdlp_source_url_for_download(mpd, None).unwrap();
+        assert_eq!(source, mpd);
+    }
+
+    #[test]
     fn test_youtube_page_url_from_googlevideo_id() {
         let cdn =
             "https://rr1---sn-abc.googlevideo.com/videoplayback?id=5-u7nkMiwtQ&mime=video%2Fmp4";
@@ -618,6 +654,14 @@ mod tests {
         assert!(!is_hls_url("https://cdn.example.com/video.mp4?x=.m3u8"));
         assert!(!is_hls_url("https://cdn.example.com/video.mp4#file.m3u8"));
         assert!(!is_hls_url("not a url"));
+    }
+
+    #[test]
+    fn test_is_dash_url() {
+        assert!(is_dash_url("https://cdn.example.com/stream/index.mpd"));
+        assert!(is_dash_url("https://cdn.example.com/live.mpd?token=1"));
+        assert!(!is_dash_url("https://cdn.example.com/video.mp4?x=.mpd"));
+        assert!(!is_dash_url("not a url"));
     }
 
     #[test]

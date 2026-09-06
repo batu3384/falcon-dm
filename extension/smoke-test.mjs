@@ -26,7 +26,12 @@ function assert(cond, msg) {
   if (!cond) throw new Error(msg);
 }
 
+assert(FM.isGrabberLink('https://x.com/file.docx', false), 'grabber docx');
+assert(FM.isGrabberLink('https://x.com/file.bin', false) === false, 'grabber skips unknown');
+assert(FM.isBlobUrl('blob:https://example.com/u'), 'blob url detect');
 assert(FM.isJunkUrl('https://x.com/no_input.mp3'), 'junk no_input');
+assert(!FM.isJunkUrl('blob:https://example.com/u'), 'blob not junk');
+assert(FM.isCapturableMedia('https://x.com/stream.mpd', 'application/dash+xml'), 'dash capturable');
 assert(!FM.isJunkUrl('https://cdn.example.com/video.mp4'), 'real mp4');
 assert(FM.isCapturableMedia('https://x.com/a.m3u8', 'application/vnd.apple.mpegurl'), 'hls');
 const norm = FM.normalizeMediaUrl(
@@ -100,9 +105,28 @@ assert(content.includes('prefers-color-scheme: light'), 'overlay light theme');
 const chromeCss = readFileSync(path.join(__dirname, 'chrome.css'), 'utf8');
 assert(chromeCss.includes('.check-row'), 'popup checkbox row');
 assert(manifest.permissions.includes('tabs'), 'tabs permission');
+assert(manifest.permissions.includes('clipboardRead'), 'clipboard permission');
+assert(manifest.permissions.includes('alarms'), 'alarms permission');
+assert(src.includes('GRABBER_EXT_RE'), 'grabber extension list');
+assert(src.includes('isGrabberLink'), 'grabber link helper');
+assert(src.includes('collectPageBlobSources'), 'blob source collector');
+assert(readFileSync(path.join(__dirname, '../src-tauri/src/util/net.rs'), 'utf8').includes('ytdlp_source_url_for_download'), 'dash ytdlp url resolver');
+assert(content.includes('link[rel="enclosure"]'), 'grabber enclosure scan');
+assert(readFileSync(path.join(__dirname, '../src-tauri/src/util/net.rs'), 'utf8').includes('ERR_UNSUPPORTED_MAGNET'), 'magnet error code');
+assert(background.includes('download_blob'), 'blob download action');
+assert(background.includes('/api/upload'), 'blob upload api');
+assert(shared.includes('validate_upload_b64_len') || readFileSync(path.join(__dirname, '../src-tauri/src/local_api.rs'), 'utf8').includes('validate_upload_b64_len'), 'upload b64 guard');
+assert(src.includes('BLOB_MAX_BYTES = 32'), 'blob size cap');
+assert(popupHtml.includes('clipboard-monitor'), 'popup clipboard toggle');
 assert(Array.isArray(manifest.content_scripts) && manifest.content_scripts.length, 'youtube content_scripts');
 assert(content.includes('youtubeFallbackSources'), 'youtube fallback tiers');
+assert(content.includes('let fabHost = null'), 'fab host state declared');
+assert(content.includes('dismissFabForPage'), 'page-scoped fab dismiss');
+assert(content.includes('fm-fab-dismiss'), 'fab dismiss control');
 assert(content.includes('syncVideoFab'), 'single video fab sync');
+assert(content.includes('bindFabDrag'), 'fab drag reposition');
+assert(content.includes('fabManualPos'), 'fab manual position state');
+assert(content.includes('syncFabPageContext'), 'fab manual pos reset on navigation');
 assert(content.includes('pickLargestVideo'), 'largest video only');
 assert(content.includes("'ping'"), 'content script ping');
 assert(popupHtml.includes('id="notice"'), 'popup error notice');

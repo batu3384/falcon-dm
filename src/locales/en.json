@@ -99,11 +99,20 @@
     "remove": "Remove",
     "retry": "Retry",
     "error_reason": "Error reason",
-    "confirm_remove": "Remove this download from the queue?",
+    "confirm_remove": "Remove this download from the list?",
     "source_url": "Source URL",
     "folder_error": "Could not open folder",
     "file_error": "Could not open file",
     "remove_error": "Could not remove"
+  },
+  "confirm": {
+    "delete_from_disk": "Also delete the file from disk",
+    "delete_from_disk_hint": "Removes the saved file from your download folder. Cannot be undone."
+  },
+  "errors": {
+    "unsupported_magnet": "Magnet and BitTorrent links are not supported yet. Use an http(s) URL or the browser extension.",
+    "invalid_url": "Enter a valid http(s) download URL.",
+    "junk_media_url": "This URL does not look like a downloadable file."
   },
   "app": {
     "window_title": "Falcon DM window title bar",
@@ -216,7 +225,14 @@
     "checking_updates": "Checking...",
     "update_available": "Update available: {{version}}",
     "update_current": "Up to date ({{version}})",
-    "update_check_failed": "Could not check for updates"
+    "update_check_failed": "Could not check for updates",
+    "format_support_title": "Supported download types",
+    "format_support_http": "HTTP/HTTPS files (multi-connection, resume)",
+    "format_support_hls": "HLS streams (.m3u8) → MP4 via ffmpeg",
+    "format_support_dash": "DASH manifests (.mpd) via yt-dlp",
+    "format_support_youtube": "YouTube watch pages via yt-dlp",
+    "format_support_blob": "Browser blob media via extension (max 32 MB)",
+    "format_support_unsupported": "Not supported: magnet, BitTorrent, FTP, RTMP"
   },
   "scheduler": {
     "title": "Queue Scheduler",

@@ -55,6 +55,14 @@
   const JUNK_RE =
     /no_input\.mp3|\/s\/search\/|\/generate_204|\/ptracking|\/api\/stats|\/log_event|\/youtubei\/|\/timedtext|\/caption|\/ad_status|\/pagead\/|\/doubleclick|favicon|\/img\/|\.svg(\?|$)|\/static\/|\/yts\/|\/s\/player\/|\/jsbin\//i;
 
+  // ponytail: keep in sync with backend guess_extension + DownloadCategory
+  const GRABBER_EXTENSIONS =
+    'mp4|mkv|webm|mov|avi|wmv|flv|m4v|mp3|m4a|flac|ogg|wav|aac|wma|zip|rar|7z|tar|gz|bz2|xz|tgz|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|epub|exe|dmg|pkg|iso|deb|rpm|msi|app|png|jpg|jpeg|gif|webp|torrent';
+
+  const GRABBER_EXT_RE = new RegExp(`\\.(${GRABBER_EXTENSIONS})(\\?|#|$)`, 'i');
+
+  const BLOB_MAX_BYTES = 32 * 1024 * 1024;
+
   function formatBytes(n) {
     if (!n || n <= 0) return '';
     const u = ['B', 'KB', 'MB', 'GB'];
@@ -134,7 +142,8 @@
   }
 
   function isJunkUrl(url) {
-    if (!url || url.startsWith('blob:') || url.startsWith('data:')) return true;
+    if (!url || url.startsWith('data:')) return true;
+    if (url.startsWith('blob:')) return false;
     if (JUNK_RE.test(url)) return true;
     // YouTube UI placeholder audio
     if (url.includes('youtube.com') && url.includes('.mp3') && !url.includes('videoplayback')) {
@@ -143,21 +152,34 @@
     return false;
   }
 
+  function isBlobUrl(url) {
+    return !!url && String(url).startsWith('blob:');
+  }
+
+  function isGrabberLink(url, hasDownloadAttr) {
+    if (hasDownloadAttr) return true;
+    return GRABBER_EXT_RE.test(String(url || ''));
+  }
+
   function isCapturableMedia(url, contentType) {
+    if (!url || url.startsWith('data:')) return false;
+    if (url.startsWith('blob:')) return true;
     if (isJunkUrl(url)) return false;
     const ct = (contentType || '').toLowerCase();
     const u = url.toLowerCase();
     return (
       u.includes('.m3u8') ||
+      u.includes('.mpd') ||
       u.includes('/manifest/') ||
       u.includes('videoplayback') ||
       u.includes('googlevideo.com') ||
       u.includes('mime=video') ||
       u.includes('mime=audio') ||
-      /\.(mp4|webm|mkv|m4a|mp3|flac|ogg|mov)(\?|#|$)/i.test(url) ||
+      /\.(mp4|webm|mkv|m4a|mp3|flac|ogg|mov|avi|wmv|pdf|zip|rar|7z)(\?|#|$)/i.test(url) ||
       ct.includes('video/') ||
       ct.includes('audio/') ||
       ct.includes('mpegurl') ||
+      ct.includes('dash+xml') ||
       ct.includes('application/vnd.apple.mpegurl')
     );
   }
@@ -233,14 +255,16 @@
     const yt = itag ? YT_ITAG[itag] : null;
     const fmt = yt ? { fmt: yt.fmt, type: yt.type } : detectFormat(clean);
     const quality = yt ? yt.q : detectQuality(clean, meta);
-    const isHls = clean.includes('.m3u8') || clean.includes('/manifest/');
+    const isHls = clean.includes('.m3u8') || (clean.includes('/manifest/') && !clean.includes('.mpd'));
+    const isDash = clean.includes('.mpd');
     const isAudio = fmt.type === 'audio' || (yt && yt.type === 'audio');
-    const muxed = yt ? !!yt.muxed : !isAudio && !isHls;
+    const muxed = yt ? !!yt.muxed : !isAudio && !isHls && !isDash;
     const size = meta.contentLength || 0;
 
     let score = 0;
     if (muxed && !isAudio) score += 20000; // progressive muxed wins
     if (isHls) score += 8000;
+    if (isDash) score += 7500;
     if (!isAudio) score += 4000;
     else score -= 2000;
     const qn = parseInt(String(quality), 10) || 0;
@@ -249,6 +273,8 @@
 
     const kind = isHls
       ? _i18n('kindStream', 'Stream')
+      : isDash
+        ? _i18n('kindDash', 'DASH stream')
       : isAudio
         ? _i18n('kindAudio', 'Audio')
         : muxed
@@ -269,6 +295,7 @@
       format: fmt.fmt,
       mediaType: fmt.type,
       isHls,
+      isDash,
       isAudio,
       muxed,
       size,
@@ -283,7 +310,7 @@
     const seen = new Set();
     const items = [];
     for (const raw of urls || []) {
-      if (!raw || isJunkUrl(raw)) continue;
+      if (!raw || isJunkUrl(raw) || isBlobUrl(raw)) continue;
       const clean = normalizeMediaUrl(raw);
       if (!clean || seen.has(clean)) continue;
       // Dedupe by itag when present (same quality, different CDN hosts)
@@ -366,6 +393,39 @@
     }));
   }
 
+  function collectPageBlobSources() {
+    if (typeof document === 'undefined') return [];
+    const out = [];
+    const seen = new Set();
+    document.querySelectorAll('video, audio').forEach((el) => {
+      const src = el.currentSrc || el.src || '';
+      if (!isBlobUrl(src) || seen.has(src)) return;
+      seen.add(src);
+      const ct = String(el.type || '');
+      const isAudio = el.tagName === 'AUDIO' || ct.startsWith('audio/');
+      const ext = ct.includes('webm') ? 'webm' : ct.includes('ogg') ? 'ogg' : isAudio ? 'm4a' : 'mp4';
+      out.push({
+        url: src,
+        title: isAudio
+          ? _i18n('blobAudio', 'Page audio (blob)')
+          : _i18n('blobVideo', 'Page video (blob)'),
+        subtitle: _i18n('blobHint', 'Fetched from this tab'),
+        quality: '',
+        format: ext.toUpperCase(),
+        mediaType: isAudio ? 'audio' : 'video',
+        isHls: false,
+        isAudio,
+        isBlob: true,
+        muxed: true,
+        size: 0,
+        sizeLabel: '',
+        score: 12000,
+        ext,
+      });
+    });
+    return out;
+  }
+
   root.FalconMedia = {
     analyzeUrl,
     groupSources,
@@ -374,6 +434,11 @@
     formatBytes,
     normalizeMediaUrl,
     isJunkUrl,
+    isBlobUrl,
+    isGrabberLink,
+    GRABBER_EXT_RE,
+    BLOB_MAX_BYTES,
+    collectPageBlobSources,
     isCapturableMedia,
     isYoutubeHost,
     isGooglevideoUrl,

@@ -23,6 +23,7 @@ const dlUrlBtn = $('dl-url');
 const reconnectBtn = $('reconnect');
 const pauseBtn = $('pause');
 const failClosedEl = $('fail-closed');
+const clipboardMonitorEl = $('clipboard-monitor');
 const bannerEl = $('banner');
 const bannerTextEl = $('banner-text');
 const bannerActionEl = $('banner-action');
@@ -66,6 +67,14 @@ function applyStaticI18n() {
   $('fail-closed-hint').textContent = t(
     'popupFailClosedHint',
     'Cancel browser download if Falcon DM cannot receive it.',
+  );
+  $('clipboard-monitor-label').textContent = t(
+    'popupClipboardMonitor',
+    'Queue copied http(s) URLs',
+  );
+  $('clipboard-monitor-hint').textContent = t(
+    'popupClipboardMonitorHint',
+    'Checks about once per minute while connected.',
   );
   $('more-label').textContent = t('popupAdvanced', 'Advanced');
   $('settings').textContent = t('popupSettings', 'Settings');
@@ -181,6 +190,7 @@ function applyStatus(resp) {
   failClosed = !!resp.failClosed;
   pauseBtn.textContent = paused ? t('popupResume', 'Resume') : t('popupPause', 'Pause');
   if (failClosedEl) failClosedEl.checked = failClosed;
+  if (clipboardMonitorEl) clipboardMonitorEl.checked = !!resp.clipboardMonitor;
   renderQueue(resp.recent || []);
 }
 
@@ -286,6 +296,19 @@ if (failClosedEl) {
     failClosedEl.disabled = false;
     if (!resp || resp.ok === false) {
       failClosedEl.checked = failClosed;
+      showNotice(t('errorAppOffline', 'Failed'));
+      refresh();
+    }
+  });
+}
+
+if (clipboardMonitorEl) {
+  clipboardMonitorEl.addEventListener('change', async () => {
+    clipboardMonitorEl.disabled = true;
+    const resp = await send('set_clipboard_monitor', { enabled: clipboardMonitorEl.checked });
+    clipboardMonitorEl.disabled = false;
+    if (!resp || resp.ok === false) {
+      clipboardMonitorEl.checked = !clipboardMonitorEl.checked;
       showNotice(t('errorAppOffline', 'Failed'));
       refresh();
     }

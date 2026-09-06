@@ -54,6 +54,14 @@ document.getElementById('fail-closed-hint').textContent = t(
   'optionsFailClosedHint',
   'When enabled, intercepted downloads are cancelled instead of falling back.',
 );
+document.getElementById('clipboard-monitor-label').textContent = t(
+  'optionsClipboardMonitor',
+  'Queue http(s) URLs copied to clipboard',
+);
+document.getElementById('clipboard-monitor-hint').textContent = t(
+  'optionsClipboardMonitorHint',
+  'Checks about once per minute while Falcon DM is connected.',
+);
 
 extIdEl.textContent = chrome.runtime.id;
 
@@ -67,6 +75,7 @@ document.getElementById('copy-id').addEventListener('click', async () => {
 });
 
 const failClosedEl = document.getElementById('fail-closed');
+const clipboardMonitorEl = document.getElementById('clipboard-monitor');
 
 function refresh() {
   setStatus(t('sending', 'Checking...'), '');
@@ -86,6 +95,7 @@ function refresh() {
   });
   chrome.runtime.sendMessage({ action: 'get_status' }, (resp) => {
     if (resp && failClosedEl) failClosedEl.checked = !!resp.failClosed;
+    if (resp && clipboardMonitorEl) clipboardMonitorEl.checked = !!resp.clipboardMonitor;
   });
 }
 
@@ -125,6 +135,20 @@ if (failClosedEl) {
       (resp) => {
         if (!resp || resp.ok === false) {
           failClosedEl.checked = !failClosedEl.checked;
+          setStatus(resp?.error || t('errorAppOffline', 'Failed'), 'err');
+        }
+      },
+    );
+  });
+}
+
+if (clipboardMonitorEl) {
+  clipboardMonitorEl.addEventListener('change', () => {
+    chrome.runtime.sendMessage(
+      { action: 'set_clipboard_monitor', enabled: clipboardMonitorEl.checked },
+      (resp) => {
+        if (!resp || resp.ok === false) {
+          clipboardMonitorEl.checked = !clipboardMonitorEl.checked;
           setStatus(resp?.error || t('errorAppOffline', 'Failed'), 'err');
         }
       },

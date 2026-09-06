@@ -51,6 +51,20 @@ Fail-closed applies to **`chrome.downloads.onDeterminingFilename`** only. Contex
 
 **Grab page links with Falcon** sends up to **100** selected URLs per batch via `/api/add`. Responses include per-item `results` so partial success can be retried.
 
+Scans page links (common file extensions + `download` attribute) and direct `video`/`audio` `src` URLs. Junk/tracking URLs are filtered.
+
+## DASH & blob media
+
+| Type | Capture | Engine |
+|------|---------|--------|
+| **DASH `.mpd`** | Network sniff + overlay | yt-dlp |
+| **HLS `.m3u8`** | Network sniff + overlay | Falcon HLS + ffmpeg |
+| **Blob `video`/`audio`** | Overlay picker | `/api/upload` (32 MB cap) |
+
+## Clipboard monitor
+
+Enable in extension **popup → Advanced** or **options**. While Falcon is connected, copied `http(s)` URLs are queued automatically (~1 min poll). Desktop app has a separate toolbar clipboard toggle.
+
 ## YouTube
 
 Extension sends the **watch URL** and JSON field `format` (yt-dlp selector). Never send raw `googlevideo.com` CDN URLs. Optional browser cookies for yt-dlp are controlled in **Falcon Settings** (off by default).

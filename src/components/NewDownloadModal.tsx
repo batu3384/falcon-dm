@@ -144,7 +144,7 @@ export default function NewDownloadModal({
       onClose();
     } catch (err) {
       // ponytail: centralized error extraction replaces the hand-rolled typeof/object check.
-      const detail = api.extractTauriError(err);
+      const detail = api.localizeDownloadError(api.extractTauriError(err), t);
       showToast('error', `${t('newDownloadModal.add_failed')}: ${detail}`);
       console.error(err);
     } finally {

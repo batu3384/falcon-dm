@@ -18,7 +18,9 @@
     "storage",
     "scripting",
     "tabs",
-    "nativeMessaging"
+    "nativeMessaging",
+    "clipboardRead",
+    "alarms"
   ],
   "content_scripts": [
     {

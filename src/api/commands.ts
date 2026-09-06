@@ -33,6 +33,19 @@ export function extractTauriError(e: unknown): string {
   return message;
 }
 
+/** Map backend download error codes to localized UI strings. */
+export function localizeDownloadError(message: string, t: (key: string) => string): string {
+  const trimmed = message.trim();
+  if (trimmed === 'ERR_UNSUPPORTED_MAGNET') return t('errors.unsupported_magnet');
+  if (trimmed === 'invalid url') return t('errors.invalid_url');
+  if (trimmed === 'not a real media url') return t('errors.junk_media_url');
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('unsupported url scheme: magnet') || lower.startsWith('unsupported fetch url scheme: magnet')) {
+    return t('errors.unsupported_magnet');
+  }
+  return message;
+}
+
 export interface DownloadFilter {
   status?: string;
   category?: string;

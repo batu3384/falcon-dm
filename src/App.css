@@ -194,6 +194,20 @@ button:disabled {
   margin: 0 0 8px;
   line-height: 1.45;
 }
+.settings-format-card {
+  margin: 4px 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+.settings-format-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.55;
+}
 
 .dl-actions {
   opacity: 1;
@@ -1518,6 +1532,18 @@ select {
   color: var(--text-1);
   font-size: 14px;
   line-height: 1.5;
+}
+.confirm-delete-file {
+  margin-top: 14px;
+  align-items: flex-start;
+}
+.confirm-delete-file span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.confirm-delete-file .field-hint {
+  margin: 0;
 }
 .btn-primary.danger {
   background: var(--danger);

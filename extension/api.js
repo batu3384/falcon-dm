@@ -12,7 +12,7 @@ function mapHttpError(status, bodyError) {
   return msg('errorAppOffline', 'Falcon DM is not running — open the desktop app');
 }
 
-async function postFalcon(path, body) {
+async function postFalcon(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   let token = await ensurePaired(false);
 
   let response;
@@ -27,7 +27,7 @@ async function postFalcon(path, body) {
         },
         body: JSON.stringify(body),
       },
-      REQUEST_TIMEOUT_MS,
+      timeoutMs,
       `Falcon ${path}`,
     );
   } catch {
@@ -48,7 +48,7 @@ async function postFalcon(path, body) {
           },
           body: JSON.stringify(body),
         },
-        REQUEST_TIMEOUT_MS,
+        timeoutMs,
         `Falcon ${path} retry`,
       );
     } catch {
@@ -69,6 +69,11 @@ async function postFalcon(path, body) {
   }
   if (data && data.success === false) {
     const err = data.error || msg('errorInvalidUrl', 'Invalid download URL');
+    if (err === 'ERR_UNSUPPORTED_MAGNET') {
+      throw new Error(
+        msg('errorUnsupportedMagnet', 'Magnet and BitTorrent links are not supported yet'),
+      );
+    }
     if (err === 'invalid url') throw new Error(msg('errorInvalidUrl', 'No valid URL'));
     throw new Error(err);
   }

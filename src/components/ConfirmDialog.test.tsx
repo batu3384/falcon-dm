@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { ConfirmDialog } from './ConfirmDialog';
 
 describe('ConfirmDialog', () => {
@@ -33,5 +34,40 @@ describe('ConfirmDialog', () => {
     unmount();
     expect(trigger).toHaveFocus();
     trigger.remove();
+  });
+
+  it('passes deleteFromDisk when delete checkbox is checked', async () => {
+    const onConfirm = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ConfirmDialog
+        message="Remove?"
+        confirmLabel="Remove"
+        deleteFileOption
+        onConfirm={onConfirm}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('checkbox'));
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(onConfirm).toHaveBeenCalledWith(true);
+  });
+
+  it('passes false when delete checkbox is unchecked', async () => {
+    const onConfirm = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ConfirmDialog
+        message="Remove?"
+        confirmLabel="Remove"
+        deleteFileOption
+        onConfirm={onConfirm}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(onConfirm).toHaveBeenCalledWith(false);
   });
 });

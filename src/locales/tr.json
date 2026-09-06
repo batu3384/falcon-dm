@@ -99,11 +99,20 @@
     "remove": "Kaldır",
     "retry": "Tekrar Dene",
     "error_reason": "Hata nedeni",
-    "confirm_remove": "Bu indirmeyi kuyruktan kaldırmak istiyor musun?",
+    "confirm_remove": "Bu indirmeyi listeden kaldırmak istiyor musun?",
     "source_url": "Kaynak URL",
     "folder_error": "Klasör açılamadı",
     "file_error": "Dosya açılamadı",
     "remove_error": "Kaldırılamadı"
+  },
+  "confirm": {
+    "delete_from_disk": "Dosyayı diskten de sil",
+    "delete_from_disk_hint": "İndirilen dosya klasöründen kalıcı olarak silinir. Geri alınamaz."
+  },
+  "errors": {
+    "unsupported_magnet": "Magnet ve BitTorrent bağlantıları henüz desteklenmiyor. http(s) URL veya tarayıcı eklentisini kullanın.",
+    "invalid_url": "Geçerli bir http(s) indirme URL'si girin.",
+    "junk_media_url": "Bu URL indirilebilir bir dosya gibi görünmüyor."
   },
   "app": {
     "window_title": "Falcon DM pencere başlığı",
@@ -216,7 +225,14 @@
     "checking_updates": "Denetleniyor...",
     "update_available": "Yeni sürüm: {{version}}",
     "update_current": "Güncelsiniz ({{version}})",
-    "update_check_failed": "Güncelleme denetlenemedi"
+    "update_check_failed": "Güncelleme denetlenemedi",
+    "format_support_title": "Desteklenen indirme türleri",
+    "format_support_http": "HTTP/HTTPS dosyalar (çoklu bağlantı, devam)",
+    "format_support_hls": "HLS akışları (.m3u8) → ffmpeg ile MP4",
+    "format_support_dash": "DASH manifest (.mpd) → yt-dlp",
+    "format_support_youtube": "YouTube watch sayfaları → yt-dlp",
+    "format_support_blob": "Tarayıcı blob medyası → eklenti (en fazla 32 MB)",
+    "format_support_unsupported": "Desteklenmiyor: magnet, BitTorrent, FTP, RTMP"
   },
   "scheduler": {
     "title": "Kuyruk Zamanlayıcı",

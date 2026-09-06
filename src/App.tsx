@@ -151,11 +151,11 @@ function App() {
   });
 
   const runBatchAction = useCallback(
-    async (targets: typeof downloads, action: 'pause' | 'resume' | 'delete') => {
+    async (targets: typeof downloads, action: 'pause' | 'resume' | 'delete', deleteFromDisk = false) => {
       if (!targets.length) return;
       const results = await Promise.allSettled(
         targets.map((download) => {
-          if (action === 'delete') return api.removeDownload(download.id);
+          if (action === 'delete') return api.removeDownload(download.id, deleteFromDisk);
           if (action === 'pause') return api.pauseDownload(download.id);
           return api.resumeDownload(download.id);
         }),
@@ -211,14 +211,14 @@ function App() {
   }, [runBatchAction, showToast]);
 
   const handleBatchAction = useCallback(
-    async (action: 'pause' | 'resume' | 'delete') => {
+    async (action: 'pause' | 'resume' | 'delete', deleteFromDisk = false) => {
       const targets = downloads.filter((download) => {
         if (!selectedIds.has(download.id)) return false;
         const capabilities = getDownloadCapabilities(download.status);
         return action === 'delete' ? capabilities.remove : capabilities[action];
       });
       if (!targets.length) return;
-      await runBatchAction(targets, action);
+      await runBatchAction(targets, action, deleteFromDisk);
       clearSelection();
     },
     [downloads, selectedIds, runBatchAction, clearSelection],
@@ -562,9 +562,10 @@ function App() {
       {confirmBatchDelete && (
         <ConfirmDialog
           message={t('app.confirm_batch_delete', { count: selectedIds.size })}
-          onConfirm={() => {
+          deleteFileOption
+          onConfirm={(deleteFromDisk) => {
             setConfirmBatchDelete(false);
-            void handleBatchAction('delete');
+            void handleBatchAction('delete', deleteFromDisk);
           }}
           onCancel={() => setConfirmBatchDelete(false)}
         />

@@ -220,3 +220,103 @@ function notify(title, message) {
     message,
   });
 }
+
+const CLIPBOARD_URL_RE = /^https?:\/\/\S+/i;
+let lastClipboardUrl = '';
+
+(async () => {
+  try {
+    const { falconLastClipboardUrl } = await chrome.storage.local.get({
+      falconLastClipboardUrl: '',
+    });
+    lastClipboardUrl = String(falconLastClipboardUrl || '');
+  } catch (_) {}
+})();
+
+async function rememberClipboardUrl(url) {
+  lastClipboardUrl = url;
+  try {
+    await chrome.storage.local.set({ falconLastClipboardUrl: url });
+  } catch (_) {}
+}
+
+function isQueueableClipboardUrl(url) {
+  if (!CLIPBOARD_URL_RE.test(url)) return false;
+  if (url.length > 2048) return false;
+  if (String(url).toLowerCase().startsWith('magnet:')) return false;
+  if (self.FalconMedia && self.FalconMedia.isJunkUrl && self.FalconMedia.isJunkUrl(url)) return false;
+  return true;
+}
+
+async function getClipboardMonitorEnabled() {
+  try {
+    const { falconClipboardMonitor } = await chrome.storage.local.get({
+      falconClipboardMonitor: false,
+    });
+    return !!falconClipboardMonitor;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function setClipboardMonitorEnabled(next) {
+  await chrome.storage.local.set({ falconClipboardMonitor: !!next });
+  return !!next;
+}
+
+async function fetchBlobPayload(tabId, blobUrl) {
+  const maxBytes =
+    (self.FalconMedia && self.FalconMedia.BLOB_MAX_BYTES) || 100 * 1024 * 1024;
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: async (url, limit) => {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`fetch failed (${response.status})`);
+        const blob = await response.blob();
+        if (blob.size > limit) {
+          throw new Error(`blob too large (${blob.size} bytes, max ${limit})`);
+        }
+        const buf = await blob.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        }
+        return {
+          ok: true,
+          base64: btoa(binary),
+          size: blob.size,
+          type: blob.type || '',
+        };
+      } catch (error) {
+        return { ok: false, error: error.message || 'blob fetch failed' };
+      }
+    },
+    args: [blobUrl, maxBytes],
+  });
+  return result || { ok: false, error: 'blob fetch failed' };
+}
+
+async function pollClipboardToFalcon() {
+  if (!(await getClipboardMonitorEnabled())) return;
+  if (connectionState !== 'connected') return;
+  if (!(await appHealthy())) return;
+  try {
+    const text = String(await navigator.clipboard.readText()).trim();
+    if (!isQueueableClipboardUrl(text) || text === lastClipboardUrl) return;
+    const filename = text.split('/').pop().split('?')[0] || 'download';
+    await sendToFalcon('/api/add', {
+      url: text,
+      filename,
+      referrer: '',
+      user_agent: navigator.userAgent,
+      cookies: '',
+    });
+    await rememberClipboardUrl(text);
+    notify(msg('appName', 'Falcon DM'), msg('clipboardQueued', 'URL from clipboard queued'));
+  } catch (_) {
+    /* ponytail: clipboard may be denied without focus — skip quietly */
+  }
+}

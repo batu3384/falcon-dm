@@ -65,14 +65,14 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
     api.openFile(fileFullPath(download)).catch(() => showToast('error', t('inspector.file_error')));
   };
 
-  const handleRemove = async () => {
+  const handleRemove = async (deleteFromDisk = false) => {
     try {
-      await api.removeDownload(download.id);
+      await api.removeDownload(download.id, deleteFromDisk);
       setConfirmRemove(false);
       onClose();
       onRefresh?.();
-    } catch {
-      showToast('error', t('inspector.remove_error'));
+    } catch (e) {
+      showToast('error', api.extractTauriError(e) || t('inspector.remove_error'));
     }
   };
 
@@ -240,6 +240,7 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
       {confirmRemove && (
         <ConfirmDialog
           message={t('inspector.confirm_remove')}
+          deleteFileOption
           onConfirm={handleRemove}
           onCancel={() => setConfirmRemove(false)}
         />

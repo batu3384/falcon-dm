@@ -24,8 +24,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use util::{
     app_data_dir, default_download_dir, full_file_path, is_googlevideo_url, is_hls_url,
     is_junk_media_url, is_youtube_host, lock_or_recover, normalize_media_url,
-    resolve_download_filename, resolve_save_dir, sanitize_header_value, validate_completed_file,
-    validate_fetch_url_async, LEGACY_DEFAULT_API_TOKEN,
+    resolve_download_filename, resolve_download_target, resolve_save_dir, sanitize_filename,
+    sanitize_header_value, validate_completed_file, validate_fetch_url_async, LEGACY_DEFAULT_API_TOKEN,
 };
 
 use axum::http::{HeaderMap, StatusCode};
@@ -130,6 +130,9 @@ pub(crate) async fn enqueue_download(
     app: &AppHandle,
     payload: ExternalDownloadPayload,
 ) -> Result<i64, String> {
+    if payload.url.trim().to_lowercase().starts_with("magnet:") {
+        return Err("ERR_UNSUPPORTED_MAGNET".into());
+    }
     if validate_fetch_url_async(&payload.url).await.is_err() {
         return Err("invalid url".into());
     }
@@ -207,6 +210,97 @@ pub(crate) async fn enqueue_download(
     if matches!(insert_result, InsertDownloadResult::Created(_)) {
         dl.id = Some(id);
         let _ = app.emit("download-added", &dl);
+    }
+    Ok(id)
+}
+
+const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
+// ponytail: base64 expands ~4/3 — reject oversized payloads before decode allocates.
+const MAX_UPLOAD_B64_LEN: usize = (MAX_UPLOAD_BYTES / 3).saturating_mul(4) + 8;
+
+pub(crate) fn validate_upload_b64_len(b64_len: usize) -> Result<(), String> {
+    if b64_len > MAX_UPLOAD_B64_LEN {
+        return Err(format!(
+            "upload payload too large (max {} MB)",
+            MAX_UPLOAD_BYTES / 1024 / 1024
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_upload_file(filename: &str, byte_len: usize) -> Result<(), String> {
+    if byte_len == 0 {
+        return Err("empty upload".into());
+    }
+    if byte_len > MAX_UPLOAD_BYTES {
+        return Err(format!(
+            "upload too large (max {} MB)",
+            MAX_UPLOAD_BYTES / 1024 / 1024
+        ));
+    }
+    if filename.trim().is_empty() {
+        return Err("invalid filename".into());
+    }
+    if sanitize_filename(filename.trim()).is_empty() {
+        return Err("invalid filename".into());
+    }
+    Ok(())
+}
+
+/// Save bytes uploaded from the browser extension (blob: capture) as a completed download.
+pub(crate) async fn ingest_uploaded_file(
+    app: &AppHandle,
+    filename: &str,
+    bytes: Vec<u8>,
+    source_page: Option<String>,
+) -> Result<i64, String> {
+    validate_upload_file(filename, bytes.len())?;
+    let safe = sanitize_filename(filename.trim());
+    let category = DownloadCategory::from_filename(&safe);
+    let settings = {
+        let state = app.state::<AppState>();
+        let cached = lock_or_recover(&state.settings).clone();
+        cached
+    };
+    let save_path = resolve_download_save_path_with(&settings, None, &category)?;
+    let dest = resolve_download_target(&save_path, &safe)?;
+    std::fs::write(&dest, &bytes).map_err(|e| format!("Could not save upload: {e}"))?;
+    let size = bytes.len() as u64;
+    let now = Utc::now().to_rfc3339();
+    let state = app.state::<AppState>();
+    let mut dl = Download {
+        id: None,
+        url: source_page.unwrap_or_else(|| "blob:".into()),
+        filename: safe,
+        save_path,
+        total_size: size,
+        downloaded_size: size,
+        status: DownloadStatus::Completed,
+        category,
+        speed: 0.0,
+        segments: 1,
+        priority: 1,
+        created_at: now.clone(),
+        completed_at: Some(now),
+        error_message: None,
+        referrer: None,
+        user_agent: None,
+        cookies: None,
+        aria2_gid: None,
+        archived: false,
+    };
+    let insert_result = match state.db.insert_download_deduped(&dl) {
+        Ok(result) => result,
+        Err(e) => {
+            let _ = std::fs::remove_file(&dest);
+            return Err(e.to_string());
+        }
+    };
+    let id = insert_result.id();
+    if matches!(insert_result, InsertDownloadResult::Created(_)) {
+        dl.id = Some(id);
+        let _ = app.emit("download-added", &dl);
+        let _ = app.emit("download-completed", &dl);
     }
     Ok(id)
 }
@@ -390,5 +484,13 @@ mod tests {
             "https://rr3---sn-abc.googlevideo.com/videoplayback?id=xyz",
             Some("http://www.youtube.com/watch?v=abc")
         ));
+    }
+
+    #[test]
+    fn upload_validation_rejects_oversized_b64_and_bytes() {
+        assert!(validate_upload_b64_len(MAX_UPLOAD_B64_LEN + 1).is_err());
+        assert!(validate_upload_file("video.mp4", MAX_UPLOAD_BYTES + 1).is_err());
+        assert!(validate_upload_file("", 1).is_err());
+        assert!(validate_upload_file("ok.mp4", 1024).is_ok());
     }
 }

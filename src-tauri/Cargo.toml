@@ -71,6 +71,7 @@ tower-http = { version = "0.7.0", features = ["cors"] }
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-deep-link = "2"
 window-vibrancy = "0.8.0"
+base64 = "0.22"
 
 [profile.release]
 # ponytail: shrink release binary — LTO across crates, single codegen unit, strip debug symbols.

@@ -20,6 +20,7 @@ function setupMenus() {
 chrome.runtime.onInstalled.addListener(() => {
   setupMenus();
   refreshBadge();
+  chrome.alarms.create('falconClipboard', { periodInMinutes: 1 });
   ensurePaired(true).catch(() => {
     setState('offline');
     notify(
@@ -32,6 +33,17 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   refreshBadge();
   ensurePaired(false).catch(() => {});
+  chrome.alarms.create('falconClipboard', { periodInMinutes: 1 });
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'falconClipboard') {
+    pollClipboardToFalcon().catch(() => {});
+  }
+});
+
+chrome.tabs.onActivated.addListener(() => {
+  pollClipboardToFalcon().catch(() => {});
 });
 
 refreshBadge();
@@ -158,6 +170,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === 'download_with_falcon') {
     const url = info.linkUrl || info.srcUrl;
     if (!url) return;
+    if (self.FalconMedia && self.FalconMedia.isJunkUrl && self.FalconMedia.isJunkUrl(url)) {
+      notify('Falcon DM', msg('errorJunkUrl', 'Not a valid media URL'));
+      return;
+    }
     const filename = url.split('/').pop().split('?')[0] || 'download';
     try {
       const cookieLookup = cookieLookupUrl(url, info.pageUrl || url);
@@ -287,12 +303,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'get_status') {
-    sendResponse({
-      state: connectionState,
-      paused: interceptPaused,
-      failClosed: interceptFailClosed,
-      recent: RECENT.slice(0, 3),
-    });
+    (async () => {
+      sendResponse({
+        state: connectionState,
+        paused: interceptPaused,
+        failClosed: interceptFailClosed,
+        clipboardMonitor: await getClipboardMonitorEnabled(),
+        recent: RECENT.slice(0, 3),
+      });
+    })();
     return true;
   }
 
@@ -311,6 +330,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       try {
         const next = await setInterceptFailClosed(!!request.failClosed);
         sendResponse({ ok: true, failClosed: next });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message || 'Failed' });
+      }
+    })();
+    return true;
+  }
+
+  if (request.action === 'set_clipboard_monitor') {
+    (async () => {
+      try {
+        const next = await setClipboardMonitorEnabled(!!request.enabled);
+        sendResponse({ ok: true, clipboardMonitor: next });
       } catch (e) {
         sendResponse({ ok: false, error: e.message || 'Failed' });
       }
@@ -470,6 +501,42 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === 'download_blob') {
+    const blobUrl = (request.blob_url || request.url || '').trim();
+    const tabId = sender.tab && sender.tab.id;
+    if (!blobUrl.startsWith('blob:') || tabId == null) {
+      sendResponse({
+        success: false,
+        error: msg(
+          'errorNoValidSource',
+          'No downloadable URL found — play the video and try again',
+        ),
+      });
+      return true;
+    }
+
+    (async () => {
+      try {
+        const payload = await fetchBlobPayload(tabId, blobUrl);
+        if (!payload.ok) throw new Error(payload.error || 'blob fetch failed');
+        const pageUrl = (sender.tab && sender.tab.url) || request.page_url || '';
+        await postFalcon(
+          '/api/upload',
+          {
+            filename: request.filename || 'download.mp4',
+            data_base64: payload.base64,
+            page_url: pageUrl || null,
+          },
+          120000,
+        );
+        sendResponse({ success: true });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+    })().catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   if (request.action === 'download_video' || request.action === 'download_url') {
     const rawUrl = (request.url || '').trim();
     if (!rawUrl || rawUrl.startsWith('blob:')) {
@@ -528,6 +595,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const settled = await Promise.allSettled(
         items.map(async (it) => {
           try {
+            if (self.FalconMedia && self.FalconMedia.isJunkUrl && self.FalconMedia.isJunkUrl(it.url)) {
+              throw new Error(msg('errorJunkUrl', 'Not a valid media URL'));
+            }
             const pageUrl = (request.page_url || '').trim();
             const cookieLookup = cookieLookupUrl(it.url, pageUrl);
             const cookies = await getCookiesHeader(cookieLookup);

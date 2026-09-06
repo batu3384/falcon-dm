@@ -11,6 +11,10 @@ Load unpacked from this folder in Chrome/Edge.
 - **Fail-closed (opt-in):** enable **Block when offline** in popup or options → `suggest({ cancel: true })` and a blocking notification when hijack fails.
 - **Pause:** popup **Pause** disables hijack entirely (`cancel: false` always).
 - Batch enqueue (link grabber) accepts up to **100** items; returns per-item `results`; successful items are removed from retry selection while failed items remain retryable.
+- Link grabber scans `<a href>`, `download` attributes, and `<video>/<audio>` `src`/`source` tags (documents, archives, media extensions).
+- **DASH (`.mpd`)** manifests route through yt-dlp in the desktop app.
+- **Blob media** on the page can be saved via `/api/upload` (max **32 MB**).
+- **Clipboard monitor** (popup/options): queues copied `http(s)` URLs about once per minute while connected.
 - YouTube quality: send JSON field `format` (yt-dlp `-f` selector). Do **not** put format in the URL. Legacy `#falconfmt=` still accepted server-side as internal storage.
 - Origin must be `chrome-extension://<id>` and that id must be allowlisted after Settings approve.
 - Native messaging host must be installed for Chrome and Edge. Missing host, timeout, or app rejection keeps native browser downloads intact (unless fail-closed is enabled on hijack).
