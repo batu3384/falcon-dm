@@ -68,11 +68,7 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
   };
 
   return (
-    <div
-      className="modal-overlay palette-overlay"
-      onClick={onClose}
-      role="presentation"
-    >
+    <div className="modal-overlay palette-overlay" onClick={onClose} role="presentation">
       <div
         ref={panelRef}
         className="modal-panel modal-md palette-panel"

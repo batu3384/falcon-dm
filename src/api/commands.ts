@@ -40,7 +40,10 @@ export function localizeDownloadError(message: string, t: (key: string) => strin
   if (trimmed === 'invalid url') return t('errors.invalid_url');
   if (trimmed === 'not a real media url') return t('errors.junk_media_url');
   const lower = trimmed.toLowerCase();
-  if (lower.startsWith('unsupported url scheme: magnet') || lower.startsWith('unsupported fetch url scheme: magnet')) {
+  if (
+    lower.startsWith('unsupported url scheme: magnet') ||
+    lower.startsWith('unsupported fetch url scheme: magnet')
+  ) {
     return t('errors.unsupported_magnet');
   }
   return message;

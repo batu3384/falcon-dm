@@ -350,7 +350,8 @@ mod tests {
 
     #[test]
     fn parse_total_size_handles_tilde_estimate() {
-        let sz = parse_total_size("[download]  12.3% of ~  70.17MiB at  2.50MiB/s ETA 00:12").unwrap();
+        let sz =
+            parse_total_size("[download]  12.3% of ~  70.17MiB at  2.50MiB/s ETA 00:12").unwrap();
         assert!(sz > 70_000_000);
     }
 

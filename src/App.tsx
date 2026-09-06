@@ -151,7 +151,11 @@ function App() {
   });
 
   const runBatchAction = useCallback(
-    async (targets: typeof downloads, action: 'pause' | 'resume' | 'delete', deleteFromDisk = false) => {
+    async (
+      targets: typeof downloads,
+      action: 'pause' | 'resume' | 'delete',
+      deleteFromDisk = false,
+    ) => {
       if (!targets.length) return;
       const results = await Promise.allSettled(
         targets.map((download) => {

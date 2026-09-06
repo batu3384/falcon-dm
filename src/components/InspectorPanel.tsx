@@ -218,10 +218,7 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
               <Copy size={14} /> {copied ? t('inspector.copied') : t('inspector.copy_link')}
             </button>
             {capabilities.remove && (
-              <button
-                className="btn-ghost btn-danger-text"
-                onClick={() => setConfirmRemove(true)}
-              >
+              <button className="btn-ghost btn-danger-text" onClick={() => setConfirmRemove(true)}>
                 <Trash2 size={14} /> {t('inspector.remove')}
               </button>
             )}

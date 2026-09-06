@@ -152,9 +152,7 @@ export function GeneralTab({
         {pendingPairs.length > 0 ? (
           pendingPairs.map((extensionId) => (
             <div className="input-action pair-pending-row" key={extensionId}>
-              <code className="field-hint pair-pending-id">
-                {extensionId}
-              </code>
+              <code className="field-hint pair-pending-id">{extensionId}</code>
               <button
                 type="button"
                 className="btn-primary"

@@ -3,8 +3,8 @@ use crate::log_buffer;
 use crate::settings::Settings;
 use crate::storage::models::{Download, DownloadFilter, DownloadStatus};
 use crate::util::{
-    app_data_dir, copy_file_exclusive, lock_or_recover, resolve_download_target,
-    sanitize_filename, validate_open_path, LEGACY_DEFAULT_API_TOKEN,
+    app_data_dir, copy_file_exclusive, lock_or_recover, resolve_download_target, sanitize_filename,
+    validate_open_path, LEGACY_DEFAULT_API_TOKEN,
 };
 use crate::{
     current_settings, enqueue_download, resolve_download_save_path, AppState,
@@ -112,9 +112,8 @@ pub async fn remove_download(
     if delete_file.unwrap_or(false) {
         let file_path = resolve_download_target(&dl.save_path, &dl.filename)?;
         if file_path.exists() {
-            std::fs::remove_file(&file_path).map_err(|e| {
-                format!("Could not delete file from disk: {e}")
-            })?;
+            std::fs::remove_file(&file_path)
+                .map_err(|e| format!("Could not delete file from disk: {e}"))?;
         }
     }
     if let Some(id) = dl.id {

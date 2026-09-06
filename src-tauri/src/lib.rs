@@ -25,7 +25,8 @@ use util::{
     app_data_dir, default_download_dir, full_file_path, is_googlevideo_url, is_hls_url,
     is_junk_media_url, is_youtube_host, lock_or_recover, normalize_media_url,
     resolve_download_filename, resolve_download_target, resolve_save_dir, sanitize_filename,
-    sanitize_header_value, validate_completed_file, validate_fetch_url_async, LEGACY_DEFAULT_API_TOKEN,
+    sanitize_header_value, validate_completed_file, validate_fetch_url_async,
+    LEGACY_DEFAULT_API_TOKEN,
 };
 
 use axum::http::{HeaderMap, StatusCode};
@@ -142,19 +143,13 @@ pub(crate) async fn enqueue_download(
 
     const DEFAULT_YTDLP_FORMAT: &str =
         "bestvideo[height<=1080]+bestaudio/best[height<=1080]/bv*+ba/b";
-    let watch_url =
-        util::youtube_page_url_for_download(&payload.url, payload.referrer.as_deref());
-    let base = watch_url
-        .clone()
-        .unwrap_or_else(|| normalize_media_url(&payload.url));
-    let format = payload
-        .format
-        .as_deref()
-        .or(if watch_url.is_some() {
-            Some(DEFAULT_YTDLP_FORMAT)
-        } else {
-            None
-        });
+    let watch_url = util::youtube_page_url_for_download(&payload.url, payload.referrer.as_deref());
+    let base = watch_url.clone().unwrap_or_else(|| normalize_media_url(&payload.url));
+    let format = payload.format.as_deref().or(if watch_url.is_some() {
+        Some(DEFAULT_YTDLP_FORMAT)
+    } else {
+        None
+    });
     let url = util::attach_falcon_format(&base, format);
     let force_hls = is_hls_url(&url);
     let filename = resolve_download_filename(
@@ -247,10 +242,7 @@ pub(crate) fn validate_upload_file(filename: &str, byte_len: usize) -> Result<()
         return Err("empty upload".into());
     }
     if byte_len > MAX_UPLOAD_BYTES {
-        return Err(format!(
-            "upload too large (max {} MB)",
-            MAX_UPLOAD_BYTES / 1024 / 1024
-        ));
+        return Err(format!("upload too large (max {} MB)", MAX_UPLOAD_BYTES / 1024 / 1024));
     }
     if filename.trim().is_empty() {
         return Err("invalid filename".into());

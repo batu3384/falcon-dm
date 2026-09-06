@@ -353,10 +353,7 @@ pub fn attach_falcon_format(url: &str, format: Option<&str>) -> String {
 
 /// YouTube watch IDs are exactly 11 chars; googlevideo `id=` is often an opaque stream ticket.
 fn looks_like_youtube_video_id(id: &str) -> bool {
-    id.len() == 11
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Prefer canonical watch URL for yt-dlp (CDN links 403 outside browser).
@@ -457,8 +454,8 @@ pub fn guess_extension_from_url(url: &str) -> Option<String> {
     }
     for ext in [
         "mp4", "webm", "mkv", "avi", "mov", "m4a", "mp3", "flac", "ogg", "wav", "zip", "rar", "7z",
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub", "exe", "dmg", "pkg", "iso",
-        "torrent", "png", "jpg", "jpeg", "gif", "webp", "deb", "rpm", "msi",
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub", "exe", "dmg", "pkg",
+        "iso", "torrent", "png", "jpg", "jpeg", "gif", "webp", "deb", "rpm", "msi",
     ] {
         if lower.contains(&format!(".{ext}")) {
             return Some(ext.into());
@@ -469,12 +466,7 @@ pub fn guess_extension_from_url(url: &str) -> Option<String> {
 
 /// Resolve final filename: explicit > URL > title+ext > generic.
 pub fn is_generic_download_filename(name: &str) -> bool {
-    let base = name
-        .trim()
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let base = name.trim().rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
     if base.is_empty() {
         return true;
     }
@@ -611,7 +603,8 @@ mod tests {
     fn youtube_page_url_rejects_spoof_referrer() {
         let cdn = "https://rr1---sn-abc.googlevideo.com/videoplayback?id=abc";
         assert!(youtube_page_url_for_download(cdn, Some("https://notyoutube.com/watch")).is_none());
-        assert!(youtube_page_url_for_download(cdn, Some("https://www.youtube.com/watch?v=abc")).is_some());
+        assert!(youtube_page_url_for_download(cdn, Some("https://www.youtube.com/watch?v=abc"))
+            .is_some());
     }
 
     #[test]

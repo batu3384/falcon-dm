@@ -21,7 +21,15 @@ import {
 import SpeedGraph from './SpeedGraph';
 import { ConfirmDialog } from './ConfirmDialog';
 import type { DownloadModel } from '../types';
-import { formatBytes, calculateETA, progressPercent, progressIndeterminate, progressTotalLabel, fileExtension, fileFullPath } from '../types';
+import {
+  formatBytes,
+  calculateETA,
+  progressPercent,
+  progressIndeterminate,
+  progressTotalLabel,
+  fileExtension,
+  fileFullPath,
+} from '../types';
 import { getDownloadCapabilities } from '../lib/downloadCapabilities';
 import { useToastStore } from '../store/toast';
 import * as api from '../api/commands';
