@@ -64,10 +64,13 @@ function applyStaticI18n() {
   $('tab-label').textContent = t('popupCurrentTab', 'Current tab');
   $('queue-label').textContent = t('popupQueueTitle', 'Recent downloads');
   $('queue-empty').textContent = t('popupQueueEmpty', 'No recent downloads');
-  $('fail-closed-label').textContent = t('popupFailClosed', 'Block when offline');
+  $('fail-closed-label').textContent = t(
+    'popupFailClosed',
+    'Allow browser fallback when offline',
+  );
   $('fail-closed-hint').textContent = t(
     'popupFailClosedHint',
-    'Cancel browser download if Falcon DM cannot receive it.',
+    'Off (default): Falcon owns hijacked downloads. On: if Falcon is closed, retry in Chrome.',
   );
   $('clipboard-monitor-label').textContent = t(
     'popupClipboardMonitor',
@@ -193,7 +196,8 @@ function applyStatus(resp) {
   paused = !!resp.paused;
   failClosed = !!resp.failClosed;
   pauseBtn.textContent = paused ? t('popupResume', 'Resume') : t('popupPause', 'Pause');
-  if (failClosedEl) failClosedEl.checked = failClosed;
+  // Checked = allow Chrome fallback = NOT fail-closed.
+  if (failClosedEl) failClosedEl.checked = !failClosed;
   if (clipboardMonitorEl) clipboardMonitorEl.checked = !!resp.clipboardMonitor;
   renderQueue(resp.recent || []);
 }
@@ -329,10 +333,10 @@ pauseBtn.addEventListener('click', async () => {
 if (failClosedEl) {
   failClosedEl.addEventListener('change', async () => {
     failClosedEl.disabled = true;
-    const resp = await send('set_fail_closed', { failClosed: failClosedEl.checked });
+    const resp = await send('set_fail_closed', { failClosed: !failClosedEl.checked });
     failClosedEl.disabled = false;
     if (!resp || resp.ok === false) {
-      failClosedEl.checked = failClosed;
+      failClosedEl.checked = !failClosed;
       showNotice(t('errorAppOffline', 'Failed'));
       refresh();
     }

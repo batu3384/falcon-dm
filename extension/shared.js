@@ -37,7 +37,7 @@ function fetchWithTimeout(url, options, timeoutMs, label) {
 // silently re-enabling download hijacking.
 let connectionState = 'offline'; // "connected" | "pending" | "offline"
 let interceptPaused = false; // when true, automatic hijack is off (browser downloads natively)
-let interceptFailClosed = false; // when true, Falcon offline blocks browser download instead of fail-open
+let interceptFailClosed = true; // default fail-closed: Chrome does not keep hijacked files
 const RECENT = []; // recent sends shown in the popup queue preview
 const INJECTED = new Set(); // tab ids that already have the on-demand content script
 
@@ -49,7 +49,7 @@ const INJECTED = new Set(); // tab ids that already have the on-demand content s
       falconConnectionState: 'offline',
     });
     const { falconInterceptFailClosed } = await chrome.storage.local.get({
-      falconInterceptFailClosed: false,
+      falconInterceptFailClosed: true,
     });
     interceptPaused = !!falconInterceptPaused;
     interceptFailClosed = !!falconInterceptFailClosed;

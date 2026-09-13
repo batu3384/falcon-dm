@@ -47,12 +47,12 @@ document.getElementById('hint').textContent = t(
   'If blocked: approve extension ID in Falcon DM Settings, then save token here.',
 );
 document.getElementById('fail-closed-label').textContent = t(
-  'optionsFailClosed',
-  'Block browser download when Falcon DM is offline',
+  'popupFailClosed',
+  'Allow browser fallback when offline',
 );
 document.getElementById('fail-closed-hint').textContent = t(
-  'optionsFailClosedHint',
-  'When enabled, intercepted downloads are cancelled instead of falling back.',
+  'popupFailClosedHint',
+  'Off (default): Falcon owns hijacked downloads. On: if Falcon is closed, retry in Chrome.',
 );
 document.getElementById('clipboard-monitor-label').textContent = t(
   'optionsClipboardMonitor',
@@ -94,7 +94,7 @@ function refresh() {
     setStatus(t(key, fallback), kind);
   });
   chrome.runtime.sendMessage({ action: 'get_status' }, (resp) => {
-    if (resp && failClosedEl) failClosedEl.checked = !!resp.failClosed;
+    if (resp && failClosedEl) failClosedEl.checked = !resp.failClosed;
     if (resp && clipboardMonitorEl) clipboardMonitorEl.checked = !!resp.clipboardMonitor;
   });
 }
@@ -131,7 +131,7 @@ document.getElementById('test').addEventListener('click', refresh);
 if (failClosedEl) {
   failClosedEl.addEventListener('change', () => {
     chrome.runtime.sendMessage(
-      { action: 'set_fail_closed', failClosed: failClosedEl.checked },
+      { action: 'set_fail_closed', failClosed: !failClosedEl.checked },
       (resp) => {
         if (!resp || resp.ok === false) {
           failClosedEl.checked = !failClosedEl.checked;

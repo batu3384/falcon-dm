@@ -237,7 +237,7 @@
       .fm-fab-wrap.fm-dragging { cursor: grabbing; }
       .fm-fab-wrap.fm-dragging .fm-fab:hover { transform: none; box-shadow: 0 10px 28px rgba(0,0,0,.4), 0 0 0 1px rgba(255,255,255,.1); }
       .fm-fab-dismiss {
-        width: 28px; height: 28px; padding: 0; border-radius: 999px; cursor: pointer;
+        width: 36px; height: 36px; padding: 0; border-radius: 999px; cursor: pointer;
         border: 1px solid rgba(255,255,255,.14); background: rgba(30,36,48,.92); color: #9aa3b2;
         font-size: 17px; line-height: 1; display: inline-flex; align-items: center; justify-content: center;
         flex-shrink: 0; transition: background .15s, color .15s, border-color .15s, transform .12s;

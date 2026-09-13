@@ -101,6 +101,14 @@ assert(
 );
 assert(!background.includes('blockBrowser'), 'removed falconReachable kill switch on POST errors');
 assert(background.includes('hijackInFlight'), 'onCreated dedupes against active hijack');
+assert(
+  !hijackListen.includes('hijackRecentlyHandled(item) || hijackInFlight'),
+  'same-URL retry still enqueues after prior hijack',
+);
+assert(
+  shared.includes('falconInterceptFailClosed: true'),
+  'SW restore defaults fail-closed like getInterceptFailClosed',
+);
 const hijackBlock = background.slice(
   background.indexOf('chrome.downloads.onDeterminingFilename.addListener'),
   background.indexOf('chrome.contextMenus.onClicked.addListener'),
@@ -146,6 +154,11 @@ assert(popup.includes('tabId:'), 'popup sends tabId with grab_tab_media');
 assert(!/grabBtn\.disabled = state === 'offline'/.test(popup), 'offline must not disable primary CTA clicks');
 assert(!/setAttribute\(['"]aria-disabled['"],\s*connected \? ['"]false['"] : ['"]true['"]\)/.test(popup), 'CTA must not lie aria-disabled when clickable');
 assert(popup.includes('12000'), 'popup sendMessage is bounded');
+assert(
+  popup.includes('failClosedEl.checked = !failClosed') &&
+    popup.includes("failClosed: !failClosedEl.checked"),
+  'popup checkbox is allow-fallback (inverted fail-closed)',
+);
 const grabClick = popup.slice(
   popup.indexOf('grabBtn.addEventListener'),
   popup.indexOf('dlUrlBtn.addEventListener'),

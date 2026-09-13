@@ -242,7 +242,7 @@ function scheduleCreatedBackup(item) {
   const timeoutId = setTimeout(() => {
     awaitingFilename.delete(item.id);
     if (interceptPaused) return;
-    if (hijackRecentlyHandled(item) || hijackInFlight.has(hijackKey(item))) return;
+    if (hijackInFlight.has(hijackKey(item))) return;
     markHijackStarted(item);
     stashPendingChromeFilename(item);
     abortAndEraseBrowserDownload(item.id);
@@ -439,7 +439,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   clearAwaitingFilename(item.id);
   // Chrome's real name is available HERE — stash before any cancel/erase.
   stashPendingChromeFilename(item);
-  if (hijackRecentlyHandled(item) || hijackInFlight.has(hijackKey(item))) {
+  if (hijackInFlight.has(hijackKey(item))) {
     suggest();
     abortAndEraseBrowserDownload(item.id);
     return;
@@ -456,7 +456,7 @@ chrome.downloads.onCreated.addListener((item) => {
   if (interceptPaused) return;
   if (item.byExtensionId === chrome.runtime.id) return;
   const key = hijackKey(item);
-  if (hijackInFlight.has(key) || hijackRecentlyHandled(item) || hijackWatchIds.has(item.id)) {
+  if (hijackInFlight.has(key) || hijackWatchIds.has(item.id)) {
     abortAndEraseBrowserDownload(item.id);
     return;
   }

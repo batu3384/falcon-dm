@@ -94,9 +94,9 @@
   "popupFailClosedHint": {
     "message": "Kapalı (varsayılan): indirme yalnız Falcon'da — Chrome dosyayı kaydetmez. Açık: Falcon kapalıysa Chrome'da dene."
   },
-  "optionsFailClosed": { "message": "Falcon DM çevrimdışıyken tarayıcı indirmesini engelle" },
+  "optionsFailClosed": { "message": "Çevrimdışıyken tarayıcıya düş" },
   "optionsFailClosedHint": {
-    "message": "Açıkken yakalanan indirmeler tarayıcıya düşmez, iptal edilir."
+    "message": "Kapalı (varsayılan): indirme yalnız Falcon'da — Chrome dosyayı kaydetmez. Açık: Falcon kapalıysa Chrome'da dene."
   },
   "popupOnboard": { "message": "Falcon DM'i açın ve eklentiyi Ayarlar'da onaylayın" },
   "errorPairPending": { "message": "Falcon DM Ayarlar'da bu eklentiyi onaylayın" },

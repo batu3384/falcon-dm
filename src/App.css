@@ -1342,6 +1342,7 @@ select {
 .ctx-menu button:focus-visible {
   background: var(--accent-soft);
   outline: none;
+  box-shadow: 0 0 0 2px var(--accent);
 }
 .ctx-menu button.danger {
   color: var(--danger);

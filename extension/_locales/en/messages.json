@@ -94,9 +94,9 @@
   "popupFailClosedHint": {
     "message": "Off (default): Falcon owns hijacked downloads — Chrome does not save the file. On: if Falcon is closed, retry in Chrome."
   },
-  "optionsFailClosed": { "message": "Block browser download when Falcon DM is offline" },
+  "optionsFailClosed": { "message": "Allow browser fallback when offline" },
   "optionsFailClosedHint": {
-    "message": "When enabled, intercepted downloads are cancelled instead of falling back to the browser."
+    "message": "Off (default): Falcon owns hijacked downloads — Chrome does not save the file. On: if Falcon is closed, retry in Chrome."
   },
   "popupOnboard": { "message": "Open Falcon DM and approve this extension in Settings" },
   "errorPairPending": { "message": "Approve this extension in Falcon DM Settings" },
