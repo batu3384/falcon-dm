@@ -1,22 +1,22 @@
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { DownloadModel } from '../types';
-import { formatBytes } from '../types';
+import { formatBytes, loadedCountLabel } from '../types';
 import SpeedGraph from './SpeedGraph';
 
 interface StatusBarProps {
   downloads: DownloadModel[];
   selected: DownloadModel | null;
+  hasMore?: boolean;
 }
 
-export default function StatusBar({ downloads, selected }: StatusBarProps) {
+export default function StatusBar({ downloads, selected, hasMore = false }: StatusBarProps) {
   const { t } = useTranslation();
   // ponytail: memoize the 4 filter/reduce passes that previously ran on every
   // progress tick (several times a second) regardless of whether counts changed.
-  const { activeCount, queuedCount, totalSpeed, completedCount } = useMemo(() => {
+  const { activeCount, queuedCount, totalSpeed } = useMemo(() => {
     let active = 0;
     let queued = 0;
-    let completed = 0;
     let speed = 0;
     for (const d of downloads) {
       if (d.status === 'Downloading' || d.status === 'Merging') {
@@ -24,22 +24,21 @@ export default function StatusBar({ downloads, selected }: StatusBarProps) {
         speed += d.speed || 0;
       } else if (d.status === 'Queued') {
         queued++;
-      } else if (d.status === 'Completed') {
-        completed++;
       }
     }
     return {
       activeCount: active,
       queuedCount: queued,
       totalSpeed: speed,
-      completedCount: completed,
     };
   }, [downloads]);
+  const listCount = loadedCountLabel(downloads.length, hasMore);
 
   return (
-    <footer className="status-bar no-drag">
+    <footer className="status-bar no-drag" role="contentinfo">
       <span className="sr-only" role="status" aria-live="polite">
-        {activeCount} {t('statusBar.active')}, {completedCount} {t('statusBar.total')}
+        {activeCount} {t('statusBar.active')}, {queuedCount} {t('statusBar.queued')}, {listCount}{' '}
+        {t('statusBar.total')}
       </span>
       <span>
         {t('statusBar.speed')}: <strong className="mono">{formatBytes(totalSpeed)}/s</strong>
@@ -55,7 +54,7 @@ export default function StatusBar({ downloads, selected }: StatusBarProps) {
       </span>
       <span className="status-sep" aria-hidden />
       <span>
-        {t('statusBar.total')}: <strong>{downloads.length}</strong>
+        {t('statusBar.total')}: <strong>{listCount}</strong>
       </span>
       {selected && (
         <>

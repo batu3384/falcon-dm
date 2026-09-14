@@ -40,10 +40,37 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
   const [loadError, setLoadError] = useState('');
   const [pendingPairs, setPendingPairs] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [loadNonce, setLoadNonce] = useState(0);
   const [confirmClose, setConfirmClose] = useState(false);
   const [extensionId, setExtensionId] = useState('');
   const [installingNativeHost, setInstallingNativeHost] = useState(false);
   const dirtyRef = useRef(false);
+  const SETTINGS_TABS = ['general', 'network', 'profiles'] as const;
+
+  const onTabListKeyDown = (e: React.KeyboardEvent) => {
+    if (
+      e.key !== 'ArrowRight' &&
+      e.key !== 'ArrowLeft' &&
+      e.key !== 'ArrowDown' &&
+      e.key !== 'ArrowUp' &&
+      e.key !== 'Home' &&
+      e.key !== 'End'
+    ) {
+      return;
+    }
+    e.preventDefault();
+    const i = SETTINGS_TABS.indexOf(activeTab);
+    let next = i;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % SETTINGS_TABS.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp')
+      next = (i - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length;
+    else if (e.key === 'Home') next = 0;
+    else next = SETTINGS_TABS.length - 1;
+    const id = SETTINGS_TABS[next];
+    setActiveTab(id);
+    requestAnimationFrame(() => document.getElementById(`settings-tab-${id}`)?.focus());
+  };
 
   const updateSettings = (next: SettingsModel | ((previous: SettingsModel) => SettingsModel)) => {
     dirtyRef.current = true;
@@ -63,11 +90,12 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
       .getSettings()
       .then((loaded) => {
         setLoadError('');
-        if (!dirtyRef.current) {
-          setSettingsState(loaded);
-          const suggested = loaded.allowed_extension_ids?.[0];
-          if (suggested) setExtensionId(suggested);
-        }
+        // First snapshot always wins so Save cannot persist the empty initial state.
+        setSettingsState(loaded);
+        const suggested = loaded.allowed_extension_ids?.[0];
+        if (suggested) setExtensionId(suggested);
+        dirtyRef.current = false;
+        setHydrated(true);
       })
       .catch((e) => {
         setLoadError(api.extractTauriError(e) || t('settings.load_failed'));
@@ -75,8 +103,10 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
     api
       .getPendingPairs()
       .then(setPendingPairs)
-      .catch(() => {});
-  }, [t]);
+      .catch(() => {
+        showToast('error', t('settings.pair_load_failed'));
+      });
+  }, [t, loadNonce, showToast]);
 
   useEffect(() => {
     const unlisten = onPairRequest((extensionId) => {
@@ -141,7 +171,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
 
   const handleInstallNativeHost = async () => {
     const chromeId = extensionId.trim();
-    if (chromeId.length !== 32) {
+    if (!/^[a-p]{32}$/.test(chromeId)) {
       showToast('error', t('onboarding.native_host_invalid_id'));
       return;
     }
@@ -158,7 +188,7 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
   };
 
   const handleSave = async () => {
-    if (saving || loadError) return;
+    if (saving || loadError || !hydrated) return;
     setSaveError('');
     setSaving(true);
     try {
@@ -197,42 +227,46 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
             data-modal-cancel
             aria-label={t('settings.cancel')}
           >
-            <X size={18} />
+            <X size={18} aria-hidden={true} />
           </button>
         </div>
 
-        <div className="modal-body">
-          <div className="tabs" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'general'}
-              className={`tab ${activeTab === 'general' ? 'active' : ''}`}
-              onClick={() => setActiveTab('general')}
-            >
-              {t('settings.general')}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'network'}
-              className={`tab ${activeTab === 'network' ? 'active' : ''}`}
-              onClick={() => setActiveTab('network')}
-            >
-              {t('settings.network')}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'profiles'}
-              className={`tab ${activeTab === 'profiles' ? 'active' : ''}`}
-              onClick={() => setActiveTab('profiles')}
-            >
-              {t('settings.profiles')}
-            </button>
+        <div className="modal-body" {...(!hydrated ? { inert: true } : {})}>
+          <div
+            className="tabs"
+            role="tablist"
+            aria-label={t('settings.title')}
+            onKeyDown={onTabListKeyDown}
+          >
+            {(
+              [
+                ['general', t('settings.general')],
+                ['network', t('settings.network')],
+                ['profiles', t('settings.profiles')],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                id={`settings-tab-${id}`}
+                role="tab"
+                aria-selected={activeTab === id}
+                aria-controls={`settings-panel-${id}`}
+                tabIndex={activeTab === id ? 0 : -1}
+                className={`tab ${activeTab === id ? 'active' : ''}`}
+                onClick={() => setActiveTab(id)}
+              >
+                {label}
+              </button>
+            ))}
           </div>
 
-          {activeTab === 'general' && (
+          <div
+            id="settings-panel-general"
+            role="tabpanel"
+            aria-labelledby="settings-tab-general"
+            hidden={activeTab !== 'general'}
+          >
             <GeneralTab
               settings={settings}
               setSettings={setSettings}
@@ -246,33 +280,61 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
               onInstallNativeHost={handleInstallNativeHost}
               installingNativeHost={installingNativeHost}
             />
-          )}
-          {activeTab === 'network' && (
+          </div>
+          <div
+            id="settings-panel-network"
+            role="tabpanel"
+            aria-labelledby="settings-tab-network"
+            hidden={activeTab !== 'network'}
+          >
             <NetworkTab settings={settings} handleChange={handleChange} />
-          )}
-          {activeTab === 'profiles' && (
+          </div>
+          <div
+            id="settings-panel-profiles"
+            role="tabpanel"
+            aria-labelledby="settings-tab-profiles"
+            aria-describedby="settings-profiles-hint"
+            hidden={activeTab !== 'profiles'}
+          >
             <ProfilesTab settings={settings} setSettings={setSettings} />
+          </div>
+          {saveError && (
+            <p className="field-error" role="alert">
+              {saveError}
+            </p>
           )}
+        </div>
+
+        <div className="modal-foot">
           {loadError && (
             <p className="field-error" role="alert">
               {loadError}
             </p>
           )}
-          {saveError && <p className="field-error">{saveError}</p>}
-        </div>
-
-        <div className="modal-foot">
           <button type="button" className="btn-secondary" data-modal-cancel onClick={requestClose}>
             {t('settings.cancel')}
           </button>
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={handleSave}
-            disabled={saving || Boolean(loadError)}
-          >
-            {saving ? t('settings.saving') : t('settings.save')}
-          </button>
+          {loadError ? (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => {
+                setLoadError('');
+                setLoadNonce((n) => n + 1);
+              }}
+            >
+              {t('settings.retry')}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={handleSave}
+              disabled={saving || !hydrated}
+            >
+              {saving ? t('settings.saving') : t('settings.save')}
+            </button>
+          )}
         </div>
       </div>
       {confirmClose && (

@@ -41,7 +41,10 @@ import * as api from './api/commands';
 import { applyTheme, watchSystemTheme } from './types';
 import { getDownloadCapabilities } from './lib/downloadCapabilities';
 import { libraryCountsFromStats } from './lib/libraryCounts';
-import { useClipboardMonitor, URL_RE } from './hooks/useClipboardMonitor';
+import { useClipboardMonitor } from './hooks/useClipboardMonitor';
+import { isForegroundDialogOpen } from './hooks/useModalA11y';
+import { publicHttpUrlsFromMixedText } from './lib/publicHttpUrl';
+import { speedLimitFromSettings } from './lib/speedLimit';
 
 function App() {
   const { t, i18n } = useTranslation();
@@ -79,6 +82,7 @@ function App() {
   const [savedSpeedLimit, setSavedSpeedLimit] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [schedulerOpen, setSchedulerOpen] = useState(false);
+  const [schedulerActive, setSchedulerActive] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
@@ -137,14 +141,23 @@ function App() {
   // ponytail: refetch with the right archived flag when the sidebar category
   // switches to/from "Archived" (archived rows are excluded by default).
   useEffect(() => {
-    fetchDownloads(activeCategory === 'Archived');
+    fetchDownloads(activeCategory === 'Archived', undefined, activeCategory);
     api
       .getStats()
       .then((stats) => setLibraryCounts(libraryCountsFromStats(stats)))
       .catch(() => {});
   }, [activeCategory, fetchDownloads]);
 
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      if (useDownloadsStore.getState().search === searchQuery) return;
+      void fetchDownloads(undefined, searchQuery);
+    }, 280);
+    return () => window.clearTimeout(handle);
+  }, [searchQuery, fetchDownloads]);
+
   useClipboardMonitor(clipboardMonitor, (text) => {
+    if (isForegroundDialogOpen()) return false;
     setPrefilledUrl(text);
     setIsModalOpen(true);
     showToast('info', t('app.clipboard_url'));
@@ -228,18 +241,29 @@ function App() {
     [downloads, selectedIds, runBatchAction, clearSelection],
   );
 
-  // Read settings on mount for speed limit state
+  // Settings save writes disk; refetch when the modal closes so Gauge matches.
   useEffect(() => {
+    if (settingsOpen) return;
     api
       .getSettings()
       .then((s) => {
-        setSpeedLimited((s.speed_limit_kbps ?? 0) > 0);
-        setSavedSpeedLimit(s.speed_limit_kbps ?? 0);
+        const kbps = s.speed_limit_kbps;
+        setSpeedLimited(speedLimitFromSettings(kbps, 0).limited);
+        setSavedSpeedLimit((previous) => speedLimitFromSettings(kbps, previous).saved);
       })
       .catch(() => {
         setSpeedLimited(false);
       });
-  }, []);
+  }, [settingsOpen]);
+
+  // Scheduler save writes disk; refetch when the modal closes so Clock matches.
+  useEffect(() => {
+    if (schedulerOpen) return;
+    api
+      .getSchedule()
+      .then((s) => setSchedulerActive(Boolean(s.active)))
+      .catch(() => setSchedulerActive(false));
+  }, [schedulerOpen]);
 
   const toggleSpeedLimit = useCallback(async () => {
     try {
@@ -265,7 +289,11 @@ function App() {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
-        setPaletteOpen((v) => !v);
+        setPaletteOpen((open) => {
+          if (open) return false;
+          if (isForegroundDialogOpen({ ignorePalette: true })) return false;
+          return true;
+        });
       }
     };
     window.addEventListener('keydown', handler);
@@ -273,15 +301,22 @@ function App() {
   }, []);
 
   // Drag-and-drop URL zone
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setDragging(false);
-    const text = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text/uri-list');
-    if (text && URL_RE.test(text.trim())) {
-      setPrefilledUrl(text.trim());
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragging(false);
+      if (isForegroundDialogOpen()) return;
+      const text = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+      const urls = publicHttpUrlsFromMixedText(text);
+      if (!urls.length) {
+        if (text.trim()) showToast('error', t('newDownloadModal.url_invalid'));
+        return;
+      }
+      setPrefilledUrl(urls.join('\n'));
       setIsModalOpen(true);
-    }
-  }, []);
+    },
+    [showToast, t],
+  );
 
   const paletteActions = useMemo<PaletteAction[]>(
     () => [
@@ -399,10 +434,7 @@ function App() {
           <Toolbar
             onAddClick={() => setIsModalOpen(true)}
             searchQuery={searchQuery}
-            onSearchChange={(value) => {
-              setSearchQuery(value);
-              void fetchDownloads(undefined, value);
-            }}
+            onSearchChange={setSearchQuery}
             onPauseAll={handlePauseAll}
             onResumeAll={handleResumeAll}
             canPauseAll={(libraryCounts.pausable ?? 0) > 0}
@@ -415,6 +447,7 @@ function App() {
             onOpenStats={() => setStatsOpen(true)}
             speedLimited={speedLimited}
             onToggleSpeedLimit={toggleSpeedLimit}
+            schedulerActive={schedulerActive}
           />
 
           {selectedIds.size > 1 && (
@@ -451,7 +484,7 @@ function App() {
                 onClick={clearSelection}
                 aria-label={t('app.clear_selection')}
               >
-                <X size={15} />
+                <X size={15} aria-hidden={true} />
               </button>
             </div>
           )}
@@ -471,6 +504,8 @@ function App() {
                   loading={loading}
                   error={error}
                   batchSelectedIds={selectedIds}
+                  hasMore={hasMore}
+                  onLoadMore={() => void loadMoreDownloads()}
                 />
               </ErrorBoundary>
 
@@ -497,7 +532,7 @@ function App() {
               </ErrorBoundary>
             )}
           </div>
-          <StatusBar downloads={downloads} selected={selectedDownload} />
+          <StatusBar downloads={downloads} selected={selectedDownload} hasMore={hasMore} />
         </main>
       </div>
 
@@ -522,11 +557,11 @@ function App() {
               role={tt.kind === 'error' ? 'alert' : 'status'}
             >
               {tt.kind === 'success' ? (
-                <CheckCircle2 />
+                <CheckCircle2 aria-hidden={true} />
               ) : tt.kind === 'error' ? (
-                <AlertCircle />
+                <AlertCircle aria-hidden={true} />
               ) : (
-                <Info />
+                <Info aria-hidden={true} />
               )}
               <span>{tt.msg}</span>
               <button
@@ -535,7 +570,7 @@ function App() {
                 aria-label={t('app.dismiss')}
                 onClick={() => dismissToast(tt.id)}
               >
-                <X size={14} />
+                <X size={14} aria-hidden={true} />
               </button>
             </div>
           ))}
@@ -543,9 +578,9 @@ function App() {
       )}
 
       {dragging && (
-        <div className="drop-overlay">
+        <div className="drop-overlay" role="status" aria-live="assertive">
           <div className="drop-hint">
-            <DownloadCloud />
+            <DownloadCloud aria-hidden={true} />
             <span>{t('app.drop_url')}</span>
           </div>
         </div>

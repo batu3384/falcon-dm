@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type { SettingsModel } from '../../types';
 import * as api from '../../api/commands';
+import { isFalconGithubReleaseUrl } from '../../lib/publicHttpUrl';
 import { useToastStore } from '../../store/toast';
 
 type Props = {
@@ -40,9 +41,11 @@ export function GeneralTab({
     setCheckingUpdate(true);
     try {
       const result = await api.checkForUpdates();
-      if (result.update_available && result.release_url) {
+      if (result.update_available && result.release_url && isFalconGithubReleaseUrl(result.release_url)) {
         showToast('info', t('settings.update_available', { version: result.latest_version || '' }));
         await openUrl(result.release_url);
+      } else if (result.update_available) {
+        showToast('info', t('settings.update_available', { version: result.latest_version || '' }));
       } else {
         showToast('success', t('settings.update_current', { version: result.current_version }));
       }
@@ -99,8 +102,11 @@ export function GeneralTab({
           value={settings.ytdlp_path || ''}
           onChange={(e) => handleChange('ytdlp_path', e.target.value)}
           placeholder="/opt/homebrew/bin/yt-dlp"
+          aria-describedby="set-ytdlp-hint"
         />
-        <p className="field-hint">{t('settings.ytdlp_path_hint')}</p>
+        <p id="set-ytdlp-hint" className="field-hint">
+          {t('settings.ytdlp_path_hint')}
+        </p>
       </div>
       <div className="field check-row">
         <input
@@ -110,9 +116,12 @@ export function GeneralTab({
           onChange={(e) =>
             setSettings((prev) => ({ ...prev, ytdlp_use_browser_cookies: e.target.checked }))
           }
+          aria-describedby="set-ytdlp-cookies-hint"
         />
         <label htmlFor="set-ytdlp-cookies">{t('settings.ytdlp_use_browser_cookies')}</label>
-        <p className="field-hint">{t('settings.ytdlp_use_browser_cookies_hint')}</p>
+        <p id="set-ytdlp-cookies-hint" className="field-hint">
+          {t('settings.ytdlp_use_browser_cookies_hint')}
+        </p>
       </div>
       <div className="field">
         <button
@@ -136,8 +145,11 @@ export function GeneralTab({
           placeholder={t('settings.api_token_keep')}
           value={settings.api_token || ''}
           onChange={(e) => handleChange('api_token', e.target.value)}
+          aria-describedby="set-token-hint"
         />
-        <p className="field-hint">{t('settings.api_token_keep')}</p>
+        <p id="set-token-hint" className="field-hint">
+          {t('settings.api_token_keep')}
+        </p>
         <button
           type="button"
           className="btn-secondary"
@@ -146,9 +158,13 @@ export function GeneralTab({
           {t('settings.api_token_rotate')}
         </button>
       </div>
-      <div className="field">
-        <label className="field-label">{t('settings.extension')}</label>
-        <p className="field-hint">{t('settings.extension_hint')}</p>
+      <div className="field" role="group" aria-labelledby="set-extension-label" aria-describedby="set-extension-hint">
+        <label className="field-label" id="set-extension-label">
+          {t('settings.extension')}
+        </label>
+        <p className="field-hint" id="set-extension-hint">
+          {t('settings.extension_hint')}
+        </p>
         {pendingPairs.length > 0 ? (
           pendingPairs.map((extensionId) => (
             <div className="input-action pair-pending-row" key={extensionId}>
@@ -181,6 +197,7 @@ export function GeneralTab({
               onChange={(e) => onExtensionIdChange(e.target.value)}
               placeholder="abcdefghijklmnopqrstuvwxyzabcdef"
               maxLength={32}
+              aria-describedby="set-extension-id-hint"
             />
             <button
               type="button"
@@ -201,7 +218,9 @@ export function GeneralTab({
               {t('settings.pair_approve_manual')}
             </button>
           </div>
-          <p className="field-hint">{t('onboarding.native_host_hint')}</p>
+          <p id="set-extension-id-hint" className="field-hint">
+            {t('onboarding.native_host_hint')}
+          </p>
         </div>
       </div>
       <section className="settings-format-card" aria-labelledby="format-support-title">

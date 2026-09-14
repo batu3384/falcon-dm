@@ -1,22 +1,30 @@
 import { useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertCircle, AlertTriangle, Inbox, SearchX } from 'lucide-react';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { useVirtualizer, defaultRangeExtractor } from '@tanstack/react-virtual';
 import DownloadItem from './DownloadItem';
+import { downloadMatchesView } from '../lib/downloadView';
 import type { DownloadModel } from '../types';
+import { loadedCountLabel } from '../types';
 
 interface DownloadListProps {
   downloads: DownloadModel[];
   category: string;
   searchQuery: string;
   selectedId: number | null;
-  onSelectDownload: (d: DownloadModel | null, mods?: { meta?: boolean; shift?: boolean }) => void;
+  onSelectDownload: (
+    d: DownloadModel | null,
+    mods?: { meta?: boolean; shift?: boolean },
+    visibleIds?: number[],
+  ) => void;
   onRefresh: () => void;
   onRetry?: () => void;
   onAddClick?: () => void;
   loading?: boolean;
   error?: string | null;
   batchSelectedIds?: Set<number>;
+  hasMore?: boolean;
+  onLoadMore?: () => void;
 }
 
 // ponytail: item height is fixed by the .dl-item layout. Used as the virtualizer
@@ -35,6 +43,8 @@ export default function DownloadList({
   loading = false,
   error = null,
   batchSelectedIds,
+  hasMore = false,
+  onLoadMore,
 }: DownloadListProps) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -44,29 +54,30 @@ export default function DownloadList({
     return downloads.filter((d) => {
       if (q && !d.filename.toLowerCase().includes(q) && !d.url.toLowerCase().includes(q))
         return false;
-      if (category === 'All Downloads') return true;
-      if (category === 'Downloading') return d.status === 'Downloading' || d.status === 'Merging';
-      if (category === 'Completed') return d.status === 'Completed';
-      if (category === 'Paused') return d.status === 'Paused' || d.status === 'Queued';
-      if (category === 'Failed') return d.status === 'Failed';
-      if (category === 'Archived') return true; // archived rows fetched separately
-      if (category === 'Video') return d.category === 'Video';
-      if (category === 'Music') return d.category === 'Music';
-      if (category === 'Documents') return d.category === 'Document';
-      if (category === 'Compressed') return d.category === 'Archive';
-      if (category === 'Programs') return d.category === 'Program';
-      return true;
+      return downloadMatchesView(d, category, category === 'Archived');
     });
   }, [downloads, category, searchQuery]);
 
   // ponytail: virtualize the list. Previously all 500 items rendered as DOM
   // nodes; with progress ticks firing several times a second this caused severe
   // jank. The virtualizer renders only the visible window (~10–15 items).
+  const selectedIndex = filtered.findIndex((d) => d.id === selectedId);
   const virtualizer = useVirtualizer({
     count: filtered.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ITEM_HEIGHT,
     overscan: 8,
+    rangeExtractor: (range) => {
+      const indexes = defaultRangeExtractor(range);
+      if (
+        selectedIndex >= 0 &&
+        selectedIndex < range.count &&
+        !indexes.includes(selectedIndex)
+      ) {
+        return [...indexes, selectedIndex].sort((a, b) => a - b);
+      }
+      return indexes;
+    },
   });
 
   const titleMap: Record<string, string> = {
@@ -83,32 +94,73 @@ export default function DownloadList({
     Programs: t('sidebar.programs'),
   };
 
-  const activeCount = downloads.filter((d) => d.status === 'Downloading').length;
+  const listInteractive = !loading && filtered.length > 0;
+  const visibleIds = useMemo(() => filtered.map((d) => d.id), [filtered]);
+  const activeCount = filtered.filter(
+    (d) => d.status === 'Downloading' || d.status === 'Merging',
+  ).length;
   const totalHeight = virtualizer.getTotalSize();
   const items = virtualizer.getVirtualItems();
+
+  const onListKeyDown = (e: React.KeyboardEvent) => {
+    if (!listInteractive) return;
+    const fromField = (e.target as HTMLElement | null)?.closest('button, input, textarea, select');
+    if (fromField && fromField !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      // Row handler toggles select; bubbling would re-select immediately.
+      if ((e.target as HTMLElement | null)?.closest('[role="listitem"]')) return;
+      e.preventDefault();
+      const item = selectedIndex >= 0 ? filtered[selectedIndex] : filtered[0];
+      if (item) onSelectDownload(item);
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') {
+      return;
+    }
+    e.preventDefault();
+    const last = filtered.length - 1;
+    let next = selectedIndex < 0 ? 0 : selectedIndex;
+    if (e.key === 'ArrowDown') {
+      if (next >= last && hasMore) onLoadMore?.();
+      next = Math.min(next + 1, last);
+    } else if (e.key === 'ArrowUp') next = Math.max(next - 1, 0);
+    else if (e.key === 'Home') next = 0;
+    else next = last;
+    const item = filtered[next];
+    if (!item) return;
+    onSelectDownload(item);
+    virtualizer.scrollToIndex(next);
+  };
 
   return (
     <div className="download-view">
       <div className="view-head">
         <h2 className="view-title">{titleMap[category] || category}</h2>
-        <span className="view-count">{filtered.length}</span>
+        <span className="view-count">{loadedCountLabel(filtered.length, hasMore)}</span>
         {activeCount > 0 && (
-          <span className="live-pill">
+          <span className="live-pill" aria-live="polite">
             <span className="pulse-dot" />
             {activeCount} {t('sidebar.active').toLowerCase()}
           </span>
         )}
       </div>
 
-      <div className="dl-list" role="list" ref={scrollRef}>
-        {error && downloads.length > 0 && (
-          <div className="diagnostic-error" role="alert">
-            <span title={error}>{t('downloadList.load_error_desc')}</span>
-            <button type="button" className="btn-secondary" onClick={onRetry ?? onRefresh}>
-              {t('downloadList.retry')}
-            </button>
-          </div>
-        )}
+      {error && downloads.length > 0 && (
+        <div className="diagnostic-error" role="alert">
+          <span title={error}>{t('downloadList.load_error_desc')}</span>
+          <button type="button" className="btn-secondary" onClick={onRetry ?? onRefresh}>
+            {t('downloadList.retry')}
+          </button>
+        </div>
+      )}
+      <div
+        className="dl-list"
+        role={listInteractive ? 'list' : undefined}
+        aria-label={titleMap[category] || category}
+        tabIndex={listInteractive ? 0 : undefined}
+        onKeyDown={onListKeyDown}
+        ref={scrollRef}
+      >
         {loading ? (
           // ponytail: shimmer skeletons mirror the real .dl-item geometry so the
           // first paint reads as "loading" instead of a frozen spinner, and the
@@ -171,13 +223,16 @@ export default function DownloadList({
             )}
           </div>
         ) : (
-          <div className="dl-virtual-spacer" style={{ height: totalHeight }}>
+          <div className="dl-virtual-spacer" style={{ height: totalHeight }} role="presentation">
             {items.map((virtualItem) => {
               const dl = filtered[virtualItem.index];
               if (!dl) return null;
               return (
                 <div
                   key={dl.id}
+                  id={`dl-row-${dl.id}`}
+                  role="listitem"
+                  aria-current={selectedId === dl.id ? 'true' : undefined}
                   className="dl-virtual-row"
                   data-index={virtualItem.index}
                   ref={virtualizer.measureElement}
@@ -187,7 +242,7 @@ export default function DownloadList({
                     item={dl}
                     isSelected={selectedId === dl.id}
                     isBatchSelected={batchSelectedIds?.has(dl.id) ?? false}
-                    onSelect={onSelectDownload}
+                    onSelect={(item, mods) => onSelectDownload(item, mods, visibleIds)}
                     onRefresh={onRefresh}
                   />
                 </div>

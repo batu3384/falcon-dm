@@ -60,9 +60,9 @@ export default function Sidebar({ activeCategory, onSelectCategory, counts = {} 
                 type="button"
                 className={`nav-item ${activeCategory === cat.id ? 'active' : ''}`}
                 onClick={() => onSelectCategory(cat.id)}
-                aria-current={activeCategory === cat.id ? 'page' : undefined}
+                aria-current={activeCategory === cat.id ? true : undefined}
               >
-                <Icon size={16} strokeWidth={1.75} />
+                <Icon size={16} strokeWidth={1.75} aria-hidden={true} />
                 <span className="nav-text">{cat.label}</span>
                 {counts[cat.id] !== undefined && counts[cat.id] > 0 && (
                   <span className="nav-badge">{counts[cat.id]}</span>
@@ -82,9 +82,9 @@ export default function Sidebar({ activeCategory, onSelectCategory, counts = {} 
                 type="button"
                 className={`nav-item ${activeCategory === cat.id ? 'active' : ''}`}
                 onClick={() => onSelectCategory(cat.id)}
-                aria-current={activeCategory === cat.id ? 'page' : undefined}
+                aria-current={activeCategory === cat.id ? true : undefined}
               >
-                <Icon size={16} strokeWidth={1.75} />
+                <Icon size={16} strokeWidth={1.75} aria-hidden={true} />
                 <span className="nav-text">{cat.label}</span>
                 {counts[cat.id] !== undefined && counts[cat.id] > 0 && (
                   <span className="nav-badge">{counts[cat.id]}</span>
@@ -105,6 +105,7 @@ export default function Sidebar({ activeCategory, onSelectCategory, counts = {} 
           <div
             className="storage-bar"
             role="progressbar"
+            aria-label={t('sidebar.completion_progress')}
             aria-valuenow={pct}
             aria-valuemin={0}
             aria-valuemax={100}

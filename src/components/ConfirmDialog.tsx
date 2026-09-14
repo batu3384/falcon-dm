@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useModalA11y } from '../hooks/useModalA11y';
@@ -24,6 +24,8 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
   const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const hintId = useId();
   const [deleteFromDisk, setDeleteFromDisk] = useState(false);
   useModalA11y(panelRef, onCancel);
 
@@ -42,10 +44,11 @@ export function ConfirmDialog({
         onClick={(e) => e.stopPropagation()}
         role="alertdialog"
         aria-modal="true"
-        aria-describedby="confirm-msg"
+        aria-labelledby={titleId}
+        aria-describedby={deleteFileOption ? hintId : undefined}
       >
         <div className="modal-body">
-          <p id="confirm-msg" className="confirm-msg">
+          <p id={titleId} className="confirm-msg">
             {message}
           </p>
           {deleteFileOption && (
@@ -57,7 +60,9 @@ export function ConfirmDialog({
               />
               <span>
                 <span>{t('confirm.delete_from_disk')}</span>
-                <span className="field-hint">{t('confirm.delete_from_disk_hint')}</span>
+                <span id={hintId} className="field-hint">
+                  {t('confirm.delete_from_disk_hint')}
+                </span>
               </span>
             </label>
           )}

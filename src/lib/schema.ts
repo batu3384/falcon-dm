@@ -53,6 +53,7 @@ export const ProgressPayloadSchema = z.object({
   speed: z.number(),
   status: DownloadStatusEnum,
   connections: z.number(),
+  error_message: z.string().nullable().optional(),
 });
 
 export const DownloadProfileSchema = z.object({

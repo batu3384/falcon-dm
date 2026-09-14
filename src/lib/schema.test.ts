@@ -88,6 +88,17 @@ describe('ProgressPayloadSchema', () => {
       connections: 8,
     });
     expect(parsed.status).toBe('Downloading');
+    expect(
+      ProgressPayloadSchema.parse({
+        id: 1,
+        downloaded_size: 100,
+        total_size: 200,
+        speed: 0,
+        status: 'Failed',
+        connections: 0,
+        error_message: 'HTTP 403',
+      }).error_message,
+    ).toBe('HTTP 403');
   });
   it('rejects an invalid status', () => {
     expect(() =>

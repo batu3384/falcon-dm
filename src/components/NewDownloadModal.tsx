@@ -3,25 +3,13 @@ import { downloadDir } from '@tauri-apps/api/path';
 import { useTranslation } from 'react-i18next';
 import { X, ChevronRight, Loader2, UploadCloud } from 'lucide-react';
 import { useModalA11y } from '../hooks/useModalA11y';
+import { ConfirmDialog } from './ConfirmDialog';
 import { useToastStore } from '../store/toast';
 import * as api from '../api/commands';
+import { isPublicHttpUrl, publicHttpUrlsFromMixedText, enqueueCookieUrl } from '../lib/publicHttpUrl';
 
-// ponytail: parse a dropped .txt/.csv file into a list of http(s) URLs. Handles
-// comma/newline/whitespace separated lists and tolerates leading/trailing junk.
 function parseUrlsFromText(text: string): string[] {
-  return text
-    .split(/[\n\r,;\s]+/)
-    .map((s) => s.trim())
-    .filter((s) => /^https?:\/\//i.test(s));
-}
-
-function isHttpUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !!parsed.hostname;
-  } catch {
-    return false;
-  }
+  return publicHttpUrlsFromMixedText(text);
 }
 
 interface NewDownloadModalProps {
@@ -48,10 +36,20 @@ export default function NewDownloadModal({
   const [userAgent, setUserAgent] = useState('');
   const [cookies, setCookies] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [batchMode, setBatchMode] = useState(false);
+  const [batchMode, setBatchMode] = useState(
+    () => (initialUrl || '').split(/[\n\r]+/).filter(Boolean).length > 1,
+  );
   const [dragActive, setDragActive] = useState(false);
+  const [urlError, setUrlError] = useState('');
+  const dirtyRef = useRef(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const markDirty = () => {
+    dirtyRef.current = true;
+  };
   const requestClose = useCallback(() => {
-    if (!submitting) onClose();
+    if (submitting) return;
+    if (dirtyRef.current) setConfirmClose(true);
+    else onClose();
   }, [onClose, submitting]);
   useModalA11y(panelRef, requestClose);
 
@@ -74,6 +72,7 @@ export default function NewDownloadModal({
       }
       setBatchMode(true);
       setUrl(urls.join('\n'));
+      dirtyRef.current = true;
       showToast('success', t('newDownloadModal.imported_count', { count: urls.length }));
     } catch {
       showToast('error', t('newDownloadModal.import_failed'));
@@ -100,8 +99,13 @@ export default function NewDownloadModal({
   useEffect(() => {
     if (!filename && url && !batchMode) {
       const first = url.trim().split(/\s+/).filter(Boolean)[0] || '';
-      const guess = first.split('/').pop()?.split('?')[0] || 'download.bin';
-      if (guess.includes('.')) setFilename(guess);
+      try {
+        const path = new URL(first).pathname.split('/').pop() || '';
+        const guess = decodeURIComponent(path).split('?')[0];
+        if (guess.includes('.')) setFilename(guess.slice(0, 200));
+      } catch {
+        /* ignore malformed URL while typing */
+      }
     }
   }, [url, filename, batchMode]);
 
@@ -109,39 +113,63 @@ export default function NewDownloadModal({
     e.preventDefault();
     if (!url.trim() || submitting) return;
     setSubmitting(true);
+    setUrlError('');
     try {
       const urls = batchMode
-        ? url
-            .split(/[\n\s]+/)
-            .map((u) => u.trim())
-            .filter(Boolean)
-        : [url.trim()];
+        ? parseUrlsFromText(url)
+        : isPublicHttpUrl(url.trim())
+          ? [url.trim()]
+          : [];
 
-      if (urls.length === 0 || urls.some((candidate) => !isHttpUrl(candidate))) {
-        showToast(
-          'error',
-          `${t('newDownloadModal.add_failed')}: ${t('newDownloadModal.url_invalid')}`,
-        );
+      if (urls.length === 0) {
+        const detail = t('newDownloadModal.url_invalid');
+        setUrlError(detail);
+        showToast('error', `${t('newDownloadModal.add_failed')}: ${detail}`);
         return;
       }
 
-      for (const u of urls) {
-        const name =
-          (!batchMode && filename.trim()) || u.split('/').pop()?.split('?')[0] || 'download.bin';
-        await api.addDownload({
-          url: u,
-          filename: name,
-          savePath: savePath || '~/Downloads',
-          referrer: referrer || undefined,
-          userAgent: userAgent || undefined,
-          cookies: cookies || undefined,
-          cookieUrl: cookies ? u : undefined,
-        });
+      const cookieUrl = enqueueCookieUrl(cookies, referrer, urls);
+      const results = await Promise.allSettled(
+        urls.map((u) => {
+          const name =
+            (!batchMode && filename.trim()) || u.split('/').pop()?.split('?')[0] || 'download.bin';
+          return api.addDownload({
+            url: u,
+            filename: name,
+            savePath: savePath || '~/Downloads',
+            referrer: referrer || undefined,
+            userAgent: userAgent || undefined,
+            cookies: cookies || undefined,
+            cookieUrl,
+          });
+        }),
+      );
+      const succeeded = results.filter((result) => result.status === 'fulfilled');
+      const failures = results.flatMap((result, index) =>
+        result.status === 'rejected'
+          ? [
+              `${urls[index]} (${api.localizeDownloadError(api.extractTauriError(result.reason), t)})`,
+            ]
+          : [],
+      );
+      if (succeeded.length) {
+        onAdded();
+        onSuccess?.();
       }
-      showToast('success', t('newDownloadModal.added_success'));
-      onAdded();
-      onSuccess?.();
-      onClose();
+      if (failures.length === 0) {
+        showToast('success', t('newDownloadModal.added_success'));
+        onClose();
+        return;
+      }
+      showToast(
+        succeeded.length ? 'info' : 'error',
+        t('app.batch_result', {
+          success: succeeded.length,
+          failed: failures.length,
+          names: `: ${failures.join(', ')}`,
+        }),
+      );
+      if (succeeded.length) onClose();
     } catch (err) {
       // ponytail: centralized error extraction replaces the hand-rolled typeof/object check.
       const detail = api.localizeDownloadError(api.extractTauriError(err), t);
@@ -174,7 +202,7 @@ export default function NewDownloadModal({
             data-modal-cancel
             aria-label={t('newDownloadModal.cancel')}
           >
-            <X size={18} />
+            <X size={18} aria-hidden={true} />
           </button>
         </div>
 
@@ -208,14 +236,8 @@ export default function NewDownloadModal({
                   setDragActive(false);
                   handleFileDrop(e.dataTransfer.files);
                 }}
-                role="button"
-                tabIndex={0}
-                aria-label={t('newDownloadModal.import_drop_hint')}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') document.getElementById('import-file-input')?.click();
-                }}
               >
-                <UploadCloud size={20} />
+                <UploadCloud size={20} aria-hidden={true} />
                 <span>{t('newDownloadModal.import_drop_hint')}</span>
                 <label className="import-browse">
                   {t('newDownloadModal.import_browse')}
@@ -236,20 +258,40 @@ export default function NewDownloadModal({
                 rows={5}
                 placeholder={t('newDownloadModal.batch_placeholder')}
                 value={url}
-                onChange={(e) => setUrl(e.target.value)}
+                onChange={(e) => {
+                  setUrl(e.target.value);
+                  markDirty();
+                  if (urlError) setUrlError('');
+                }}
                 autoFocus
+                data-modal-initial-focus
+                aria-invalid={urlError ? true : undefined}
+                aria-describedby={urlError ? 'dl-url-error' : undefined}
               />
             ) : (
               <input
                 id="dl-url"
                 className="field-input"
                 type="text"
+                inputMode="url"
                 placeholder={t('newDownloadModal.url_placeholder')}
                 value={url}
-                onChange={(e) => setUrl(e.target.value)}
+                onChange={(e) => {
+                  setUrl(e.target.value);
+                  markDirty();
+                  if (urlError) setUrlError('');
+                }}
                 autoFocus
+                data-modal-initial-focus
+                aria-invalid={urlError ? true : undefined}
+                aria-describedby={urlError ? 'dl-url-error' : undefined}
               />
             )}
+            {urlError ? (
+              <p id="dl-url-error" className="field-error" role="alert">
+                {urlError}
+              </p>
+            ) : null}
           </div>
 
           {!batchMode && (
@@ -263,7 +305,10 @@ export default function NewDownloadModal({
                 type="text"
                 placeholder={t('newDownloadModal.filename_placeholder')}
                 value={filename}
-                onChange={(e) => setFilename(e.target.value)}
+                onChange={(e) => {
+                  markDirty();
+                  setFilename(e.target.value);
+                }}
               />
             </div>
           )}
@@ -277,7 +322,10 @@ export default function NewDownloadModal({
               className="field-input"
               type="text"
               value={savePath}
-              onChange={(e) => setSavePath(e.target.value)}
+              onChange={(e) => {
+                markDirty();
+                setSavePath(e.target.value);
+              }}
             />
           </div>
 
@@ -285,13 +333,15 @@ export default function NewDownloadModal({
             type="button"
             className={`adv-toggle ${showAdvanced ? 'open' : ''}`}
             onClick={() => setShowAdvanced(!showAdvanced)}
+            aria-expanded={showAdvanced}
+            aria-controls="dl-adv"
           >
-            <ChevronRight size={14} />
+            <ChevronRight size={14} aria-hidden={true} />
             {t('newDownloadModal.advanced_options')}
           </button>
 
           {showAdvanced && (
-            <div className="adv-fields">
+            <div className="adv-fields" id="dl-adv">
               <div className="field">
                 <label className="field-label" htmlFor="dl-ref">
                   {t('newDownloadModal.referrer')}
@@ -301,7 +351,10 @@ export default function NewDownloadModal({
                   className="field-input"
                   type="text"
                   value={referrer}
-                  onChange={(e) => setReferrer(e.target.value)}
+                  onChange={(e) => {
+                    markDirty();
+                    setReferrer(e.target.value);
+                  }}
                 />
               </div>
               <div className="field">
@@ -313,7 +366,10 @@ export default function NewDownloadModal({
                   className="field-input"
                   type="text"
                   value={userAgent}
-                  onChange={(e) => setUserAgent(e.target.value)}
+                  onChange={(e) => {
+                    markDirty();
+                    setUserAgent(e.target.value);
+                  }}
                 />
               </div>
               <div className="field">
@@ -323,9 +379,13 @@ export default function NewDownloadModal({
                 <input
                   id="dl-cookies"
                   className="field-input"
-                  type="text"
+                  type="password"
+                  autoComplete="off"
                   value={cookies}
-                  onChange={(e) => setCookies(e.target.value)}
+                  onChange={(e) => {
+                    markDirty();
+                    setCookies(e.target.value);
+                  }}
                 />
               </div>
             </div>
@@ -337,11 +397,24 @@ export default function NewDownloadModal({
             {t('newDownloadModal.cancel')}
           </button>
           <button type="submit" className="btn-primary" disabled={submitting || !url.trim()}>
-            {submitting ? <Loader2 size={15} className="spin" /> : null}
+            {submitting ? <Loader2 size={15} className="spin" aria-hidden={true} /> : null}
             {submitting ? t('newDownloadModal.adding') : t('newDownloadModal.start_download')}
           </button>
         </div>
       </form>
+      {confirmClose && (
+        <ConfirmDialog
+          message={t('newDownloadModal.confirm_close')}
+          confirmLabel={t('settings.discard')}
+          cancelLabel={t('settings.continue_editing')}
+          onConfirm={() => {
+            dirtyRef.current = false;
+            setConfirmClose(false);
+            onClose();
+          }}
+          onCancel={() => setConfirmClose(false)}
+        />
+      )}
     </div>
   );
 }

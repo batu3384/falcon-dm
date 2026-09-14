@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import i18n from '../i18n';
 
 // ponytail: top-level error boundary. Previously any render-time throw (a
 // malformed backend payload producing `undefined.field`, a bad Date parse,
@@ -38,10 +39,10 @@ export class ErrorBoundary extends Component<Props, State> {
       }
       return (
         <div className="err-boundary" role="alert">
-          <strong>Something went wrong.</strong>
+          <strong>{i18n.t('app.error_boundary')}</strong>
           <span className="err-detail">{this.state.error.message}</span>
           <button type="button" className="btn-primary" onClick={this.reset}>
-            Try again
+            {i18n.t('app.try_again')}
           </button>
         </div>
       );

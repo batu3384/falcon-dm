@@ -14,8 +14,10 @@ export {
   progressPercent,
   progressIndeterminate,
   progressTotalLabel,
+  loadedCountLabel,
   fileExtension,
   fileFullPath,
+  formatLocaleDate,
 } from './lib/format';
 
 export { applyTheme, watchSystemTheme } from './lib/theme';

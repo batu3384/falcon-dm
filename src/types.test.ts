@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatBytes, calculateETA, progressPercent, fileExtension, fileFullPath } from './types';
+import { formatBytes, calculateETA, progressPercent, progressIndeterminate, loadedCountLabel, fileExtension, fileFullPath, formatLocaleDate } from './types';
 
 // ponytail: pure formatting helpers are the easiest high-value tests — they're
 // used everywhere and a regression (e.g. NaN bytes, off-by-one percent) would
@@ -47,6 +47,39 @@ describe('calculateETA', () => {
   });
 });
 
+describe('progressIndeterminate', () => {
+  it('is true only while live bytes exist without a known total', () => {
+    expect(
+      progressIndeterminate({
+        total_size: 0,
+        downloaded_size: 50,
+        status: 'Downloading',
+      }),
+    ).toBe(true);
+    expect(
+      progressIndeterminate({
+        total_size: 0,
+        downloaded_size: 50,
+        status: 'Merging',
+      }),
+    ).toBe(true);
+    expect(
+      progressIndeterminate({
+        total_size: 100,
+        downloaded_size: 50,
+        status: 'Downloading',
+      }),
+    ).toBe(false);
+    expect(
+      progressIndeterminate({
+        total_size: 0,
+        downloaded_size: 50,
+        status: 'Paused',
+      }),
+    ).toBe(false);
+  });
+});
+
 describe('progressPercent', () => {
   it('returns 0 for zero total', () => {
     expect(progressPercent({ total_size: 0, downloaded_size: 50 })).toBe(0);
@@ -56,6 +89,13 @@ describe('progressPercent', () => {
   });
   it('caps at 100', () => {
     expect(progressPercent({ total_size: 100, downloaded_size: 150 })).toBe(100);
+  });
+});
+
+describe('loadedCountLabel', () => {
+  it('marks a truncated page', () => {
+    expect(loadedCountLabel(200, true)).toBe('200+');
+    expect(loadedCountLabel(3, false)).toBe('3');
   });
 });
 
@@ -74,5 +114,18 @@ describe('fileFullPath', () => {
   });
   it('strips trailing slash', () => {
     expect(fileFullPath({ save_path: '/a/b/', filename: 'c.mp4' })).toBe('/a/b/c.mp4');
+  });
+});
+
+describe('formatLocaleDate', () => {
+  it('returns empty for missing or invalid values', () => {
+    expect(formatLocaleDate('')).toBe('');
+    expect(formatLocaleDate('not-a-date')).toBe('');
+    expect(formatLocaleDate(undefined)).toBe('');
+  });
+
+  it('formats a valid ISO timestamp', () => {
+    expect(formatLocaleDate('2026-08-01T00:00:00Z')).not.toBe('');
+    expect(formatLocaleDate('2026-08-01T00:00:00Z')).not.toBe('Invalid Date');
   });
 });

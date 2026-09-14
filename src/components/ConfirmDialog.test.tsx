@@ -70,4 +70,20 @@ describe('ConfirmDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Remove' }));
     expect(onConfirm).toHaveBeenCalledWith(false);
   });
+
+  it('gives stacked dialogs unique accessible names', () => {
+    render(
+      <>
+        <ConfirmDialog message="Remove A?" onConfirm={vi.fn()} onCancel={vi.fn()} />
+        <ConfirmDialog message="Remove B?" onConfirm={vi.fn()} onCancel={vi.fn()} />
+      </>,
+    );
+    const dialogs = screen.getAllByRole('alertdialog');
+    const ids = dialogs.map((dialog) => dialog.getAttribute('aria-labelledby'));
+    expect(ids[0]).toBeTruthy();
+    expect(ids[1]).toBeTruthy();
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(ids[0] && document.getElementById(ids[0])?.textContent).toBe('Remove A?');
+    expect(ids[1] && document.getElementById(ids[1])?.textContent).toBe('Remove B?');
+  });
 });

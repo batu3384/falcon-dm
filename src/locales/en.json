@@ -65,13 +65,17 @@
     "open_file": "Open file",
     "move_rename": "Move / Rename",
     "redownload": "Download again",
+    "already_queued": "This URL is already in the queue",
     "new_filename": "New filename",
     "destination_folder": "Destination folder",
     "cancel": "Cancel",
     "move": "Move",
     "moved": "File moved",
     "archive": "Archive",
-    "unarchive": "Unarchive"
+    "unarchive": "Unarchive",
+    "context_menu": "Download actions",
+    "error_detail": "Error: {{message}}",
+    "progress": "{{percent}} percent complete"
   },
   "statusBar": {
     "speed": "Speed",
@@ -134,7 +138,9 @@
     "loading_more": "Loading more…",
     "skip_to_content": "Skip to content",
     "dismiss": "Dismiss",
-    "toasts": "Notifications"
+    "toasts": "Notifications",
+    "error_boundary": "Something went wrong.",
+    "try_again": "Try again"
   },
   "newDownloadModal": {
     "title": "Add New Download",
@@ -160,7 +166,8 @@
     "imported_count": "Imported {{count}} URLs",
     "import_no_urls": "No valid URLs found in the file",
     "import_unsupported": "Only .txt and .csv files are supported",
-    "import_failed": "Failed to read the file"
+    "import_failed": "Failed to read the file",
+    "confirm_close": "Discard this download draft?"
   },
   "settings": {
     "title": "Settings",
@@ -200,6 +207,7 @@
     "saved": "Settings saved",
     "save_failed": "Failed to save settings",
     "load_failed": "Failed to load settings",
+    "retry": "Retry",
     "confirm_close": "Discard unsaved settings changes?",
     "discard": "Discard changes",
     "continue_editing": "Continue editing",
@@ -212,6 +220,7 @@
     "pair_approve_manual": "Approve this ID",
     "pair_approved": "Extension approved — pending browser request continues automatically",
     "pair_none": "No pending extension request",
+    "pair_load_failed": "Could not load pending extension approvals",
     "cat_video": "Video save path",
     "cat_music": "Music save path",
     "cat_documents": "Documents save path",
@@ -243,6 +252,8 @@
     "save": "Save Schedule",
     "saving": "Saving...",
     "save_failed": "Failed to save schedule",
+    "load_failed": "Failed to load schedule",
+    "retry": "Retry",
     "invalid_time": "Invalid schedule: both times must be HH:MM and differ",
     "scope_hint": "Downloads run only inside the scheduled window. Shutdown-after-complete and dial-up modes are not supported.",
     "confirm_close": "Discard unsaved schedule changes?"

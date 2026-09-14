@@ -19,6 +19,8 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
   const [stopTime, setStopTime] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [hydrated, setHydrated] = useState(false);
+  const [loadNonce, setLoadNonce] = useState(0);
   const [confirmClose, setConfirmClose] = useState(false);
   const dirtyRef = useRef(false);
   const requestClose = useCallback(() => {
@@ -29,21 +31,38 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
   useModalA11y(panelRef, requestClose, isOpen);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      dirtyRef.current = false;
+      setHydrated(false);
+      setError('');
+      setConfirmClose(false);
+      return;
+    }
+    let cancelled = false;
     api
       .getSchedule()
       .then((s) => {
-        if (dirtyRef.current) return;
+        if (cancelled) return;
+        setError('');
         setActive(s.active);
         setStartTime(s.start_time || '');
         setStopTime(s.stop_time || '');
+        dirtyRef.current = false;
+        setHydrated(true);
       })
-      .catch(() => {});
-  }, [isOpen]);
+      .catch(() => {
+        if (cancelled) return;
+        setError(t('scheduler.load_failed'));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, t, loadNonce]);
 
   if (!isOpen) return null;
 
   const handleSave = async () => {
+    if (!hydrated || saving) return;
     setSaving(true);
     setError('');
     if (
@@ -94,11 +113,11 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
             data-modal-cancel
             aria-label={t('scheduler.cancel')}
           >
-            <X size={18} />
+            <X size={18} aria-hidden={true} />
           </button>
         </div>
 
-        <div className="modal-body">
+        <div className="modal-body" {...(!hydrated ? { inert: true } : {})}>
           <div className="check-row">
             <input
               id="enable-scheduler"
@@ -108,6 +127,7 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
                 dirtyRef.current = true;
                 setActive(e.target.checked);
               }}
+              aria-describedby="sched-scope-hint"
             />
             <label htmlFor="enable-scheduler">{t('scheduler.enable')}</label>
           </div>
@@ -126,6 +146,8 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
               }}
               disabled={!active}
               className="field-input"
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? 'sched-error sched-scope-hint' : 'sched-scope-hint'}
             />
           </div>
 
@@ -143,19 +165,45 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
               }}
               disabled={!active}
               className="field-input"
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? 'sched-error sched-scope-hint' : 'sched-scope-hint'}
             />
           </div>
-          <p className="field-hint">{t('scheduler.scope_hint')}</p>
-          {error && <p className="field-error">{error}</p>}
+          <p id="sched-scope-hint" className="field-hint">
+            {t('scheduler.scope_hint')}
+          </p>
+          {error && hydrated && (
+            <p id="sched-error" className="field-error" role="alert">
+              {error}
+            </p>
+          )}
         </div>
 
         <div className="modal-foot">
+          {error && !hydrated && (
+            <p id="sched-error" className="field-error" role="alert">
+              {error}
+            </p>
+          )}
           <button type="button" className="btn-secondary" data-modal-cancel onClick={requestClose}>
             {t('scheduler.cancel')}
           </button>
-          <button type="button" className="btn-primary" onClick={handleSave} disabled={saving}>
-            {saving ? t('scheduler.saving') : t('scheduler.save')}
-          </button>
+          {error && !hydrated ? (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => {
+                setError('');
+                setLoadNonce((n) => n + 1);
+              }}
+            >
+              {t('scheduler.retry')}
+            </button>
+          ) : (
+            <button type="button" className="btn-primary" onClick={handleSave} disabled={saving || !hydrated}>
+              {saving ? t('scheduler.saving') : t('scheduler.save')}
+            </button>
+          )}
         </div>
       </div>
       {confirmClose && (

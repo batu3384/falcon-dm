@@ -31,7 +31,13 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
     onSkip?.();
     onComplete();
   }, [onSkip, onComplete]);
-  useModalA11y(panelRef, handleClose);
+  const stepRef = useRef(step);
+  stepRef.current = step;
+  const requestEscape = useCallback(() => {
+    if (stepRef.current > 1) setStep((current) => current - 1);
+    else handleClose();
+  }, [handleClose]);
+  useModalA11y(panelRef, requestEscape);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -72,7 +78,7 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
 
   const handleInstallNativeHost = async () => {
     const chromeId = (extensionId || suggestedExtensionId).trim();
-    if (chromeId.length !== 32) {
+    if (!/^[a-p]{32}$/.test(chromeId)) {
       showToast('error', t('onboarding.native_host_invalid_id'));
       return;
     }
@@ -89,7 +95,7 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
   };
 
   return (
-    <div className="wizard-overlay" onClick={skip} role="presentation">
+    <div className="wizard-overlay" role="presentation">
       <div
         ref={panelRef}
         className="wizard-panel"
@@ -106,11 +112,11 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
         <div className="wizard-content">
           {step === 1 ? (
             <div className={`wizard-icon accent`}>
-              <Zap strokeWidth={1.6} />
+              <Zap strokeWidth={1.6} aria-hidden={true} />
             </div>
           ) : (
             <div className="wizard-icon success">
-              <Puzzle strokeWidth={1.6} />
+              <Puzzle strokeWidth={1.6} aria-hidden={true} />
             </div>
           )}
 
@@ -138,21 +144,22 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
               <div className="field field-spaced">
                 <div
                   className="pair-status"
+                  role="status"
                   data-state={paired ? 'paired' : pending ? 'pending' : 'waiting'}
                 >
                   {paired ? (
                     <>
-                      <ShieldCheck size={16} />
+                      <ShieldCheck size={16} aria-hidden={true} />
                       <span>{t('onboarding.pair_paired')}</span>
                     </>
                   ) : pending ? (
                     <>
-                      <Puzzle size={16} />
+                      <Puzzle size={16} aria-hidden={true} />
                       <span>{t('onboarding.pair_pending')}</span>
                     </>
                   ) : (
                     <>
-                      <Zap size={16} />
+                      <Zap size={16} aria-hidden={true} />
                       <span>{t('onboarding.pair_waiting')}</span>
                     </>
                   )}
@@ -168,8 +175,11 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
                   placeholder={suggestedExtensionId || 'abcdefghijklmnopqrstuvwxyzabcdef'}
                   value={extensionId}
                   onChange={(e) => setExtensionId(e.target.value)}
+                  aria-describedby="onboard-ext-id-hint"
                 />
-                <p className="field-hint">{t('onboarding.native_host_hint')}</p>
+                <p id="onboard-ext-id-hint" className="field-hint">
+                  {t('onboarding.native_host_hint')}
+                </p>
                 <button
                   type="button"
                   className="btn-secondary field-gap-sm"
@@ -188,7 +198,7 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
         <div className="wizard-foot">
           {step > 1 ? (
             <button type="button" onClick={() => setStep(step - 1)} className="btn-ghost">
-              <ChevronLeft size={15} /> {t('onboarding.back')}
+              <ChevronLeft size={15} aria-hidden={true} /> {t('onboarding.back')}
             </button>
           ) : (
             <button type="button" onClick={skip} className="btn-ghost">
@@ -197,11 +207,11 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
           )}
           {step < 2 ? (
             <button type="button" onClick={() => setStep(step + 1)} className="btn-primary">
-              {t('onboarding.next')} <ChevronRight size={15} />
+              {t('onboarding.next')} <ChevronRight size={15} aria-hidden={true} />
             </button>
           ) : (
             <button type="button" onClick={finish} className="btn-primary">
-              <CheckCircle2 size={15} /> {t('onboarding.get_started')}
+              <CheckCircle2 size={15} aria-hidden={true} /> {t('onboarding.get_started')}
             </button>
           )}
         </div>

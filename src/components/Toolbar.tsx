@@ -29,6 +29,7 @@ interface ToolbarProps {
   onOpenStats?: () => void;
   speedLimited?: boolean;
   onToggleSpeedLimit?: () => void;
+  schedulerActive?: boolean;
 }
 
 export default function Toolbar({
@@ -47,6 +48,7 @@ export default function Toolbar({
   onOpenStats,
   speedLimited,
   onToggleSpeedLimit,
+  schedulerActive,
 }: ToolbarProps) {
   const { t, i18n } = useTranslation();
   const toggleLanguage = () => {
@@ -80,7 +82,7 @@ export default function Toolbar({
             title={t('toolbar.resume_all')}
             aria-label={t('toolbar.resume_all')}
           >
-            <Play size={15} />
+            <Play size={15} aria-hidden={true} />
           </button>
           <button
             type="button"
@@ -90,16 +92,17 @@ export default function Toolbar({
             title={t('toolbar.pause_all')}
             aria-label={t('toolbar.pause_all')}
           >
-            <Pause size={15} />
+            <Pause size={15} aria-hidden={true} />
           </button>
           <button
             type="button"
-            className="icon-btn"
+            className={`icon-btn ${schedulerActive ? 'active' : ''}`}
             onClick={onOpenScheduler}
             title={t('toolbar.scheduler')}
             aria-label={t('toolbar.scheduler')}
+            aria-pressed={schedulerActive}
           >
-            <Clock size={15} />
+            <Clock size={15} aria-hidden={true} />
           </button>
           {onToggleSpeedLimit && (
             <button
@@ -110,7 +113,7 @@ export default function Toolbar({
               aria-label={t('toolbar.speed_limit')}
               aria-pressed={speedLimited}
             >
-              <Gauge size={15} />
+              <Gauge size={15} aria-hidden={true} />
             </button>
           )}
           {onToggleClipboard && (
@@ -122,14 +125,14 @@ export default function Toolbar({
               aria-label={t('toolbar.clipboard')}
               aria-pressed={clipboardMonitor}
             >
-              <Clipboard size={15} />
+              <Clipboard size={15} aria-hidden={true} />
             </button>
           )}
         </div>
 
         <div className="toolbar-actions">
           <div className="search-wrap">
-            <Search size={14} />
+            <Search size={14} aria-hidden={true} />
             <input
               className="search-input"
               type="search"
@@ -148,7 +151,7 @@ export default function Toolbar({
             title={t('sidebar.language')}
             aria-label={t('sidebar.language')}
           >
-            <Globe size={15} />
+            <Globe size={15} aria-hidden={true} />
             <span className="lang-tag">{i18n.language.toUpperCase()}</span>
           </button>
 
@@ -162,7 +165,7 @@ export default function Toolbar({
               title={t('toolbar.logs')}
               aria-label={t('toolbar.logs')}
             >
-              <ScrollText size={15} />
+              <ScrollText size={15} aria-hidden={true} />
             </button>
           )}
           {onOpenStats && (
@@ -173,7 +176,7 @@ export default function Toolbar({
               title={t('toolbar.stats')}
               aria-label={t('toolbar.stats')}
             >
-              <BarChart3 size={15} />
+              <BarChart3 size={15} aria-hidden={true} />
             </button>
           )}
           <button
@@ -183,7 +186,7 @@ export default function Toolbar({
             title={t('sidebar.settings')}
             aria-label={t('sidebar.settings')}
           >
-            <Settings size={15} />
+            <Settings size={15} aria-hidden={true} />
           </button>
         </div>
       </div>

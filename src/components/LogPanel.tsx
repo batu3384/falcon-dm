@@ -49,16 +49,21 @@ export function LogPanel({ onClose }: LogPanelProps) {
   const [query, setQuery] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const errorToastSent = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
       const data = await api.getLogs(level === 'ALL' ? undefined : level);
       setLogs(data);
       setError(null);
+      errorToastSent.current = false;
     } catch (e) {
       const detail = api.extractTauriError(e);
       setError(detail);
-      showToast('error', detail);
+      if (!errorToastSent.current) {
+        errorToastSent.current = true;
+        showToast('error', detail);
+      }
     }
   }, [level, showToast]);
 
@@ -122,18 +127,47 @@ export function LogPanel({ onClose }: LogPanelProps) {
             data-modal-cancel
             aria-label={t('logs.close')}
           >
-            <X size={18} />
+            <X size={18} aria-hidden={true} />
           </button>
         </div>
 
         <div className="modal-body log-toolbar">
-          <div className="log-levels" role="tablist" aria-label={t('logs.level_filter')}>
+          <div
+            className="log-levels"
+            role="radiogroup"
+            aria-label={t('logs.level_filter')}
+            onKeyDown={(e) => {
+              if (
+                e.key !== 'ArrowRight' &&
+                e.key !== 'ArrowLeft' &&
+                e.key !== 'ArrowDown' &&
+                e.key !== 'ArrowUp' &&
+                e.key !== 'Home' &&
+                e.key !== 'End'
+              ) {
+                return;
+              }
+              e.preventDefault();
+              const i = LEVELS.indexOf(level);
+              let next = i;
+              if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % LEVELS.length;
+              else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp')
+                next = (i - 1 + LEVELS.length) % LEVELS.length;
+              else if (e.key === 'Home') next = 0;
+              else next = LEVELS.length - 1;
+              const lv = LEVELS[next];
+              setLevel(lv);
+              requestAnimationFrame(() => document.getElementById(`logs-tab-${lv}`)?.focus());
+            }}
+          >
             {LEVELS.map((lv) => (
               <button
                 key={lv}
                 type="button"
-                role="tab"
-                aria-selected={level === lv}
+                id={`logs-tab-${lv}`}
+                role="radio"
+                aria-checked={level === lv}
+                tabIndex={level === lv ? 0 : -1}
                 className={`log-level-tab ${level === lv ? 'active' : ''}`}
                 onClick={() => setLevel(lv)}
               >
@@ -142,7 +176,7 @@ export function LogPanel({ onClose }: LogPanelProps) {
             ))}
           </div>
           <div className="search-wrap log-search">
-            <Search size={14} />
+            <Search size={14} aria-hidden={true} />
             <input
               className="search-input"
               placeholder={t('logs.search')}
@@ -159,7 +193,7 @@ export function LogPanel({ onClose }: LogPanelProps) {
             aria-label={t('logs.auto_refresh')}
             aria-pressed={autoRefresh}
           >
-            <RefreshCw size={15} className={autoRefresh ? 'spin-slow' : ''} />
+            <RefreshCw size={15} className={autoRefresh ? 'spin-slow' : ''} aria-hidden={true} />
           </button>
           <button
             type="button"
@@ -168,7 +202,7 @@ export function LogPanel({ onClose }: LogPanelProps) {
             title={t('logs.clear')}
             aria-label={t('logs.clear')}
           >
-            <Trash2 size={15} />
+            <Trash2 size={15} aria-hidden={true} />
           </button>
         </div>
 
@@ -189,7 +223,7 @@ export function LogPanel({ onClose }: LogPanelProps) {
           )}
           {error && logs.length === 0 ? (
             <div className="empty-state" role="alert">
-              <AlertCircle size={24} />
+              <AlertCircle size={24} aria-hidden={true} />
               <span className="empty-title">{t('logs.load_error')}</span>
               <button type="button" className="btn-primary" onClick={refresh}>
                 {t('logs.retry')}
@@ -207,7 +241,7 @@ export function LogPanel({ onClose }: LogPanelProps) {
                 <div key={rowKey} className={`log-row log-${cls}`}>
                   <span className="log-ts mono">{formatTs(entry.ts)}</span>
                   <span className={`log-level-badge ${cls}`}>
-                    <Icon size={11} />
+                    <Icon size={11} aria-hidden={true} />
                     {entry.level}
                   </span>
                   <span className="log-target mono">{entry.target}</span>

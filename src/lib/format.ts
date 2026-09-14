@@ -45,6 +45,11 @@ export function progressTotalLabel(dl: { total_size: number; downloaded_size: nu
   return formatBytes(0);
 }
 
+/** Page size for lists that still have another SQL page. */
+export function loadedCountLabel(count: number, hasMore: boolean): string {
+  return hasMore ? `${count}+` : String(count);
+}
+
 export function fileExtension(filename: string): string {
   return filename.includes('.') ? filename.split('.').pop()?.toUpperCase() || '' : '';
 }
@@ -52,4 +57,11 @@ export function fileExtension(filename: string): string {
 export function fileFullPath(dl: { save_path: string; filename: string }): string {
   const base = dl.save_path.replace(/\/$/, '');
   return `${base}/${dl.filename}`;
+}
+
+export function formatLocaleDate(raw: string | null | undefined): string {
+  if (!raw || !raw.trim()) return '';
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return '';
+  return parsed.toLocaleString();
 }

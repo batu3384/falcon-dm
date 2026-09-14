@@ -20,7 +20,9 @@ export function NetworkTab({ settings, handleChange }: Props) {
           min="1"
           max="32"
           value={settings.max_concurrent_downloads}
-          onChange={(e) => handleChange('max_concurrent_downloads', parseInt(e.target.value))}
+          onChange={(e) =>
+            handleChange('max_concurrent_downloads', Number.parseInt(e.target.value, 10) || 1)
+          }
           className="field-range"
         />
       </div>
@@ -34,10 +36,18 @@ export function NetworkTab({ settings, handleChange }: Props) {
           min="1"
           max="16"
           value={settings.max_connections_per_server}
-          onChange={(e) => handleChange('max_connections_per_server', parseInt(e.target.value))}
+          onChange={(e) =>
+            handleChange(
+              'max_connections_per_server',
+              Number.parseInt(e.target.value, 10) || 1,
+            )
+          }
           className="field-input"
+          aria-describedby="set-conn-hint"
         />
-        <p className="field-hint">{t('settings.max_connections_hint')}</p>
+        <p id="set-conn-hint" className="field-hint">
+          {t('settings.max_connections_hint')}
+        </p>
       </div>
       <div className="field">
         <label className="field-label" htmlFor="set-speed">
@@ -49,7 +59,9 @@ export function NetworkTab({ settings, handleChange }: Props) {
           min="0"
           max="1048576"
           value={settings.speed_limit_kbps || 0}
-          onChange={(e) => handleChange('speed_limit_kbps', parseInt(e.target.value) || 0)}
+          onChange={(e) =>
+            handleChange('speed_limit_kbps', Number.parseInt(e.target.value, 10) || 0)
+          }
           className="field-input"
         />
       </div>

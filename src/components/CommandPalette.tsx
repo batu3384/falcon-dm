@@ -6,7 +6,7 @@ import { useModalA11y } from '../hooks/useModalA11y';
 export interface PaletteAction {
   id: string;
   label: string;
-  icon: React.ComponentType<{ size?: number; strokeWidth?: number }>;
+  icon: React.ComponentType<{ size?: number; strokeWidth?: number; 'aria-hidden'?: boolean }>;
   run: () => void | Promise<void>;
   keywords?: string;
 }
@@ -44,12 +44,12 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
 
   const runAction = async (action: PaletteAction | undefined) => {
     if (!action || running) return;
+    setRunning(true);
+    // Close first so focus restore cannot steal the next dialog's initial focus.
+    onClose();
     try {
-      setRunning(true);
       await action.run();
-      onClose();
     } catch (error) {
-      setRunning(false);
       onError?.(error);
     }
   };
@@ -57,13 +57,24 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
+      if (filtered.length === 0) return;
       setActiveIndex((i) => Math.min(i + 1, filtered.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
+      if (filtered.length === 0) return;
       setActiveIndex((i) => Math.max(i - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
+      if (filtered.length === 0) return;
       void runAction(filtered[activeIndex]);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      if (filtered.length === 0) return;
+      setActiveIndex(0);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      if (filtered.length === 0) return;
+      setActiveIndex(Math.max(0, filtered.length - 1));
     }
   };
 
@@ -79,7 +90,7 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
       >
         <div className="modal-head">
           <div className="search-wrap palette-search">
-            <Search size={16} />
+            <Search size={16} aria-hidden={true} />
             <input
               ref={inputRef}
               className="search-input"
@@ -89,6 +100,7 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
               onKeyDown={onKeyDown}
               // ponytail: combobox pattern — input controls a listbox of options.
               role="combobox"
+              aria-haspopup="listbox"
               aria-expanded={true}
               aria-controls="palette-listbox"
               aria-autocomplete="list"
@@ -96,6 +108,7 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
                 filtered[activeIndex] ? `palette-opt-${filtered[activeIndex].id}` : undefined
               }
               aria-label={t('commandPalette.placeholder')}
+              data-modal-initial-focus
             />
             <kbd className="kbd">Esc</kbd>
           </div>
@@ -110,7 +123,7 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
             {t('commandPalette.title')}
           </span>
           {filtered.length === 0 ? (
-            <div className="empty-state palette-empty">
+            <div className="empty-state palette-empty" role="status">
               <span className="empty-title">{t('commandPalette.no_results')}</span>
             </div>
           ) : (
@@ -128,7 +141,7 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
                   aria-selected={i === activeIndex}
                   disabled={running}
                 >
-                  <Icon size={15} strokeWidth={1.75} />
+                  <Icon size={15} strokeWidth={1.75} aria-hidden={true} />
                   <span>{action.label}</span>
                 </button>
               );

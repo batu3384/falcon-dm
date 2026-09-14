@@ -51,6 +51,7 @@ export function localizeDownloadError(message: string, t: (key: string) => strin
 
 export interface DownloadFilter {
   status?: string;
+  statuses?: string[];
   category?: string;
   search?: string;
   limit?: number;

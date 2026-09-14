@@ -14,11 +14,38 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import type { DownloadModel } from '../types';
-import { formatBytes, progressPercent, fileFullPath } from '../types';
+import { formatBytes, progressPercent, progressIndeterminate, fileFullPath, formatLocaleDate } from '../types';
 import { getDownloadCapabilities } from '../lib/downloadCapabilities';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useToastStore } from '../store/toast';
 import * as api from '../api/commands';
+
+/** Hostname-only — `evil.com/youtube.com` must not look like YouTube. */
+export function youtubeDownloadHost(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return (
+      h === 'youtu.be' ||
+      h === 'youtube.com' ||
+      h.endsWith('.youtube.com') ||
+      h === 'youtube-nocookie.com' ||
+      h.endsWith('.youtube-nocookie.com') ||
+      h === 'googlevideo.com' ||
+      h.endsWith('.googlevideo.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function hlsDownloadUrl(url: string): boolean {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    return path.endsWith('.m3u8') || path.includes('.m3u8/');
+  } catch {
+    return false;
+  }
+}
 
 interface InspectorPanelProps {
   download: DownloadModel;
@@ -34,16 +61,25 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !document.querySelector('.modal-overlay')) onClose();
+      if (e.key === 'Escape' && !document.querySelector('.modal-overlay, .wizard-overlay')) {
+        onClose();
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
   const isDownloading = download.status === 'Downloading';
+  const isMerging = download.status === 'Merging';
+  const isLive = isDownloading || isMerging;
   const isCompleted = download.status === 'Completed';
   const isFailed = download.status === 'Failed';
   const capabilities = getDownloadCapabilities(download.status);
   const pct = progressPercent(download);
+  const indeterminate = progressIndeterminate(download);
+  const startedAt = formatLocaleDate(download.created_at);
+  const progressName = indeterminate
+    ? t(isMerging ? 'downloadItem.status_merging' : 'downloadItem.status_downloading')
+    : t('downloadItem.progress', { percent: pct });
 
   const handleCopyUrl = async () => {
     try {
@@ -91,10 +127,10 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
 
   return (
     <>
-      <aside className="inspector">
+      <aside className="inspector" aria-label={t('inspector.title')}>
         <div className="inspector-head">
           <div className="inspector-head-title">
-            <HardDrive size={16} />
+            <HardDrive size={16} aria-hidden={true} />
             <span>{t('inspector.title')}</span>
           </div>
           <button
@@ -104,7 +140,7 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
             title={t('inspector.close')}
             aria-label={t('inspector.close')}
           >
-            <X size={16} />
+            <X size={16} aria-hidden={true} />
           </button>
         </div>
 
@@ -121,48 +157,57 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
 
           <div>
             <div className="insp-label">
-              <Activity size={12} /> {t('inspector.connections')}
+              <Activity size={12} aria-hidden={true} /> {t('inspector.connections')}
             </div>
             <div className="thread-info insp-block-gap">
               <span>
                 {download.aria2_gid
                   ? 'aria2'
-                  : download.url.includes('youtube') || download.url.includes('youtu.be')
+                  : youtubeDownloadHost(download.url)
                     ? 'yt-dlp'
-                    : download.url.includes('.m3u8')
+                    : hlsDownloadUrl(download.url)
                       ? 'HLS'
                       : 'engine'}
               </span>
               <span className="mono">
-                {isDownloading
+                {isLive
                   ? `${download.segments || 0} ${t('inspector.active')}`
                   : isCompleted
                     ? t('inspector.merged')
                     : t('inspector.idle')}
               </span>
             </div>
-            <div className="dl-track insp-block-gap">
+            <div
+              className={`dl-track insp-block-gap${indeterminate ? ' indeterminate' : ''}`}
+              role="progressbar"
+              aria-label={progressName}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={indeterminate ? undefined : pct}
+              aria-valuetext={indeterminate ? progressName : undefined}
+            >
               <div
-                className={`dl-fill ${isCompleted ? 'done' : isDownloading ? 'active' : ''}`}
-                style={{ width: `${pct}%` }}
+                className={`dl-fill ${isCompleted ? 'done' : isLive ? 'active' : ''}${indeterminate ? ' pulse' : ''}`}
+                style={indeterminate ? undefined : { width: `${pct}%` }}
               />
             </div>
           </div>
 
           <div>
             <div className="insp-label">
-              <Shield size={12} /> {t('inspector.metrics')}
+              <Shield size={12} aria-hidden={true} /> {t('inspector.metrics')}
             </div>
             <div className="metric">
               <span className="metric-key">{t('inspector.downloaded')}</span>
               <span className="metric-val">
-                {formatBytes(download.downloaded_size)} ({pct}%)
+                {formatBytes(download.downloaded_size)} (
+                {indeterminate ? '…' : `${pct}%`})
               </span>
             </div>
             <div className="metric">
               <span className="metric-key">{t('inspector.speed')}</span>
               <span className="metric-val">
-                {isDownloading ? `${formatBytes(download.speed)}/s` : '-'}
+                {isLive ? `${formatBytes(download.speed)}/s` : '-'}
               </span>
             </div>
             <div className="metric">
@@ -173,10 +218,10 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
               <span className="metric-key">{t('inspector.priority')}</span>
               <span className="metric-val">{download.priority}</span>
             </div>
-            {download.created_at && (
+            {startedAt && (
               <div className="metric">
                 <span className="metric-key">{t('inspector.started')}</span>
-                <span className="metric-val">{new Date(download.created_at).toLocaleString()}</span>
+                <span className="metric-val">{startedAt}</span>
               </div>
             )}
           </div>
@@ -184,9 +229,9 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
           {isFailed && download.error_message && (
             <div>
               <div className="insp-label">
-                <AlertTriangle size={12} /> {t('inspector.error_reason')}
+                <AlertTriangle size={12} aria-hidden={true} /> {t('inspector.error_reason')}
               </div>
-              <div className="insp-card insp-card-compact insp-card-danger">
+              <div className="insp-card insp-card-compact insp-card-danger" role="alert">
                 <span className="mono insp-error-text">{download.error_message}</span>
               </div>
             </div>
@@ -195,6 +240,7 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
           <div className="action-col">
             {capabilities.resume && (
               <button
+                type="button"
                 className="btn-primary"
                 onClick={() =>
                   api
@@ -203,30 +249,36 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
                     .catch((e) => showToast('error', api.extractTauriError(e)))
                 }
               >
-                <RotateCcw size={14} /> {isFailed ? t('inspector.retry') : t('downloadItem.resume')}
+                <RotateCcw size={14} aria-hidden={true} />{' '}
+                {isFailed ? t('inspector.retry') : t('downloadItem.resume')}
               </button>
             )}
             {isCompleted && (
-              <button className="btn-primary" onClick={handleOpenFile}>
-                <ExternalLink size={14} /> {t('inspector.open_file')}
+              <button type="button" className="btn-primary" onClick={handleOpenFile}>
+                <ExternalLink size={14} aria-hidden={true} /> {t('inspector.open_file')}
               </button>
             )}
-            <button className="btn-secondary" onClick={handleOpenFolder}>
-              <Folder size={14} /> {t('inspector.show_in_finder')}
+            <button type="button" className="btn-secondary" onClick={handleOpenFolder}>
+              <Folder size={14} aria-hidden={true} /> {t('inspector.show_in_finder')}
             </button>
-            <button className="btn-secondary" onClick={handleCopyUrl}>
-              <Copy size={14} /> {copied ? t('inspector.copied') : t('inspector.copy_link')}
+            <button type="button" className="btn-secondary" onClick={handleCopyUrl}>
+              <Copy size={14} aria-hidden={true} />{' '}
+              {copied ? t('inspector.copied') : t('inspector.copy_link')}
             </button>
             {capabilities.remove && (
-              <button className="btn-ghost btn-danger-text" onClick={() => setConfirmRemove(true)}>
-                <Trash2 size={14} /> {t('inspector.remove')}
+              <button
+                type="button"
+                className="btn-ghost btn-danger-text"
+                onClick={() => setConfirmRemove(true)}
+              >
+                <Trash2 size={14} aria-hidden={true} /> {t('inspector.remove')}
               </button>
             )}
           </div>
 
           <div>
             <div className="insp-label">
-              <Link2 size={12} /> {t('inspector.source_url')}
+              <Link2 size={12} aria-hidden={true} /> {t('inspector.source_url')}
             </div>
             <div className="insp-card insp-card-compact">
               <span className="mono insp-url-text">{download.url}</span>

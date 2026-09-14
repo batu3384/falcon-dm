@@ -65,13 +65,17 @@
     "open_file": "Dosyayı aç",
     "move_rename": "Taşı / Yeniden adlandır",
     "redownload": "Tekrar indir",
+    "already_queued": "Bu URL zaten kuyrukta",
     "new_filename": "Yeni dosya adı",
     "destination_folder": "Hedef klasör",
     "cancel": "İptal",
     "move": "Taşı",
     "moved": "Dosya taşındı",
     "archive": "Arşivle",
-    "unarchive": "Arşivden çıkar"
+    "unarchive": "Arşivden çıkar",
+    "context_menu": "İndirme işlemleri",
+    "error_detail": "Hata: {{message}}",
+    "progress": "{{percent}}% tamamlandı"
   },
   "statusBar": {
     "speed": "Hız",
@@ -134,7 +138,9 @@
     "loading_more": "Yükleniyor…",
     "skip_to_content": "İçeriğe geç",
     "dismiss": "Kapat",
-    "toasts": "Bildirimler"
+    "toasts": "Bildirimler",
+    "error_boundary": "Bir şeyler ters gitti.",
+    "try_again": "Tekrar dene"
   },
   "newDownloadModal": {
     "title": "Yeni İndirme Ekle",
@@ -160,7 +166,8 @@
     "imported_count": "{{count}} URL içe aktarıldı",
     "import_no_urls": "Dosyada geçerli URL bulunamadı",
     "import_unsupported": "Sadece .txt ve .csv dosyaları desteklenir",
-    "import_failed": "Dosya okunamadı"
+    "import_failed": "Dosya okunamadı",
+    "confirm_close": "Bu indirme taslağı silinsin mi?"
   },
   "settings": {
     "title": "Ayarlar",
@@ -200,6 +207,7 @@
     "saved": "Ayarlar kaydedildi",
     "save_failed": "Ayarlar kaydedilemedi",
     "load_failed": "Ayarlar yüklenemedi",
+    "retry": "Tekrar Dene",
     "confirm_close": "Kaydedilmemiş ayar değişiklikleri silinsin mi?",
     "discard": "Değişiklikleri sil",
     "continue_editing": "Düzenlemeye devam et",
@@ -212,6 +220,7 @@
     "pair_approve_manual": "Bu ID'yi onayla",
     "pair_approved": "Eklenti onaylandı — bekleyen istek otomatik devam eder",
     "pair_none": "Bekleyen eklenti isteği yok",
+    "pair_load_failed": "Bekleyen eklenti onayları yüklenemedi",
     "cat_video": "Video kayıt yolu",
     "cat_music": "Müzik kayıt yolu",
     "cat_documents": "Belgeler kayıt yolu",
@@ -243,6 +252,8 @@
     "save": "Zamanlamayı Kaydet",
     "saving": "Kaydediliyor...",
     "save_failed": "Zamanlama kaydedilemedi",
+    "load_failed": "Zamanlama yüklenemedi",
+    "retry": "Tekrar Dene",
     "invalid_time": "Geçersiz: her iki saat HH:MM olmalı ve birbirinden farklı olmalı",
     "scope_hint": "Kuyruk yalnızca belirlenen saat aralığında indirir. Tamamlanınca kapatma ve çevirmeli bağlantı desteklenmiyor.",
     "confirm_close": "Kaydedilmemiş zamanlama değişiklikleri silinsin mi?"

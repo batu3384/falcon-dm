@@ -29,11 +29,23 @@ import {
   progressTotalLabel,
   fileExtension,
   fileFullPath,
+  formatLocaleDate,
 } from '../types';
 import { getDownloadCapabilities } from '../lib/downloadCapabilities';
 import { useToastStore } from '../store/toast';
 import * as api from '../api/commands';
 import { useModalA11y } from '../hooks/useModalA11y';
+
+/** Arrow/Home/End index inside a context menu. `current` may be -1. */
+export function contextMenuNavIndex(len: number, current: number, key: string): number | null {
+  if (len <= 0) return null;
+  const idx = current < 0 || current >= len ? 0 : current;
+  if (key === 'ArrowDown') return (idx + 1) % len;
+  if (key === 'ArrowUp') return (idx - 1 + len) % len;
+  if (key === 'Home') return 0;
+  if (key === 'End') return len - 1;
+  return null;
+}
 
 interface DownloadItemProps {
   item: DownloadModel;
@@ -76,6 +88,7 @@ function DownloadItemInner({
   const remainingBytes =
     item.total_size > item.downloaded_size ? item.total_size - item.downloaded_size : 0;
   const etaText = isDownloading ? calculateETA(remainingBytes, item.speed) : '';
+  const completedAt = formatLocaleDate(item.completed_at);
   const ext = fileExtension(item.filename);
   const { icon: ThumbIcon, cls: thumbCls } = getThumb(item.filename);
 
@@ -101,41 +114,60 @@ function DownloadItemInner({
 
   const stop = (e: React.MouseEvent) => e.stopPropagation();
 
+  const itemRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     if (!menu) return;
-    const menuEl = document.querySelector<HTMLDivElement>('.ctx-menu');
-    menuEl?.focus();
-    const close = () => setMenu(null);
+    const menuEl = menuRef.current;
+    const items = Array.from(
+      menuEl?.querySelectorAll<HTMLButtonElement>("button[role='menuitem']") ?? [],
+    );
+    (items[0] ?? menuEl)?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
+        e.stopPropagation();
         setMenu(null);
+        itemRef.current?.focus();
         return;
       }
       const btns = Array.from(
         menuEl?.querySelectorAll<HTMLButtonElement>("button[role='menuitem']") ?? [],
       );
-      if (!btns.length) return;
-      const idx = btns.findIndex((b) => b === document.activeElement);
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        btns[(idx + 1) % btns.length].focus();
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        btns[(idx - 1 + btns.length) % btns.length].focus();
-      }
+      const next = contextMenuNavIndex(
+        btns.length,
+        btns.findIndex((b) => b === document.activeElement),
+        e.key,
+      );
+      if (next === null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      btns[next].focus();
     };
-    window.addEventListener('click', close);
-    window.addEventListener('keydown', onKey);
+    const onDocClick = (e: MouseEvent) => {
+      if (menuEl?.contains(e.target as Node)) return;
+      setMenu(null);
+    };
+    const onFocusOut = (e: FocusEvent) => {
+      if (menuEl?.contains(e.relatedTarget as Node)) return;
+      setMenu(null);
+    };
+    menuEl?.addEventListener('keydown', onKey);
+    menuEl?.addEventListener('focusout', onFocusOut);
+    // Opening contextmenu can synthesize a click; attach after this turn.
+    const timer = window.setTimeout(() => window.addEventListener('click', onDocClick), 0);
     return () => {
-      window.removeEventListener('click', close);
-      window.removeEventListener('keydown', onKey);
+      window.clearTimeout(timer);
+      window.removeEventListener('click', onDocClick);
+      menuEl?.removeEventListener('keydown', onKey);
+      menuEl?.removeEventListener('focusout', onFocusOut);
     };
   }, [menu]);
 
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
-    onSelect?.(isSelected ? null : item);
+    onSelect?.(item);
     const menuW = 220;
     const menuH = 340;
     const pad = 8;
@@ -145,9 +177,24 @@ function DownloadItemInner({
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if ((e.target as HTMLElement | null)?.closest('button, input, textarea, select, a')) {
+      return;
+    }
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
+      e.stopPropagation();
       onSelect?.(isSelected ? null : item);
+    }
+    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+      e.preventDefault();
+      onSelect?.(item);
+      const rect = itemRef.current?.getBoundingClientRect();
+      const menuW = 220;
+      const menuH = 340;
+      const pad = 8;
+      const x = Math.min(rect ? rect.left + 16 : 16, window.innerWidth - menuW - pad);
+      const y = Math.min(rect ? rect.bottom : 16, window.innerHeight - menuH - pad);
+      setMenu({ x: Math.max(pad, x), y: Math.max(pad, y) });
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
@@ -178,6 +225,7 @@ function DownloadItemInner({
   return (
     <>
       <div
+        ref={itemRef}
         className={`dl-item ${isSelected ? 'selected' : ''} ${isBatchSelected && !isSelected ? 'batch-selected' : ''}`}
         onClick={(e) =>
           onSelect?.(isSelected && !e.metaKey && !e.shiftKey ? null : item, {
@@ -187,11 +235,10 @@ function DownloadItemInner({
         }
         onContextMenu={onContextMenu}
         onKeyDown={onKeyDown}
-        tabIndex={0}
-        role="listitem"
+        tabIndex={-1}
       >
         <div className={`dl-thumb ${thumbCls}`}>
-          <ThumbIcon size={18} strokeWidth={1.6} />
+          <ThumbIcon size={18} strokeWidth={1.6} aria-hidden={true} />
         </div>
 
         <div className="dl-body">
@@ -202,13 +249,27 @@ function DownloadItemInner({
             {ext && <span className="badge plain">{ext}</span>}
             <span className={`badge ${si.cls}`}>{si.label}</span>
             {isFailed && item.error_message && (
-              <span className="badge failed" title={item.error_message}>
-                <AlertTriangle size={10} />
+              <span
+                className="badge failed"
+                title={item.error_message}
+                aria-label={t('downloadItem.error_detail', { message: item.error_message })}
+              >
+                <AlertTriangle size={10} aria-hidden={true} />
               </span>
             )}
           </div>
 
-          <div className={`dl-track${indeterminate ? ' indeterminate' : ''}`}>
+          <div
+            className={`dl-track${indeterminate ? ' indeterminate' : ''}`}
+            role="progressbar"
+            aria-label={
+              indeterminate ? si.label : t('downloadItem.progress', { percent: pct })
+            }
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={indeterminate ? undefined : pct}
+            aria-valuetext={indeterminate ? si.label : undefined}
+          >
             <div
               className={`dl-fill ${fillCls}${indeterminate ? ' pulse' : ''}`}
               style={indeterminate ? undefined : { width: `${pct}%` }}
@@ -236,10 +297,10 @@ function DownloadItemInner({
                 <SpeedGraph speed={item.speed} />
               </>
             )}
-            {isCompleted && item.completed_at && (
+            {isCompleted && completedAt && (
               <>
                 <span className="meta-sep">/</span>
-                <span>{new Date(item.completed_at).toLocaleDateString()}</span>
+                <span>{completedAt}</span>
               </>
             )}
           </div>
@@ -257,7 +318,7 @@ function DownloadItemInner({
               title={t('downloadItem.pause')}
               aria-label={t('downloadItem.pause')}
             >
-              <Pause size={14} />
+              <Pause size={14} aria-hidden={true} />
             </button>
           ) : capabilities.resume ? (
             <button
@@ -270,7 +331,7 @@ function DownloadItemInner({
               title={t('downloadItem.resume')}
               aria-label={t('downloadItem.resume')}
             >
-              <Play size={14} />
+              <Play size={14} aria-hidden={true} />
             </button>
           ) : null}
 
@@ -286,7 +347,7 @@ function DownloadItemInner({
             title={t('downloadItem.open_folder')}
             aria-label={t('downloadItem.open_folder')}
           >
-            <Folder size={14} />
+            <Folder size={14} aria-hidden={true} />
           </button>
 
           {item.status === 'Queued' && (
@@ -301,7 +362,7 @@ function DownloadItemInner({
                 title={t('downloadItem.increase_priority')}
                 aria-label={t('downloadItem.increase_priority')}
               >
-                <ChevronUp size={14} />
+                <ChevronUp size={14} aria-hidden={true} />
               </button>
               <button
                 type="button"
@@ -313,7 +374,7 @@ function DownloadItemInner({
                 title={t('downloadItem.decrease_priority')}
                 aria-label={t('downloadItem.decrease_priority')}
               >
-                <ChevronDown size={14} />
+                <ChevronDown size={14} aria-hidden={true} />
               </button>
             </>
           )}
@@ -329,14 +390,23 @@ function DownloadItemInner({
               title={t('downloadItem.delete')}
               aria-label={t('downloadItem.delete')}
             >
-              <Trash2 size={14} />
+              <Trash2 size={14} aria-hidden={true} />
             </button>
           )}
         </div>
       </div>
 
       {menu && (
-        <div className="ctx-menu" style={{ left: menu.x, top: menu.y }} role="menu" tabIndex={-1}>
+        <div
+          ref={menuRef}
+          className="ctx-menu"
+          style={{ left: menu.x, top: menu.y }}
+          role="menu"
+          tabIndex={-1}
+          aria-label={t('downloadItem.context_menu')}
+          onClick={() => setMenu(null)}
+          onContextMenu={(e) => e.preventDefault()}
+        >
           {capabilities.pause ? (
             <button
               type="button"
@@ -370,14 +440,14 @@ function DownloadItemInner({
             {t('downloadItem.open_folder')}
           </button>
           <button type="button" role="menuitem" onClick={() => copyText(item.url)}>
-            <Copy size={12} /> {t('downloadItem.copy_url')}
+            <Copy size={12} aria-hidden={true} /> {t('downloadItem.copy_url')}
           </button>
           <button
             type="button"
             role="menuitem"
             onClick={() => copyText(api.buildCurlCommand(item), t('downloadItem.curl_copied'))}
           >
-            <Terminal size={12} /> {t('downloadItem.copy_curl')}
+            <Terminal size={12} aria-hidden={true} /> {t('downloadItem.copy_curl')}
           </button>
           {isCompleted && (
             <>
@@ -417,20 +487,26 @@ function DownloadItemInner({
             type="button"
             role="menuitem"
             onClick={() => {
-              call(
-                () =>
-                  api.addDownload({
+              void (async () => {
+                try {
+                  const row = await api.addDownload({
                     url: item.url,
                     filename: item.filename,
                     savePath: item.save_path,
                     referrer: item.referrer || undefined,
                     userAgent: item.user_agent || undefined,
-                  }),
-                t('downloadItem.action_failed'),
-              );
+                  });
+                  if (row.id === item.id) {
+                    showToast('info', t('downloadItem.already_queued'));
+                  }
+                  onRefresh?.();
+                } catch {
+                  showToast('error', t('downloadItem.action_failed'));
+                }
+              })();
             }}
           >
-            <RotateCcw size={12} /> {t('downloadItem.redownload')}
+            <RotateCcw size={12} aria-hidden={true} /> {t('downloadItem.redownload')}
           </button>
           {capabilities.remove && (
             <button
@@ -486,6 +562,9 @@ const DownloadItem = memo(
     prev.item.speed === next.item.speed &&
     prev.item.status === next.item.status &&
     prev.item.filename === next.item.filename &&
+    prev.item.save_path === next.item.save_path &&
+    prev.item.completed_at === next.item.completed_at &&
+    prev.item.archived === next.item.archived &&
     prev.item.error_message === next.item.error_message &&
     prev.isSelected === next.isSelected &&
     prev.isBatchSelected === next.isBatchSelected &&
@@ -514,7 +593,13 @@ function MoveRenameDialog({
   const panelRef = useRef<HTMLDivElement>(null);
   useModalA11y(panelRef, onCancel);
   return (
-    <div className="modal-overlay" onClick={onCancel} role="presentation">
+    <div
+      className="modal-overlay"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onCancel();
+      }}
+      role="presentation"
+    >
       <div
         ref={panelRef}
         className="modal-panel modal-sm"
@@ -539,6 +624,7 @@ function MoveRenameDialog({
               value={fname}
               onChange={(e) => setFname(e.target.value)}
               autoFocus
+              data-modal-initial-focus
             />
           </div>
           <div className="field">

@@ -116,7 +116,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
             data-modal-cancel
             aria-label={t('stats.close')}
           >
-            <X size={18} />
+            <X size={18} aria-hidden={true} />
           </button>
         </div>
 
@@ -135,7 +135,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
           )}
           {!stats && error ? (
             <div className="empty-state" role="alert">
-              <AlertCircle size={24} />
+              <AlertCircle size={24} aria-hidden={true} />
               <span className="empty-title">{t('stats.load_error')}</span>
               <button
                 type="button"
@@ -151,7 +151,7 @@ export function StatsPanel({ onClose }: StatsPanelProps) {
                 {cards.map((c) => (
                   <div className="kpi-card" key={c.key} data-tone={c.tone}>
                     <div className="kpi-card-head">
-                      <c.Icon size={13} />
+                      <c.Icon size={13} aria-hidden={true} />
                       <span className={`kpi-dot ${c.dot}`} />
                       {c.label}
                     </div>
