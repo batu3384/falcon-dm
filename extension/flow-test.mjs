@@ -106,6 +106,13 @@ const shortsJob = FM.overlayEnqueuePayload('https://www.youtube.com/shorts/abc12
 assert(shortsJob.url.includes('/shorts/abc123'), 'shorts overlay uses shorts URL');
 assert(shortsJob.format.includes('height<=1080'), 'shorts height bound');
 
+const spoofShorts = FM.overlayEnqueuePayload('https://evil.com/shorts/abc', {
+  url: 'https://cdn.example.com/a.mp4',
+  height: 1080,
+});
+assert(spoofShorts.url === 'https://cdn.example.com/a.mp4', 'non-youtube /shorts/ keeps media URL');
+assert(spoofShorts.format === null, 'non-youtube /shorts/ does not force yt-dlp');
+
 const blobJob = FM.overlayEnqueuePayload('https://www.youtube.com/watch?v=abc', {
   url: 'blob:https://www.youtube.com/uuid',
   isBlob: true,
@@ -309,7 +316,7 @@ function loadScripts(win, files) {
   });
 }
 
-{
+async function runPopupGrab(state) {
   const html = readFileSync(path.join(__dirname, 'popup.html'), 'utf8').replace(
     /<script src="popup.js"><\/script>/,
     '',
@@ -329,7 +336,7 @@ function loadScripts(win, files) {
           }
           if (payload.action === 'check_status') {
             return {
-              state: 'offline',
+              state,
               paused: false,
               failClosed: false,
               recent: [],
@@ -348,17 +355,27 @@ function loadScripts(win, files) {
     await tick(60);
     const grab = win.document.getElementById('grab');
     assert(grab, 'popup grab CTA exists');
-    assert(!grab.disabled, 'offline popup CTA is clickable');
+    assert(!grab.disabled, `${state} popup CTA is clickable`);
     assert(grab.getAttribute('aria-disabled') !== 'true', 'offline CTA does not lie aria-disabled');
     grab.click();
     await tick(60);
-    assert(grabs.length === 1, 'popup grab sends grab_tab_media while offline');
-    assert(grabs[0].tabId === 42, `popup passes tabId 42, got ${grabs[0].tabId}`);
-    assert(
-      sentBox.sent.some((p) => p.action === 'grab_tab_media'),
-      'toolbar/popup path hits grab_tab_media',
-    );
   });
+  return { grabs, sent: sentBox.sent };
+}
+
+{
+  const offline = await runPopupGrab('offline');
+  assert(offline.grabs.length === 0, 'popup grab does not send grab_tab_media while offline');
+  assert(
+    offline.sent.some((p) => p.action === 'auto_pair'),
+    'offline grab tries auto_pair instead of overlay',
+  );
+}
+
+{
+  const connected = await runPopupGrab('connected');
+  assert(connected.grabs.length === 1, 'popup grab sends grab_tab_media when connected');
+  assert(connected.grabs[0].tabId === 42, `popup passes tabId 42, got ${connected.grabs[0].tabId}`);
 }
 
 let live = false;

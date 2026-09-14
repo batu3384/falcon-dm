@@ -64,6 +64,7 @@ async function postFalcon(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
     data = null;
   }
 
+  if (response.status === 403) setState('blocked');
   if (!response.ok) {
     throw new Error(mapHttpError(response.status, data && data.error));
   }
@@ -85,11 +86,11 @@ async function postFalcon(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   return data;
 }
 
-async function sendToFalcon(path, body) {
+async function sendToFalcon(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   // Connected badge: skip health RTT — postFalcon fails fast if socket is dead.
   if (connectionState === 'connected') {
     try {
-      return await postFalcon(path, body);
+      return await postFalcon(path, body, timeoutMs);
     } catch (e) {
       if (!(await appHealthy())) {
         await withTimeout(wakeFalcon(), 5000, 'Falcon wake');
@@ -97,19 +98,19 @@ async function sendToFalcon(path, body) {
           setState('offline');
           throw new Error(msg('errorWaking', 'Falcon DM başlatılamadı'));
         }
-        return postFalcon(path, body);
+        return postFalcon(path, body, timeoutMs);
       }
       throw e;
     }
   }
 
   if (await appHealthy()) {
-    return postFalcon(path, body);
+    return postFalcon(path, body, timeoutMs);
   }
 
   await withTimeout(wakeFalcon(), 5000, 'Falcon wake');
   if (await waitForHealthy(30000)) {
-    return postFalcon(path, body);
+    return postFalcon(path, body, timeoutMs);
   }
 
   setState('offline');

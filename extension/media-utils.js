@@ -52,8 +52,10 @@
     251: { q: '160k', fmt: 'Opus', type: 'audio', muxed: false },
   };
 
-  const JUNK_RE =
-    /no_input\.mp3|\/s\/search\/|\/generate_204|\/ptracking|\/api\/stats|\/log_event|\/youtubei\/|\/timedtext|\/caption|\/ad_status|\/pagead\/|\/doubleclick|favicon|\/img\/|\.svg(\?|$)|\/static\/|\/yts\/|\/s\/player\/|\/jsbin\//i;
+  const JUNK_PATH_RE =
+    /no_input\.mp3|\/generate_204|favicon|\.svg(\?|$)/i;
+  const YOUTUBE_UI_PATH_RE =
+    /\/s\/search\/|\/ptracking|\/api\/stats|\/log_event|\/youtubei\/|\/timedtext|\/caption|\/ad_status|\/pagead\/|\/img\/|\/static\/|\/yts\/|\/s\/player\/|\/jsbin\//i;
 
   // ponytail: keep in sync with backend guess_extension + DownloadCategory
   const GRABBER_EXTENSIONS =
@@ -131,6 +133,91 @@
     }
   }
 
+  function isYoutubePageUrl(url) {
+    try {
+      return isYoutubeHost(new URL(url).hostname);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** Literal hosts matching Rust `is_blocked_download_host` (no DNS). */
+  function isBlockedIpv4Octets(o) {
+    if (o[0] === 0) return true;
+    if (o[0] >= 224) return true;
+    if (o[0] === 127) return true;
+    if (o[0] === 10) return true;
+    if (o[0] === 192 && o[1] === 168) return true;
+    if (o[0] === 169 && o[1] === 254) return true;
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true;
+    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true;
+    return false;
+  }
+
+  function isBlockedIpv6Literal(h) {
+    const v6 = String(h).split('%')[0];
+    if (v6 === '::1' || v6 === '::' || v6 === '0:0:0:0:0:0:0:1' || v6 === '0:0:0:0:0:0:0:0') {
+      return true;
+    }
+    const mapped = v6.match(/:ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+    if (mapped) {
+      const p = mapped[1].split('.').map(Number);
+      if (p.length === 4 && p.every((n) => n >= 0 && n <= 255)) return isBlockedIpv4Octets(p);
+    }
+    const hexMapped = v6.match(/^[:0]*ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+    if (hexMapped) {
+      const hi = parseInt(hexMapped[1], 16);
+      const lo = parseInt(hexMapped[2], 16);
+      return isBlockedIpv4Octets([(hi >> 8) & 255, hi & 255, (lo >> 8) & 255, lo & 255]);
+    }
+    if (v6.startsWith(':')) return false;
+    const first = v6.split(':')[0] || '';
+    const n = parseInt(first, 16);
+    if (!Number.isNaN(n) && first.length) {
+      if ((n & 0xfe00) === 0xfc00) return true;
+      if ((n & 0xffc0) === 0xfe80) return true;
+      if ((n & 0xff00) === 0xff00) return true;
+    }
+    return false;
+  }
+
+  function isBlockedLiteralHost(host) {
+    const h = String(host || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^\[|\]$/g, '');
+    if (!h) return true;
+    if (h === 'localhost' || h.endsWith('.localhost')) return true;
+    if (h.includes(':')) return isBlockedIpv6Literal(h);
+    const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!m) return false;
+    const o = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+    if (o.some((n) => n > 255)) return false;
+    return isBlockedIpv4Octets(o);
+  }
+
+  function isPublicHttpUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw || raw.length > 8192) return false;
+    try {
+      const parsed = new URL(raw);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+      if (!parsed.hostname) return false;
+      return !isBlockedLiteralHost(parsed.hostname);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function urlBasename(url) {
+    try {
+      const name = decodeURIComponent(new URL(url).pathname.split('/').pop() || '');
+      if (name) return name.split(/[/\\]/).pop() || name;
+    } catch (_) {}
+    const last = String(url || '').split('/').pop() || '';
+    return last.split('?')[0];
+  }
+
   /** Strip byte-range / segment params so full file downloads. */
   function normalizeMediaUrl(raw) {
     if (!raw || typeof raw !== 'string') return '';
@@ -148,10 +235,19 @@
   function isJunkUrl(url) {
     if (!url || url.startsWith('data:')) return true;
     if (url.startsWith('blob:')) return false;
-    if (JUNK_RE.test(url)) return true;
-    // YouTube UI placeholder audio
-    if (url.includes('youtube.com') && url.includes('.mp3') && !url.includes('videoplayback')) {
-      return true;
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return false;
+    }
+    const host = parsed.hostname.toLowerCase();
+    const pathQ = `${parsed.pathname}${parsed.search}`.toLowerCase();
+    if (JUNK_PATH_RE.test(pathQ)) return true;
+    if (host === 'doubleclick.net' || host.endsWith('.doubleclick.net')) return true;
+    if (isYoutubeHost(host)) {
+      if (YOUTUBE_UI_PATH_RE.test(pathQ)) return true;
+      if (pathQ.includes('.mp3') && !pathQ.includes('videoplayback')) return true;
     }
     return false;
   }
@@ -179,12 +275,8 @@
     if (!url || url.startsWith('data:') || url.startsWith('blob:')) return false;
     if (isJunkUrl(url)) return false;
     const ct = (contentType || '').toLowerCase();
-    const u = url.toLowerCase();
     return (
-      u.includes('videoplayback') ||
       isGooglevideoUrl(url) ||
-      u.includes('mime=video') ||
-      u.includes('mime=audio') ||
       STREAM_PATH_RE.test(url) ||
       PROGRESSIVE_MEDIA_RE.test(url) ||
       isStreamContentType(ct) ||
@@ -216,7 +308,7 @@
   function hijackPayloadForFalcon(downloadUrl, pageUrl) {
     const raw = String(downloadUrl || '').trim();
     const page = String(pageUrl || '').split('#')[0];
-    if (isGooglevideoUrl(raw) || raw.includes('videoplayback')) {
+    if (isGooglevideoUrl(raw)) {
       if (isYoutubeWatchPage(page)) {
         return { url: page, format: null };
       }
@@ -262,13 +354,7 @@
   }
 
   function isYoutubeWatchPage(url) {
-    if (isYoutubeWatchUrl(url)) return true;
-    try {
-      const u = new URL(url);
-      return u.hostname === 'youtu.be' || u.pathname.startsWith('/shorts/');
-    } catch {
-      return false;
-    }
+    return isYoutubeWatchUrl(url);
   }
 
   /** FAB target: main player on watch pages, otherwise video must carry capturable src. */
@@ -318,8 +404,8 @@
   function hostLabel(url) {
     try {
       const h = new URL(url).hostname.replace(/^www\./, '');
-      if (h.includes('googlevideo')) return 'YouTube CDN';
-      if (h.includes('youtube')) return 'YouTube';
+      if (h === 'googlevideo.com' || h.endsWith('.googlevideo.com')) return 'YouTube CDN';
+      if (isYoutubeHost(h)) return 'YouTube';
       return h;
     } catch {
       return 'Media';
@@ -508,15 +594,7 @@
   /** yt-dlp tiers when CDN capture is empty (modern YouTube uses SABR/cipher). */
   function youtubeFallbackSources(pageUrl) {
     const watch = String(pageUrl || '').split('#')[0];
-    try {
-      const u = new URL(watch);
-      if (!isYoutubeHost(u.hostname)) return [];
-      if (!isYoutubeWatchUrl(watch) && u.hostname !== 'youtu.be' && !u.pathname.startsWith('/shorts/')) {
-        return [];
-      }
-    } catch (_) {
-      return [];
-    }
+    if (!isYoutubeWatchUrl(watch)) return [];
     const tiers = [
       { height: 360, label: '360' },
       { height: 480, label: '480' },
@@ -599,6 +677,11 @@
     videoElementSrc,
     MIN_FAB_PX,
     isYoutubeHost,
+    hostLabel,
+    isYoutubePageUrl,
+    isBlockedLiteralHost,
+    isPublicHttpUrl,
+    urlBasename,
     isGooglevideoUrl,
     isDirectGooglevideoUrl,
     isYoutubeWatchUrl,

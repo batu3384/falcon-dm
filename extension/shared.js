@@ -30,35 +30,62 @@ function fetchWithTimeout(url, options, timeoutMs, label) {
 }
 
 // Connection / UI state shared with popup + toolbar badge.
-// ponytail: MV3 service workers are killed after ~30s of inactivity and these
-// in-memory values reset on restart — most importantly `interceptPaused`, which
-// is a durable user preference. We mirror it (and connectionState) into
-// chrome.storage.session so a SW restart restores the user's choice instead of
-// silently re-enabling download hijacking.
+// ponytail: MV3 service workers die after ~30s idle; in-memory prefs reset.
+// Pause + fail-closed live in chrome.storage.local so Chrome restart keeps them.
 let connectionState = 'offline'; // "connected" | "pending" | "offline"
 let interceptPaused = false; // when true, automatic hijack is off (browser downloads natively)
 let interceptFailClosed = true; // default fail-closed: Chrome does not keep hijacked files
 const RECENT = []; // recent sends shown in the popup queue preview
 const INJECTED = new Set(); // tab ids that already have the on-demand content script
 
-// On SW startup, hydrate the durable preference from session storage.
-(async () => {
+// Writers set dirty so an in-flight hydrate get() cannot clobber a live toggle.
+let pauseDirty = false;
+let failClosedDirty = false;
+let prefsHydrated = false;
+
+function markPauseWrite() {
+  pauseDirty = true;
+}
+
+function markFailClosedWrite() {
+  failClosedDirty = true;
+}
+
+const prefsReady = (async () => {
   try {
-    const { falconInterceptPaused, falconConnectionState } = await chrome.storage.session.get({
-      falconInterceptPaused: false,
+    const { falconConnectionState } = await chrome.storage.session.get({
       falconConnectionState: 'offline',
     });
     const { falconInterceptFailClosed } = await chrome.storage.local.get({
       falconInterceptFailClosed: true,
     });
-    interceptPaused = !!falconInterceptPaused;
-    interceptFailClosed = !!falconInterceptFailClosed;
-    connectionState = falconConnectionState || 'offline';
+    const localPauseBag = await chrome.storage.local.get('falconInterceptPaused');
+    const hasLocalPause = Object.hasOwn(localPauseBag, 'falconInterceptPaused');
+    // Session is a one-shot migrate from the old SW-only pause. Explicit local
+    // false (Resume) must win — defaulted get() treated Resume as "missing".
+    let paused = hasLocalPause ? !!localPauseBag.falconInterceptPaused : false;
+    if (!hasLocalPause) {
+      const sessionPause = await chrome.storage.session.get({ falconInterceptPaused: false });
+      paused = !!sessionPause.falconInterceptPaused;
+      if (paused) {
+        chrome.storage.local.set({ falconInterceptPaused: true }).catch(() => {});
+      }
+    }
+    chrome.storage.session.remove('falconInterceptPaused').catch(() => {});
+    if (!pauseDirty) {
+      interceptPaused = paused;
+    }
+    if (!failClosedDirty) interceptFailClosed = !!falconInterceptFailClosed;
+    if (connectionState === 'offline') {
+      connectionState = falconConnectionState || 'offline';
+    }
     refreshBadge();
   } catch (_) {}
+  prefsHydrated = true;
 })();
 
 async function getInterceptFailClosed() {
+  if (failClosedDirty) return interceptFailClosed;
   try {
     const { falconInterceptFailClosed } = await chrome.storage.local.get({
       falconInterceptFailClosed: true,
@@ -76,6 +103,7 @@ function eraseBrowserDownload(id) {
 }
 
 async function setInterceptFailClosed(next) {
+  markFailClosedWrite();
   interceptFailClosed = !!next;
   await chrome.storage.local.set({ falconInterceptFailClosed: interceptFailClosed });
   return interceptFailClosed;
@@ -141,6 +169,7 @@ async function resetContentScriptGuard(tabId) {
       target: { tabId },
       func: () => {
         delete window.__falconDmReady;
+        delete window.__falconDmContentScript;
         document.querySelectorAll('[data-falcon-fab]').forEach((node) => node.remove());
       },
     });
@@ -166,13 +195,12 @@ async function reinitContentScriptsAfterReload() {
 /** Inject the on-demand content script once per tab. Idempotent. */
 async function ensureContentScript(tabId) {
   if (!tabId || tabId < 0) return false;
-  if (INJECTED.has(tabId)) {
-    try {
-      await chrome.tabs.sendMessage(tabId, { action: 'ping' });
-      return true;
-    } catch (_) {
-      INJECTED.delete(tabId);
-    }
+  try {
+    await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+    INJECTED.add(tabId);
+    return true;
+  } catch (_) {
+    INJECTED.delete(tabId);
   }
   INJECTED.add(tabId);
   try {
@@ -295,9 +323,11 @@ async function rememberClipboardUrl(url) {
 
 function isQueueableClipboardUrl(url) {
   if (!CLIPBOARD_URL_RE.test(url)) return false;
-  if (url.length > 2048) return false;
+  if (url.length > 8192) return false;
   if (String(url).toLowerCase().startsWith('magnet:')) return false;
-  if (self.FalconMedia && self.FalconMedia.isJunkUrl && self.FalconMedia.isJunkUrl(url)) return false;
+  const fm = self.FalconMedia;
+  if (!fm || !fm.isPublicHttpUrl || !fm.isPublicHttpUrl(url)) return false;
+  if (fm.isJunkUrl && fm.isJunkUrl(url)) return false;
   return true;
 }
 
@@ -319,7 +349,7 @@ async function setClipboardMonitorEnabled(next) {
 
 async function fetchBlobPayload(tabId, blobUrl) {
   const maxBytes =
-    (self.FalconMedia && self.FalconMedia.BLOB_MAX_BYTES) || 100 * 1024 * 1024;
+    (self.FalconMedia && self.FalconMedia.BLOB_MAX_BYTES) || 32 * 1024 * 1024;
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
@@ -359,16 +389,26 @@ async function pollClipboardToFalcon() {
   try {
     const text = String(await navigator.clipboard.readText()).trim();
     if (!isQueueableClipboardUrl(text) || text === lastClipboardUrl) return;
-    const filename = text.split('/').pop().split('?')[0] || 'download';
-    await sendToFalcon('/api/add', {
-      url: text,
-      filename,
-      referrer: '',
-      user_agent: navigator.userAgent,
-      cookies: '',
-    });
+    // Remember first so overlapping alarm/tab polls cannot double-POST.
     await rememberClipboardUrl(text);
-    notify(msg('appName', 'Falcon DM'), msg('clipboardQueued', 'URL from clipboard queued'));
+    try {
+      const filename =
+        (self.FalconMedia && self.FalconMedia.urlBasename && self.FalconMedia.urlBasename(text)) ||
+        'download';
+      await sendToFalcon('/api/add', {
+        url: text,
+        filename,
+        referrer: '',
+        user_agent: navigator.userAgent,
+        cookies: '',
+      });
+      notify(msg('appName', 'Falcon DM'), msg('clipboardQueued', 'URL from clipboard queued'));
+    } catch (_) {
+      lastClipboardUrl = '';
+      try {
+        await chrome.storage.local.remove('falconLastClipboardUrl');
+      } catch (_) {}
+    }
   } catch (_) {
     /* ponytail: clipboard may be denied without focus — skip quietly */
   }

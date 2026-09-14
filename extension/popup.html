@@ -4,12 +4,6 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Falcon DM</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
     <link rel="stylesheet" href="chrome.css" />
   </head>
   <body class="popup">
@@ -26,17 +20,17 @@
       <button id="banner-action" class="secondary sm" type="button"></button>
     </div>
 
-    <div id="pending-box" class="pending-box" hidden>
+    <div id="pending-box" class="pending-box" hidden role="status">
       <p id="pending-text"></p>
     </div>
 
-    <div id="blocked-box" class="blocked-box" hidden>
+    <div id="blocked-box" class="blocked-box" hidden role="alert">
       <p id="blocked-text"></p>
       <button id="open-options" class="secondary sm" type="button"></button>
     </div>
 
     <section class="hero-cta">
-      <button id="grab" class="primary" type="button"></button>
+      <button id="grab" class="primary" type="button" aria-describedby="grab-hint"></button>
       <p id="grab-hint" class="help"></p>
     </section>
 
@@ -85,6 +79,7 @@
       <a id="settings" href="#"></a>
     </footer>
 
+    <script src="media-utils.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

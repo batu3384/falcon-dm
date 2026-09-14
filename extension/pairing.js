@@ -76,6 +76,17 @@ async function requestPair() {
   );
 }
 
+function throwIfExtensionBlocked(status) {
+  if (status !== 403) return;
+  setState('blocked');
+  throw new Error(
+    msg(
+      'errorExtensionBlocked',
+      'Extension blocked — open Falcon DM Settings → Reconnect extension',
+    ),
+  );
+}
+
 async function ensurePaired(force = false) {
   if (pairInFlight) return pairInFlight;
   pairInFlight = (async () => {
@@ -115,14 +126,7 @@ async function ensurePaired(force = false) {
       }
 
       const r = await requestPair();
-      if (r.status === 403) {
-        throw new Error(
-          msg(
-            'errorExtensionBlocked',
-            'Extension blocked — open Falcon DM Settings → Reconnect extension',
-          ),
-        );
-      }
+      throwIfExtensionBlocked(r.status);
 
       const finishPair = async (resp) => {
         if (resp.status === 202) return { pending: true };
@@ -143,14 +147,7 @@ async function ensurePaired(force = false) {
       for (let i = 0; first.retry && i < 5; i++) {
         await sleep(500);
         const rr = await requestPair();
-        if (rr.status === 403) {
-          throw new Error(
-            msg(
-              'errorExtensionBlocked',
-              'Extension blocked — open Falcon DM Settings → Reconnect extension',
-            ),
-          );
-        }
+        throwIfExtensionBlocked(rr.status);
         first = await finishPair(rr);
       }
       if (first.token) {
@@ -176,12 +173,7 @@ async function ensurePaired(force = false) {
           continue;
         }
         if (r2.status === 403) {
-          throw new Error(
-            msg(
-              'errorExtensionBlocked',
-              'Extension blocked — open Falcon DM Settings → Reconnect extension',
-            ),
-          );
+          throwIfExtensionBlocked(r2.status);
         }
         const again = await finishPair(r2);
         if (again.token) {
@@ -193,7 +185,7 @@ async function ensurePaired(force = false) {
         msg('errorPairPending', 'Approve this extension in Falcon DM Settings, then try again'),
       );
     } catch (e) {
-      setState('offline');
+      if (connectionState !== 'blocked') setState('offline');
       throw e;
     } finally {
       pairInFlight = null;

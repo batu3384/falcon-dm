@@ -38,17 +38,7 @@ let currentTabUrl = '';
 let currentTabId = 0;
 
 function isYoutubeUrl(url) {
-  try {
-    const h = new URL(url).hostname.toLowerCase();
-    return (
-      h === 'youtu.be' ||
-      h === 'youtube.com' ||
-      h.endsWith('.youtube.com') ||
-      h.endsWith('.youtube-nocookie.com')
-    );
-  } catch {
-    return /youtube\.com|youtu\.be/i.test(url || '');
-  }
+  return !!(globalThis.FalconMedia && FalconMedia.isYoutubePageUrl && FalconMedia.isYoutubePageUrl(url));
 }
 
 function applyStaticI18n() {
@@ -286,6 +276,7 @@ grabBtn.addEventListener('click', () => {
     if (state === 'offline' || state === 'pending') {
       send('auto_pair').then(() => refresh());
     }
+    return;
   }
   openMediaPicker();
 });
@@ -336,10 +327,12 @@ if (failClosedEl) {
     const resp = await send('set_fail_closed', { failClosed: !failClosedEl.checked });
     failClosedEl.disabled = false;
     if (!resp || resp.ok === false) {
-      failClosedEl.checked = !failClosed;
+      failClosedEl.checked = !failClosedEl.checked;
       showNotice(t('errorAppOffline', 'Failed'));
       refresh();
+      return;
     }
+    failClosed = !!resp.failClosed;
   });
 }
 

@@ -26,6 +26,11 @@
   let fabManualPos = null;
   let fabPageKey = '';
 
+  function isYoutubePageUrl(url) {
+    FM = mediaApi() || FM;
+    return !!(FM && FM.isYoutubePageUrl && FM.isYoutubePageUrl(url));
+  }
+
   function pageUrlKey() {
     try {
       return location.href.split('#')[0];
@@ -72,6 +77,7 @@
     const node = document.createElement(tag);
     if (styles) Object.assign(node.style, styles);
     if (props) Object.assign(node, props);
+    if (tag === 'button' && !node.getAttribute('type')) node.type = 'button';
     return node;
   }
 
@@ -290,7 +296,7 @@
 
   function trapTab(shadow, panel, e) {
     const nodes = [...panel.querySelectorAll('button, input, textarea, select, a[href]')].filter(
-      (node) => !node.disabled && node.offsetParent !== null,
+      (node) => !node.disabled && !node.hidden && node.getClientRects().length > 0,
     );
     if (!nodes.length) return;
     const first = nodes[0];
@@ -306,7 +312,10 @@
   }
 
   function openSheet(ariaLabel) {
+    const prev = document.activeElement;
+    document.querySelectorAll('[data-falcon-overlay]').forEach((node) => node.remove());
     const host = el('div', { position: 'fixed', inset: '0', zIndex: '2147483647' });
+    host.setAttribute('data-falcon-overlay', '1');
     const shadow = host.attachShadow({ mode: 'open' });
     injectStyles(shadow);
     const wrap = el('div');
@@ -319,7 +328,11 @@
     wrap.appendChild(panel);
     shadow.appendChild(wrap);
     function close() {
+      const restore = prev && prev.isConnected ? prev : null;
       host.remove();
+      try {
+        restore?.focus?.();
+      } catch (_) {}
     }
     wrap.addEventListener('click', (e) => {
       if (e.target === wrap) close();
@@ -349,7 +362,7 @@
     const head = el('div');
     head.className = 'fm-head';
     const titles = el('div');
-    titles.innerHTML = `<h2 class="fm-title">${esc(msg('downloadVideo', 'Download with Falcon DM'))}</h2><p class="fm-sub">${esc(pageTitle || pageUrl)}</p><p class="fm-steps">${esc(msg('overlaySteps', 'Pick quality → Start download'))}</p>`;
+    titles.innerHTML = `<h2 class="fm-title" id="fm-dialog-title">${esc(msg('downloadVideo', 'Download with Falcon DM'))}</h2><p class="fm-sub">${esc(pageTitle || pageUrl)}</p><p class="fm-steps">${esc(msg('overlaySteps', 'Pick quality → Start download'))}</p>`;
     const closeBtn = el('button');
     closeBtn.className = 'fm-close';
     closeBtn.type = 'button';
@@ -359,15 +372,20 @@
     head.appendChild(titles);
     head.appendChild(closeBtn);
     panel.appendChild(head);
+    panel.setAttribute('aria-labelledby', 'fm-dialog-title');
+    panel.removeAttribute('aria-label');
 
     const errorBox = el('div', { display: 'none' });
     errorBox.className = 'fm-error';
+    errorBox.setAttribute('role', 'alert');
 
     const nameWrap = el('div');
-    nameWrap.innerHTML = `<label class="fm-label">${esc(msg('labelFilename', 'File name'))}</label>`;
     const nameInput = el('input');
+    nameInput.id = 'fm-filename';
     nameInput.className = 'fm-input';
+    nameInput.setAttribute('aria-label', msg('labelFilename', 'File name'));
     nameInput.value = FM.defaultFilename(pageTitle, selected);
+    nameWrap.innerHTML = `<label class="fm-label" for="fm-filename">${esc(msg('labelFilename', 'File name'))}</label>`;
     nameWrap.appendChild(nameInput);
 
     if (!sources.length) {
@@ -381,7 +399,7 @@
     } else {
       const info = el('div');
       info.className = 'fm-info';
-      info.textContent = /youtube\.com|youtu\.be/i.test(pageUrl)
+      info.textContent = isYoutubePageUrl(pageUrl)
         ? msg(
             'youtubeHint',
             'YouTube: Falcon captures the signed CDN link from this tab. Pick Video+Audio for sound.',
@@ -392,16 +410,21 @@
           );
       panel.appendChild(info);
 
-      const label = el('label');
+      const label = el('div');
       label.className = 'fm-label';
+      label.id = 'fm-quality-label';
       label.textContent = msg('labelQuality', 'Quality & format');
       panel.appendChild(label);
 
       const cards = el('div');
       cards.className = 'fm-cards';
+      cards.setAttribute('role', 'radiogroup');
+      cards.setAttribute('aria-labelledby', 'fm-quality-label');
 
       const warn = el('div');
       warn.className = 'fm-warn';
+      warn.setAttribute('role', 'status');
+      warn.setAttribute('aria-live', 'polite');
       warn.textContent = msg(
         'videoOnlyHint',
         'This source has no audio. Pick a Video+Audio card if you want sound.',
@@ -534,7 +557,7 @@
     actions.appendChild(cancelBtn);
     actions.appendChild(goBtn);
     panel.appendChild(actions);
-    closeBtn.focus();
+    nameInput.focus();
   }
 
   async function openDownloadModal() {
@@ -545,15 +568,7 @@
       throw new Error(err);
     }
 
-    let isYtWatch = false;
-    try {
-      const u = new URL(location.href);
-      isYtWatch =
-        FM.isYoutubeHost(u.hostname) &&
-        (FM.isYoutubeWatchUrl(location.href) ||
-          u.hostname === 'youtu.be' ||
-          u.pathname.startsWith('/shorts/'));
-    } catch (_) {}
+    const isYtWatch = !!(FM.isYoutubeWatchUrl && FM.isYoutubeWatchUrl(location.href));
 
     // YouTube watch: overlay from yt-dlp cards immediately — sniff wait was thrown away anyway.
     if (isYtWatch) {
@@ -592,7 +607,7 @@
     const blobSources = FM.collectPageBlobSources ? FM.collectPageBlobSources() : [];
     if (blobSources.length) sources = [...blobSources, ...sources];
 
-    if (!sources.length && /youtube\.com|youtu\.be/i.test(location.href)) {
+    if (!sources.length && isYoutubePageUrl(location.href)) {
       sources = FM.youtubeFallbackSources(location.href);
     }
 
@@ -832,11 +847,15 @@
       try {
         const u = new URL(rawUrl, location.href).href;
         if (seen.has(u) || !/^https?:/i.test(u)) return;
-        if (FM && FM.isJunkUrl && FM.isJunkUrl(u)) return;
+        if (!FM || !FM.isPublicHttpUrl || !FM.isPublicHttpUrl(u)) return;
+        if (FM.isJunkUrl && FM.isJunkUrl(u)) return;
         seen.add(u);
         out.push({
           url: u,
-          filename: (filenameHint || u.split('/').pop().split('?')[0] || 'download').slice(0, 180),
+          filename: (filenameHint || (FM && FM.urlBasename && FM.urlBasename(u)) || 'download').slice(
+            0,
+            180,
+          ),
         });
       } catch (_) {}
     }
@@ -872,6 +891,7 @@
     const titles = el('div');
     const title = el('h2');
     title.className = 'fm-title';
+    title.id = 'fm-dialog-title';
     title.textContent = msg('grabberTitle', 'Link Grabber');
     titles.appendChild(title);
     const closeBtn = el('button');
@@ -883,6 +903,8 @@
     head.appendChild(titles);
     head.appendChild(closeBtn);
     panel.appendChild(head);
+    panel.setAttribute('aria-labelledby', 'fm-dialog-title');
+    panel.removeAttribute('aria-label');
 
     const info = el('p');
     info.className = 'fm-sub';
@@ -973,6 +995,7 @@
         }
         info.textContent = `${failed.length} ${msg('grabberFailed', 'downloads failed')} — ${msg('grabberRetry', 'retry failed items')}`;
         info.style.color = '#f87171';
+        info.setAttribute('role', 'alert');
         send.disabled = false;
       } catch (e) {
         info.textContent = e.message || 'failed';
@@ -983,7 +1006,8 @@
     actions.appendChild(cancel);
     actions.appendChild(send);
     panel.appendChild(actions);
-    closeBtn.focus();
+    const firstCb = list.querySelector('input');
+    (firstCb || send || closeBtn).focus();
   }
 
   syncVideoFab();

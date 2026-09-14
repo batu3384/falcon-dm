@@ -4,12 +4,6 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Falcon DM</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
     <link rel="stylesheet" href="chrome.css" />
   </head>
   <body class="options">
@@ -23,7 +17,7 @@
 
     <div id="status" class="status-card" role="status" aria-live="polite"></div>
 
-    <section class="setup-card">
+    <section class="setup-card" aria-labelledby="id-label" aria-describedby="id-hint">
       <div class="section-title" id="id-label"></div>
       <div class="mono-row">
         <code id="extension-id" class="mono"></code>
@@ -34,25 +28,31 @@
 
     <section class="setup-card">
       <label class="field-label" for="api-token" id="token-label"></label>
-      <input id="api-token" class="field-input mono" type="password" autocomplete="off" />
+      <input
+        id="api-token"
+        class="field-input mono"
+        type="password"
+        autocomplete="off"
+        aria-describedby="token-hint"
+      />
       <p class="hint" id="token-hint"></p>
       <div class="actions">
         <button id="save-token" class="primary" type="button"></button>
       </div>
     </section>
 
-    <div class="actions">
+    <div class="actions" role="group" aria-describedby="hint">
       <button id="pair" class="secondary" type="button"></button>
       <button id="test" class="secondary" type="button"></button>
     </div>
 
     <label class="check-row options-check" for="fail-closed">
-      <input id="fail-closed" type="checkbox" />
+      <input id="fail-closed" type="checkbox" aria-describedby="fail-closed-hint" />
       <span id="fail-closed-label"></span>
     </label>
     <p class="hint" id="fail-closed-hint"></p>
     <label class="check-row options-check" for="clipboard-monitor">
-      <input id="clipboard-monitor" type="checkbox" />
+      <input id="clipboard-monitor" type="checkbox" aria-describedby="clipboard-monitor-hint" />
       <span id="clipboard-monitor-label"></span>
     </label>
     <p class="hint" id="clipboard-monitor-hint"></p>
