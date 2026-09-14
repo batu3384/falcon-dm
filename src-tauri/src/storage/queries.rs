@@ -4,10 +4,14 @@ use crate::util::youtube_dedup_base;
 use chrono::Utc;
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Row, TransactionBehavior};
+use std::collections::HashSet;
+
+fn like_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
 
 fn like_contains_pattern(search: &str) -> String {
-    let escaped = search.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-    format!("%{escaped}%")
+    format!("%{}%", like_escape(search.trim()))
 }
 
 pub enum InsertDownloadResult {
@@ -74,20 +78,22 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn insert_download_deduped(&self, download: &Download) -> Result<InsertDownloadResult> {
+    pub fn insert_download_deduped(&self, download: &mut Download) -> Result<InsertDownloadResult> {
         let mut conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(DatabaseError::from)?;
         let existing = if let Some(base) = youtube_dedup_base(&download.url) {
+            // `_`/`%` in watch IDs are LIKE wildcards unless escaped (F-86).
+            let fmt_pattern = format!("{}#falconfmt=%", like_escape(&base));
             tx.query_row(
                 "SELECT id FROM downloads
-                 WHERE (url = ?1 OR url = ?2 OR url LIKE ?2 || '#falconfmt=%')
+                 WHERE (url = ?1 OR url = ?2 OR url LIKE ?3 ESCAPE '\\')
                    AND status IN ('Queued', 'Downloading', 'Paused', 'Merging')
                    AND archived = 0
                  ORDER BY id DESC
                  LIMIT 1",
-                params![download.url, base],
+                params![download.url, base, fmt_pattern],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -108,6 +114,22 @@ impl Database {
             tx.commit().map_err(DatabaseError::from)?;
             return Ok(InsertDownloadResult::Existing(id));
         }
+        let mut reserved = HashSet::new();
+        {
+            let mut stmt =
+                tx.prepare("SELECT filename FROM downloads WHERE save_path = ?1 AND archived = 0")?;
+            let rows =
+                stmt.query_map(params![&download.save_path], |row| row.get::<_, String>(0))?;
+            for name in rows {
+                reserved.insert(name?);
+            }
+        }
+        download.filename = crate::util::unique_download_filename_reserved(
+            &download.save_path,
+            &download.filename,
+            &reserved,
+        )
+        .map_err(DatabaseError::PoolError)?;
         tx.execute(
             "INSERT INTO downloads (
                 url, filename, save_path, total_size, downloaded_size, status, category,
@@ -138,6 +160,32 @@ impl Database {
         let id = tx.last_insert_rowid();
         tx.commit().map_err(DatabaseError::from)?;
         Ok(InsertDownloadResult::Created(id))
+    }
+
+    pub fn reserved_filenames(
+        &self,
+        save_path: &str,
+        except_id: Option<i64>,
+    ) -> Result<HashSet<String>> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let mut names = HashSet::new();
+        if let Some(id) = except_id {
+            let mut stmt = conn.prepare(
+                "SELECT filename FROM downloads WHERE save_path = ?1 AND archived = 0 AND id != ?2",
+            )?;
+            let rows = stmt.query_map(params![save_path, id], |row| row.get::<_, String>(0))?;
+            for name in rows {
+                names.insert(name?);
+            }
+        } else {
+            let mut stmt = conn
+                .prepare("SELECT filename FROM downloads WHERE save_path = ?1 AND archived = 0")?;
+            let rows = stmt.query_map(params![save_path], |row| row.get::<_, String>(0))?;
+            for name in rows {
+                names.insert(name?);
+            }
+        }
+        Ok(names)
     }
 
     pub fn update_download(&self, id: i64, download: &Download) -> Result<()> {
@@ -308,7 +356,8 @@ impl Database {
             "UPDATE downloads
              SET status = 'Queued', priority = priority + 1, aria2_gid = NULL,
                  completed_at = NULL, error_message = NULL, speed = 0.0,
-                 downloaded_size = 0, total_size = 0
+                 downloaded_size = CASE WHEN status = 'Failed' THEN 0 ELSE downloaded_size END,
+                 total_size = CASE WHEN status = 'Failed' THEN 0 ELSE total_size END
              WHERE id = ?1 AND status IN ({})",
             placeholders.join(", ")
         );
@@ -429,6 +478,11 @@ impl Database {
         Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
     }
 
+    /// Completes Downloading/Merging/Queued. Queued is included so a worker that
+    /// finished after the 35s cancel-wait (schedule/concurrency) still records
+    /// the dest instead of leaving a complete file as Queued (which would restart).
+    /// Paused is excluded — user pause must not complete. Off-window completion
+    /// after that timeout is the cancel-wait ceiling (R-07).
     pub fn finish_stream_if_active(&self, id: i64, size: u64) -> Result<bool> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let rows = conn.execute(
@@ -439,18 +493,8 @@ impl Database {
                  status = 'Completed',
                  completed_at = ?2,
                  error_message = NULL
-             WHERE id = ?3 AND status IN ('Downloading', 'Merging')",
+             WHERE id = ?3 AND status IN ('Downloading', 'Merging', 'Queued')",
             params![size as i64, Utc::now().to_rfc3339(), id],
-        )?;
-        Ok(rows == 1)
-    }
-
-    pub fn pause_stream_if_active(&self, id: i64) -> Result<bool> {
-        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
-        let rows = conn.execute(
-            "UPDATE downloads SET speed = 0.0, status = 'Paused'
-             WHERE id = ?1 AND status IN ('Downloading', 'Merging')",
-            params![id],
         )?;
         Ok(rows == 1)
     }
@@ -585,7 +629,21 @@ impl Database {
 
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        if let Some(ref status) = filter.status {
+        if let Some(ref statuses) = filter.statuses {
+            if statuses.is_empty() {
+                sql.push_str(" AND 0");
+            } else {
+                sql.push_str(" AND status IN (");
+                for (index, status) in statuses.iter().enumerate() {
+                    if index > 0 {
+                        sql.push(',');
+                    }
+                    sql.push('?');
+                    params.push(Box::new(status.as_str().to_string()));
+                }
+                sql.push(')');
+            }
+        } else if let Some(ref status) = filter.status {
             sql.push_str(" AND status = ?");
             params.push(Box::new(status.as_str().to_string()));
         }

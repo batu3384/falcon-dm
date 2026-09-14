@@ -1,6 +1,6 @@
 use crate::storage::models::DownloadStatus;
 use crate::storage::Database;
-use crate::util::sanitize_header_value;
+use crate::util::{sanitize_header_value, sanitize_ytdlp_format};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,9 +100,9 @@ pub async fn process_ytdlp(
     let _run_dir_guard = RunDirGuard(run_dir.clone());
 
     let tmpl = run_dir.join("output.%(ext)s");
-    let fmt = format.unwrap_or(
-        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/bv*+ba/b",
-    );
+    let default_fmt =
+        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/bv*+ba/b";
+    let fmt = format.and_then(sanitize_ytdlp_format).unwrap_or_else(|| default_fmt.to_string());
 
     let mut cmd = Command::new(&bin);
     cmd.arg("--no-playlist")
@@ -124,7 +124,7 @@ pub async fn process_ytdlp(
     if let Some(ref cookies) = headers.cookies {
         let value = sanitize_header_value(cookies);
         if !value.is_empty() {
-            cmd.arg("--add-header").arg(format!("Cookie:{value}"));
+            cmd.arg("--add-header").arg(format!("Cookie: {value}"));
         }
     }
 
@@ -144,7 +144,12 @@ pub async fn process_ytdlp(
             cmd.arg("--user-agent").arg(ua);
         }
     }
-    cmd.arg(url);
+    if let Some(browser) =
+        ytdlp_browser_cookies_arg(headers.cookies.as_deref(), settings.ytdlp_use_browser_cookies)
+    {
+        cmd.arg("--cookies-from-browser").arg(browser);
+    }
+    cmd.arg("--").arg(url);
 
     let mut child = cmd.spawn().map_err(|e| format!("yt-dlp spawn failed: {e}"))?;
     let stderr = child.stderr.take();
@@ -257,7 +262,7 @@ pub async fn process_ytdlp(
     if *cancel.borrow() {
         return Err("Cancelled".into());
     }
-    let size = tokio::task::spawn_blocking(move || -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || -> Result<u64, String> {
         let meta = std::fs::metadata(&final_path_cloned).map_err(|e| e.to_string())?;
         let size = meta.len();
         if size < 1024 {
@@ -273,19 +278,21 @@ pub async fn process_ytdlp(
     .await
     .map_err(|e| format!("yt-dlp finalize task failed: {e}"))??;
 
-    let _ = app_handle.emit(
-        "download-progress",
-        serde_json::json!({
-            "id": download_id,
-            "downloaded_size": size,
-            "total_size": size,
-            "speed": 0.0,
-            "status": "Completed",
-            "connections": 0
-        }),
-    );
-
     Ok(())
+}
+
+fn ytdlp_cookies_from_browser(enabled: bool) -> Option<&'static str> {
+    enabled.then_some("chrome")
+}
+
+fn ytdlp_browser_cookies_arg(
+    explicit_cookies: Option<&str>,
+    enabled: bool,
+) -> Option<&'static str> {
+    if explicit_cookies.map(str::trim).is_some_and(|value| !value.is_empty()) {
+        return None;
+    }
+    ytdlp_cookies_from_browser(enabled)
 }
 
 fn parse_percent(line: &str) -> Option<f64> {
@@ -358,6 +365,16 @@ mod tests {
     #[test]
     fn parse_percent_reads_trailing_number() {
         assert!((parse_percent("[download]  45.2% of ~  70.17MiB").unwrap() - 45.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn cookies_from_browser_only_when_enabled() {
+        assert_eq!(ytdlp_cookies_from_browser(false), None);
+        assert_eq!(ytdlp_cookies_from_browser(true), Some("chrome"));
+        assert_eq!(ytdlp_browser_cookies_arg(Some("sid=1"), true), None);
+        assert_eq!(ytdlp_browser_cookies_arg(Some("  "), true), Some("chrome"));
+        assert_eq!(ytdlp_browser_cookies_arg(None, true), Some("chrome"));
+        assert_eq!(ytdlp_browser_cookies_arg(None, false), None);
     }
 
     #[test]

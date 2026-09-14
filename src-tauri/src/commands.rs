@@ -7,7 +7,7 @@ use crate::util::{
     validate_open_path, LEGACY_DEFAULT_API_TOKEN,
 };
 use crate::{
-    current_settings, enqueue_download, resolve_download_save_path, AppState,
+    current_settings, enqueue_download, parse_extension_id, resolve_download_save_path, AppState,
     ExternalDownloadPayload,
 };
 use tauri::{AppHandle, State};
@@ -44,14 +44,22 @@ pub async fn add_download(
 }
 
 #[tauri::command]
-pub async fn pause_download(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn pause_download(
+    app: AppHandle,
+    id: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
     if let Some(gid) = &dl.aria2_gid {
-        state.engine.pause(gid).await.map_err(|e| e.to_string())?;
+        // Tray Pause All already ignores aria2 errors so HLS/HTTP still pause.
+        if let Err(e) = state.engine.pause(gid).await {
+            log::warn!("aria2 pause {id}: {e}");
+        }
     }
-    // Cancels HLS and yt-dlp tasks (shared watch map)
+    // Cancels HLS and yt-dlp tasks (shared watch map). Timeout still writes
+    // Paused so the UI does not stay Downloading; finish_stream ignores Paused.
     if !state.queue.cancel_and_wait_stream(id).await {
-        return Err("Download is still stopping; try pausing it again shortly".into());
+        log::warn!("pause timed out for download {id}");
     }
     if !state
         .db
@@ -71,11 +79,16 @@ pub async fn pause_download(id: i64, state: State<'_, AppState>) -> Result<(), S
     {
         return Err("Download state changed before pause".into());
     }
+    crate::emit_download_status(&app, &state.db, id, "Paused");
     Ok(())
 }
 
 #[tauri::command]
-pub async fn resume_download(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn resume_download(
+    app: AppHandle,
+    id: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
     if matches!(
         dl.status,
@@ -86,6 +99,7 @@ pub async fn resume_download(id: i64, state: State<'_, AppState>) -> Result<(), 
     if dl.status == DownloadStatus::Queued {
         return Ok(());
     }
+    let was_failed = dl.status == DownloadStatus::Failed;
     if !state
         .db
         .resume_if_current(id, &[DownloadStatus::Paused, DownloadStatus::Failed])
@@ -93,6 +107,10 @@ pub async fn resume_download(id: i64, state: State<'_, AppState>) -> Result<(), 
     {
         return Err("Download state changed before resume".into());
     }
+    if was_failed {
+        crate::clear_failed_retry_artifacts(&dl.save_path, &dl.filename, id);
+    }
+    crate::emit_download_status(&app, &state.db, id, "Queued");
     Ok(())
 }
 
@@ -120,6 +138,14 @@ pub async fn remove_download(
         if let Some(part) = crate::download::http::part_path_for(&dl.save_path, &dl.filename, id) {
             let _ = std::fs::remove_file(part);
         }
+        if let Some(dir) = crate::download::http::segment_dir_for(&dl.save_path, &dl.filename, id) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let hls = crate::download::hls::hls_session_dir(id);
+        let _ = std::fs::remove_dir_all(&hls);
+        if let Some(parent) = hls.parent() {
+            let _ = std::fs::remove_dir_all(parent.join(format!("hls-{id}")));
+        }
     }
     state.db.delete_download(id).map_err(|e| e.to_string())?;
     Ok(())
@@ -135,6 +161,13 @@ pub async fn get_downloads(
     // Explicit pagination boundary: callers may request at most one page.
     filter.limit = Some(limit.or(filter.limit).unwrap_or(200).clamp(1, 200));
     filter.offset = Some(offset.or(filter.offset).unwrap_or(0).max(0));
+    if let Some(search) = filter.search.take() {
+        let clipped: String = search.chars().take(200).collect();
+        filter.search = if clipped.trim().is_empty() { None } else { Some(clipped) };
+    }
+    if let Some(ref mut statuses) = filter.statuses {
+        statuses.truncate(8);
+    }
     state.db.get_downloads(&filter).map_err(|e| e.to_string())
 }
 
@@ -172,11 +205,12 @@ pub fn set_schedule(
     let options =
         ScheduleOptions { start_time: start_time.clone(), stop_time: stop_time.clone(), active };
     validate_schedule(&options)?;
-    let mut settings = Settings::load(&app_data_dir());
+    let mut settings = current_settings(&state);
     settings.schedule_active = active;
     settings.schedule_start = start_time;
     settings.schedule_stop = stop_time;
     settings.save(&app_data_dir())?;
+    *lock_or_recover(&state.settings) = settings;
     state.queue.set_schedule(options);
     Ok(())
 }
@@ -371,7 +405,7 @@ pub async fn move_download(
     let filename = match new_filename.as_deref().filter(|f| !f.trim().is_empty()) {
         Some(f) => {
             let sanitized = sanitize_filename(f);
-            if sanitized != f.trim() {
+            if sanitized.is_empty() {
                 return Err("Invalid download filename".into());
             }
             sanitized
@@ -398,16 +432,27 @@ pub async fn move_download(
         .to_string();
 
     // ponytail: blocking fs move on a pool thread.
-    let result = tokio::task::spawn_blocking(move || copy_file_exclusive(&src, &dest_path))
-        .await
-        .map_err(|e| format!("move task failed: {e}"))?;
+    let src_for_copy = src.clone();
+    let dest_for_copy = dest_path.clone();
+    let result =
+        tokio::task::spawn_blocking(move || copy_file_exclusive(&src_for_copy, &dest_for_copy))
+            .await
+            .map_err(|e| format!("move task failed: {e}"))?;
 
     result.map_err(|e| format!("failed to move file: {e}"))?;
 
-    // Update DB only after the file landed.
+    // Update DB only after the file landed. If that write fails, put the bytes back
+    // so retry still finds the source the row points at.
     dl.filename = filename;
     dl.save_path = dest_save_path;
-    state.db.update_download(id, &dl).map_err(|e| e.to_string())?;
+    if let Err(error) = state.db.update_download(id, &dl) {
+        let src_restore = src.clone();
+        let dest_restore = dest_path.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || copy_file_exclusive(&dest_restore, &src_restore))
+                .await;
+        return Err(error.to_string());
+    }
     Ok(())
 }
 
@@ -433,10 +478,7 @@ pub fn approve_extension_pair(
     extension_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let id = extension_id.trim();
-    if id.is_empty() {
-        return Err("empty extension id".into());
-    }
+    let id = parse_extension_id(&extension_id)?;
     let mut settings = current_settings(&state);
     if !settings.allowed_extension_ids.iter().any(|x| x == id) {
         settings.allowed_extension_ids.push(id.to_string());
@@ -455,15 +497,12 @@ pub async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Re
     if settings.api_token.trim().is_empty() || settings.api_token == LEGACY_DEFAULT_API_TOKEN {
         settings.api_token = current.api_token.clone();
     }
-    for profile in &mut settings.download_profiles {
-        if profile.cookies.as_deref().map(str::trim).unwrap_or("").is_empty() {
-            profile.cookies = current
-                .download_profiles
-                .iter()
-                .find(|old| old.name == profile.name && old.url_pattern == profile.url_pattern)
-                .and_then(|old| old.cookies.clone());
-        }
-    }
+    settings.restore_blank_profile_cookies(&current.download_profiles);
+    // UI never edits the allowlist or scheduler; pairing / set_schedule own them.
+    settings.preserve_command_owned_fields(&current);
+    let live = state.queue.get_schedule();
+    settings.apply_live_schedule(live.active, live.start_time.clone(), live.stop_time.clone());
+    settings.clamp_runtime_bounds();
     settings.save(&dir)?;
 
     state.queue.set_concurrent_downloads(settings.max_concurrent_downloads as usize);
@@ -500,11 +539,11 @@ pub fn install_native_host_manifests(
     if !crate::extension_host::native_host_install_supported() {
         return Err("Native host install is not supported on this platform".to_string());
     }
-    let chrome = chrome_extension_id.trim().to_string();
-    let edge = edge_extension_id
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| chrome.clone());
+    let chrome = parse_extension_id(&chrome_extension_id)?.to_string();
+    let edge = match edge_extension_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => parse_extension_id(id)?.to_string(),
+        None => chrome.clone(),
+    };
     let executable = crate::extension_host::resolve_native_host_binary().ok_or_else(|| {
         "Native host binary not found. Build it with: cargo build -p falcon-dm-native-host"
             .to_string()
@@ -544,12 +583,47 @@ fn version_newer(latest: &str, current: &str) -> bool {
     false
 }
 
+/// Only this repo's GitHub release pages may be handed to the OS opener.
+fn github_release_page_url(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if host != "github.com" && host != "www.github.com" {
+        return None;
+    }
+    let path = parsed.path().to_ascii_lowercase();
+    if path != "/batu3384/falcon-dm" && !path.starts_with("/batu3384/falcon-dm/") {
+        return None;
+    }
+    Some(parsed.to_string())
+}
+
+fn github_api_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+    if attempt.previous().len() >= 4 {
+        return attempt.error("too many redirects");
+    }
+    match attempt.url().host_str().map(|host| host.to_ascii_lowercase()) {
+        Some(host)
+            if host == "github.com" || host == "www.github.com" || host == "api.github.com" =>
+        {
+            attempt.follow()
+        }
+        _ => attempt.error("redirect blocked"),
+    }
+}
+
 #[tauri::command]
 pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let client = reqwest::Client::builder()
         .user_agent("Falcon-DM-Updater")
         .timeout(std::time::Duration::from_secs(12))
+        .redirect(reqwest::redirect::Policy::custom(github_api_redirect))
         .build()
         .map_err(|e| e.to_string())?;
     let resp = client
@@ -567,23 +641,38 @@ pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
         html_url: String,
     }
     let release: GhRelease = resp.json().await.map_err(|e| e.to_string())?;
-    let latest = release.tag_name.trim_start_matches(['v', 'V']).to_string();
+    let latest =
+        release.tag_name.trim_start_matches(['v', 'V']).chars().take(32).collect::<String>();
     Ok(UpdateCheckResult {
         update_available: version_newer(&latest, &current),
         current_version: current,
         latest_version: Some(latest),
-        release_url: Some(release.html_url),
+        release_url: github_release_page_url(&release.html_url),
     })
 }
 
 #[cfg(test)]
 mod update_tests {
-    use super::version_newer;
+    use super::{github_release_page_url, version_newer};
 
     #[test]
     fn version_newer_compares_semver_tuples() {
         assert!(version_newer("0.2.0", "0.1.0"));
         assert!(!version_newer("0.1.0", "0.1.0"));
         assert!(!version_newer("0.1.0", "0.2.0"));
+    }
+
+    #[test]
+    fn github_release_url_stays_on_this_repo() {
+        assert_eq!(
+            github_release_page_url("https://github.com/batu3384/falcon-dm/releases/tag/v0.2.0")
+                .as_deref(),
+            Some("https://github.com/batu3384/falcon-dm/releases/tag/v0.2.0")
+        );
+        assert!(github_release_page_url("https://evil.example/batu3384/falcon-dm").is_none());
+        assert!(github_release_page_url("https://github.com/evil/falcon-dm/releases").is_none());
+        assert!(github_release_page_url("https://github.com/batu3384/falcon-dm.evil/x").is_none());
+        assert!(github_release_page_url("javascript:alert(1)").is_none());
+        assert!(github_release_page_url("http://github.com/batu3384/falcon-dm/releases").is_none());
     }
 }

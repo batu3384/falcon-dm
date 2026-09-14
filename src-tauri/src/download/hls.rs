@@ -20,6 +20,26 @@ struct TempDirGuard {
     path: PathBuf,
 }
 
+/// Sidecar ffmpeg may only read `*.falcondm-temp/*` (capabilities/default.json).
+pub(crate) fn hls_session_dirname(download_id: i64) -> String {
+    format!("hls-{download_id}.falcondm-temp")
+}
+
+pub(crate) fn hls_session_dir(download_id: i64) -> PathBuf {
+    crate::util::app_data_dir().join("downloads_temp").join(hls_session_dirname(download_id))
+}
+
+/// Concat demuxer `file 'name'` — reject anything that is not our `seg_NNNNN.ts`.
+fn ffmpeg_concat_file_line(name: &str) -> Result<String, String> {
+    if name.is_empty()
+        || name.contains("..")
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+    {
+        return Err("Invalid HLS segment name".into());
+    }
+    Ok(format!("file '{name}'\n"))
+}
+
 #[allow(dead_code)]
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
@@ -292,13 +312,12 @@ pub async fn process_hls_stream(
 
     let total_segments = segment_urls.len() as u64;
     let _out_path = Path::new(save_path);
-    // ponytail: temp dir lives under <data_dir>/downloads_temp/, NOT under the
-    // save dir (Downloads). Crash leftovers there are swept by
-    // cleanup_stale_temp_dirs on startup; previously those lived in Downloads and
-    // were never cleaned (the sweep scanned the data dir root).
-    let temp_root = crate::util::app_data_dir().join("downloads_temp");
-    let _ = std::fs::create_dir_all(&temp_root);
-    let temp_dir = temp_root.join(format!("hls-{download_id}"));
+    // ponytail: temp dir lives under <data_dir>/downloads_temp/*.falcondm-temp
+    // so the ffmpeg sidecar scope and startup sweep both match.
+    let temp_dir = hls_session_dir(download_id);
+    if let Some(parent) = temp_dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     fs::create_dir_all(&temp_dir).await.map_err(|e| e.to_string())?;
 
     let concurrency_limit = headers.max_connections.clamp(1, 16);
@@ -529,7 +548,7 @@ pub async fn process_hls_stream(
         // ponytail: segment filenames are always set (seg_NNNNN.ts), so unwrap is safe here.
         let name = p.file_name().unwrap_or_default().to_string_lossy();
         list_file
-            .write_all(format!("file '{}'\n", name).as_bytes())
+            .write_all(ffmpeg_concat_file_line(&name)?.as_bytes())
             .await
             .map_err(|e| e.to_string())?;
     }
@@ -619,6 +638,26 @@ pub async fn process_hls_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hls_session_dir_matches_ffmpeg_sidecar_scope() {
+        let name = hls_session_dirname(7);
+        assert_eq!(name, "hls-7.falcondm-temp");
+        let list = format!("/data/downloads_temp/{name}/list.txt");
+        assert!(list.starts_with('/'));
+        assert!(list.ends_with(".falcondm-temp/list.txt"));
+        let seg = format!("/data/downloads_temp/{name}/seg_00000.ts");
+        assert!(seg.contains(".falcondm-temp/"));
+        assert!(seg.ends_with(".ts"));
+    }
+
+    #[test]
+    fn ffmpeg_concat_file_line_rejects_quotes_and_paths() {
+        assert_eq!(ffmpeg_concat_file_line("seg_00001.ts").unwrap(), "file 'seg_00001.ts'\n");
+        assert!(ffmpeg_concat_file_line("seg_00'01.ts").is_err());
+        assert!(ffmpeg_concat_file_line("../secret.ts").is_err());
+        assert!(ffmpeg_concat_file_line("a/b.ts").is_err());
+    }
 
     #[test]
     fn test_dummy_hls_parse() {

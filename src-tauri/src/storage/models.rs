@@ -139,6 +139,9 @@ pub struct Download {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DownloadFilter {
     pub status: Option<DownloadStatus>,
+    /// When set, `status` is ignored and rows matching any of these statuses are returned.
+    #[serde(default)]
+    pub statuses: Option<Vec<DownloadStatus>>,
     pub category: Option<DownloadCategory>,
     pub search: Option<String>,
     /// Page size cap applied at the DB boundary (None = no limit).

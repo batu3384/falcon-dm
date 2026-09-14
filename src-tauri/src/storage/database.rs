@@ -348,6 +348,30 @@ mod tests {
     }
 
     #[test]
+    fn get_downloads_statuses_matches_any() {
+        let db = Database::in_memory().unwrap();
+        let mut live = create_test_download("live.mp4");
+        live.status = DownloadStatus::Downloading;
+        db.insert_download(&live).unwrap();
+        let mut merging = create_test_download("merge.mp4");
+        merging.status = DownloadStatus::Merging;
+        db.insert_download(&merging).unwrap();
+        let mut done = create_test_download("done.mp4");
+        done.status = DownloadStatus::Completed;
+        db.insert_download(&done).unwrap();
+        let rows = db
+            .get_downloads(&DownloadFilter {
+                statuses: Some(vec![DownloadStatus::Downloading, DownloadStatus::Merging]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| {
+            matches!(row.status, DownloadStatus::Downloading | DownloadStatus::Merging)
+        }));
+    }
+
+    #[test]
     fn cursor_pagination_ignores_rows_inserted_after_first_page() {
         let db = Database::in_memory().expect("Failed to create in-memory db");
         for i in 0..6u32 {
@@ -465,6 +489,36 @@ mod tests {
     }
 
     #[test]
+    fn resume_paused_keeps_progress_failed_resets() {
+        let db = Database::in_memory().unwrap();
+        let mut paused = create_test_download("paused.bin");
+        paused.status = DownloadStatus::Paused;
+        paused.downloaded_size = 500;
+        paused.total_size = 1000;
+        let paused_id = db.insert_download(&paused).unwrap();
+        assert!(db
+            .resume_if_current(paused_id, &[DownloadStatus::Paused, DownloadStatus::Failed])
+            .unwrap());
+        let row = db.get_download(paused_id).unwrap();
+        assert_eq!(row.status, DownloadStatus::Queued);
+        assert_eq!(row.downloaded_size, 500);
+        assert_eq!(row.total_size, 1000);
+
+        let mut failed = create_test_download("failed.bin");
+        failed.status = DownloadStatus::Failed;
+        failed.downloaded_size = 100;
+        failed.total_size = 1000;
+        let failed_id = db.insert_download(&failed).unwrap();
+        assert!(db
+            .resume_if_current(failed_id, &[DownloadStatus::Paused, DownloadStatus::Failed])
+            .unwrap());
+        let row = db.get_download(failed_id).unwrap();
+        assert_eq!(row.status, DownloadStatus::Queued);
+        assert_eq!(row.downloaded_size, 0);
+        assert_eq!(row.total_size, 0);
+    }
+
+    #[test]
     fn legacy_aria2_gid_can_be_cleared_atomically() {
         let db = Database::in_memory().unwrap();
         let mut download = create_test_download("legacy.mp4");
@@ -505,6 +559,50 @@ mod tests {
         let id = db.insert_download(&download).unwrap();
         assert!(!db.finish_stream_if_active(id, 100).unwrap());
         assert_eq!(db.get_download(id).unwrap().status, DownloadStatus::Paused);
+    }
+
+    #[test]
+    fn finish_stream_if_active_completes_queued_after_cancel_timeout() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("queued-finish.mp4");
+        download.status = DownloadStatus::Queued;
+        let id = db.insert_download(&download).unwrap();
+        assert!(db.finish_stream_if_active(id, 2048).unwrap());
+        let row = db.get_download(id).unwrap();
+        assert_eq!(row.status, DownloadStatus::Completed);
+        assert_eq!(row.downloaded_size, 2048);
+    }
+
+    #[test]
+    fn scheduled_pause_does_not_override_user_paused() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("user-paused.bin");
+        download.status = DownloadStatus::Paused;
+        let id = db.insert_download(&download).unwrap();
+        assert!(!db
+            .set_status_if_current(
+                id,
+                &[DownloadStatus::Downloading, DownloadStatus::Merging],
+                &DownloadStatus::Queued,
+            )
+            .unwrap());
+        assert_eq!(db.get_download(id).unwrap().status, DownloadStatus::Paused);
+    }
+
+    #[test]
+    fn scheduled_pause_can_queue_a_still_downloading_stream() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("scheduled.bin");
+        download.status = DownloadStatus::Downloading;
+        let id = db.insert_download(&download).unwrap();
+        assert!(db
+            .set_status_if_current(
+                id,
+                &[DownloadStatus::Downloading, DownloadStatus::Merging],
+                &DownloadStatus::Queued,
+            )
+            .unwrap());
+        assert_eq!(db.get_download(id).unwrap().status, DownloadStatus::Queued);
     }
 
     #[test]
@@ -594,11 +692,92 @@ mod tests {
         let mut second = create_test_download("second.bin");
         second.url = url.to_string();
         second.status = DownloadStatus::Queued;
-        match db.insert_download_deduped(&second).unwrap() {
+        match db.insert_download_deduped(&mut second).unwrap() {
             crate::storage::InsertDownloadResult::Existing(id) => assert_eq!(id, first_id),
             crate::storage::InsertDownloadResult::Created(_) => {
                 panic!("expected existing active download")
             }
         }
+    }
+
+    #[test]
+    fn insert_download_deduped_uniquifies_reserved_filename() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-dm-dedup-fn-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap().to_string();
+
+        let mut first = create_test_download("clip.mp4");
+        first.url = "https://cdn.example.com/a.bin".into();
+        first.save_path = save.clone();
+        match db.insert_download_deduped(&mut first).unwrap() {
+            crate::storage::InsertDownloadResult::Created(_) => {
+                assert_eq!(first.filename, "clip.mp4")
+            }
+            crate::storage::InsertDownloadResult::Existing(_) => panic!("expected created"),
+        }
+
+        let mut second = create_test_download("clip.mp4");
+        second.url = "https://cdn.example.com/b.bin".into();
+        second.save_path = save;
+        match db.insert_download_deduped(&mut second).unwrap() {
+            crate::storage::InsertDownloadResult::Created(_) => {
+                assert_eq!(second.filename, "clip (1).mp4")
+            }
+            crate::storage::InsertDownloadResult::Existing(_) => panic!("expected created"),
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn insert_download_deduped_does_not_treat_underscore_as_like_wildcard() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-dm-like-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap().to_string();
+
+        let mut first = create_test_download("one.mp4");
+        first.url = "https://www.youtube.com/watch?v=abcd_efghi".into();
+        first.status = DownloadStatus::Downloading;
+        first.save_path = save.clone();
+        let first_id = db.insert_download(&first).unwrap();
+
+        let mut second = create_test_download("two.mp4");
+        second.url = "https://www.youtube.com/watch?v=abcdXefghi#falconfmt=best".into();
+        second.status = DownloadStatus::Queued;
+        second.save_path = save;
+        match db.insert_download_deduped(&mut second).unwrap() {
+            crate::storage::InsertDownloadResult::Created(id) => assert_ne!(id, first_id),
+            crate::storage::InsertDownloadResult::Existing(_) => {
+                panic!("underscore in video id must not LIKE-match a different watch URL")
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn insert_download_deduped_still_collapses_same_watch_format_fragment() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-dm-fmt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap().to_string();
+
+        let mut first = create_test_download("one.mp4");
+        first.url = "https://www.youtube.com/watch?v=abcdefghijk".into();
+        first.status = DownloadStatus::Downloading;
+        first.save_path = save.clone();
+        let first_id = db.insert_download(&first).unwrap();
+
+        let mut second = create_test_download("two.mp4");
+        second.url = "https://www.youtube.com/watch?v=abcdefghijk#falconfmt=best".into();
+        second.status = DownloadStatus::Queued;
+        second.save_path = save;
+        match db.insert_download_deduped(&mut second).unwrap() {
+            crate::storage::InsertDownloadResult::Existing(id) => assert_eq!(id, first_id),
+            crate::storage::InsertDownloadResult::Created(_) => {
+                panic!("same watch URL with format fragment should dedupe")
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

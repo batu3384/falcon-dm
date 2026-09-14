@@ -67,6 +67,11 @@ pub fn part_path_for(save_dir: &str, filename: &str, download_id: i64) -> Option
     temporary_path(&destination, download_id).ok()
 }
 
+pub fn segment_dir_for(save_dir: &str, filename: &str, download_id: i64) -> Option<PathBuf> {
+    let destination = crate::util::full_file_path(save_dir, filename);
+    segment_dir(&destination, download_id).ok()
+}
+
 fn total_from_content_range(
     header: Option<&reqwest::header::HeaderValue>,
     resume_from: u64,
@@ -500,15 +505,16 @@ async fn process_http_single(
 ) -> Result<(), String> {
     let initial = validate_fetch_url_async(url).await?;
     let destination = PathBuf::from(out_path);
-    if fs::try_exists(&destination).await.map_err(|e| e.to_string())? {
-        let dest = destination.clone();
-        match tokio::task::spawn_blocking(move || crate::util::validate_completed_file(&dest)).await
-        {
-            Ok(Ok(_)) => return Ok(()),
-            _ => {
-                let _ = fs::remove_file(&destination).await;
-            }
+    let dest_for_inspect = destination.clone();
+    match tokio::task::spawn_blocking(move || crate::util::inspect_download_dest(&dest_for_inspect))
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        crate::util::ExistingDownloadDest::Complete(_)
+        | crate::util::ExistingDownloadDest::Occupied => {
+            return Err("Destination file already exists".into());
         }
+        crate::util::ExistingDownloadDest::Missing => {}
     }
     let parent = destination.parent().ok_or_else(|| "Invalid output path".to_string())?;
     fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
@@ -691,6 +697,17 @@ async fn process_http_dispatch(
     db: Option<Database>,
 ) -> Result<(), String> {
     let destination = PathBuf::from(out_path);
+    let dest_for_inspect = destination.clone();
+    match tokio::task::spawn_blocking(move || crate::util::inspect_download_dest(&dest_for_inspect))
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        crate::util::ExistingDownloadDest::Complete(_)
+        | crate::util::ExistingDownloadDest::Occupied => {
+            return Err("Destination file already exists".into());
+        }
+        crate::util::ExistingDownloadDest::Missing => {}
+    }
     let temp = temporary_path(&destination, download_id)?;
     let resume_from =
         fs::metadata(&temp).await.ok().map(|meta| meta.len()).filter(|len| *len > 0).unwrap_or(0);
@@ -791,6 +808,12 @@ mod tests {
     fn part_path_uses_download_id() {
         let path = part_path_for("/tmp", "movie.mp4", 7).unwrap();
         assert!(path.ends_with(".movie.mp4.7.falcon.part"));
+    }
+
+    #[test]
+    fn segment_dir_uses_download_id() {
+        let path = segment_dir_for("/tmp", "movie.mp4", 7).unwrap();
+        assert!(path.ends_with(".movie.mp4.7.falcon.segments"));
     }
 
     async fn spawn_range_server(payload: std::sync::Arc<Vec<u8>>) -> String {

@@ -7,7 +7,8 @@ use crate::storage::{
 };
 use crate::util::{
     is_dash_url, is_googlevideo_url, is_hls_url, is_youtube_watch_url, lock_or_recover,
-    split_falcon_format, youtube_page_url_for_download, ytdlp_source_url_for_download,
+    split_falcon_format, unique_download_filename_reserved, youtube_page_url_for_download,
+    ytdlp_source_url_for_download,
 };
 use chrono::{Local, NaiveTime};
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,34 @@ pub(crate) fn route_queued_download(
     }
 }
 
+/// Enqueue uniquifies against disk, then yt-dlp may rewrite `.webm` → `.mp4`.
+/// Re-uniquify so two jobs do not share one dest (F-16 residual).
+fn uniquify_assigned_filename(
+    db: &Database,
+    dl_id: i64,
+    save_path: &str,
+    filename: &str,
+) -> String {
+    let reserved = db.reserved_filenames(save_path, Some(dl_id)).unwrap_or_default();
+    let unique = unique_download_filename_reserved(save_path, filename, &reserved)
+        .unwrap_or_else(|_| filename.to_string());
+    if unique != filename {
+        let _ = db.set_filename_if_current(dl_id, &[DownloadStatus::Downloading], &unique);
+    }
+    unique
+}
+
+fn http_dest_needs_uniquify(
+    dest: crate::util::ExistingDownloadDest,
+    _downloaded_size: u64,
+) -> bool {
+    match dest {
+        crate::util::ExistingDownloadDest::Occupied => true,
+        crate::util::ExistingDownloadDest::Complete(_) => true,
+        crate::util::ExistingDownloadDest::Missing => false,
+    }
+}
+
 pub struct QueueManager {
     pub schedule: Arc<Mutex<ScheduleOptions>>,
     pub max_concurrent: Arc<AtomicUsize>,
@@ -119,7 +148,7 @@ impl QueueManager {
     }
 
     pub fn set_concurrent_downloads(&self, limit: usize) {
-        self.max_concurrent.store(limit.max(1), Ordering::SeqCst);
+        self.max_concurrent.store(limit.clamp(1, 32), Ordering::SeqCst);
     }
 
     pub fn set_max_connections(&self, limit: usize) {
@@ -156,6 +185,19 @@ impl QueueManager {
         .is_ok()
     }
 
+    fn demote_active_to_queued(db: &Database, app: &tauri::AppHandle, id: i64) {
+        if db
+            .set_status_if_current(
+                id,
+                &[DownloadStatus::Downloading, DownloadStatus::Merging],
+                &DownloadStatus::Queued,
+            )
+            .unwrap_or(false)
+        {
+            crate::emit_download_status(app, db, id, "Queued");
+        }
+    }
+
     pub async fn tick(
         &self,
         db: &Database,
@@ -184,13 +226,11 @@ impl QueueManager {
         let mut downloading = db
             .get_downloads(&DownloadFilter {
                 status: Some(DownloadStatus::Downloading),
-                limit: Some(256),
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
         if let Ok(merging) = db.get_downloads(&DownloadFilter {
             status: Some(DownloadStatus::Merging),
-            limit: Some(256),
             ..Default::default()
         }) {
             downloading.extend(merging);
@@ -198,19 +238,13 @@ impl QueueManager {
 
         if is_scheduled_paused {
             for dl in downloading {
+                let Some(id) = dl.id else { continue };
                 if let Some(gid) = &dl.aria2_gid {
                     let _ = engine.pause(gid).await;
-                } else {
-                    if !self.cancel_and_wait_stream(dl.id.unwrap()).await {
-                        log::warn!("scheduled pause timed out for download {}", dl.id.unwrap());
-                        continue;
-                    }
+                } else if !self.cancel_and_wait_stream(id).await {
+                    log::warn!("scheduled pause timed out for download {id}");
                 }
-                let _ = db.set_status_if_current(
-                    dl.id.unwrap(),
-                    &[DownloadStatus::Downloading, DownloadStatus::Merging, DownloadStatus::Paused],
-                    &DownloadStatus::Queued,
-                );
+                Self::demote_active_to_queued(db, &app_handle, id);
             }
             return Ok(());
         }
@@ -223,19 +257,13 @@ impl QueueManager {
             sorted.sort_by_key(|b| std::cmp::Reverse(b.priority));
 
             for dl in sorted.into_iter().skip(max_concurrent_val) {
+                let Some(id) = dl.id else { continue };
                 if let Some(gid) = &dl.aria2_gid {
                     let _ = engine.pause(gid).await;
-                } else {
-                    if !self.cancel_and_wait_stream(dl.id.unwrap()).await {
-                        log::warn!("concurrency pause timed out for download {}", dl.id.unwrap());
-                        continue;
-                    }
+                } else if !self.cancel_and_wait_stream(id).await {
+                    log::warn!("concurrency pause timed out for download {id}");
                 }
-                let _ = db.set_status_if_current(
-                    dl.id.unwrap(),
-                    &[DownloadStatus::Downloading, DownloadStatus::Merging, DownloadStatus::Paused],
-                    &DownloadStatus::Queued,
-                );
+                Self::demote_active_to_queued(db, &app_handle, id);
                 active_count = active_count.saturating_sub(1);
             }
         }
@@ -257,6 +285,14 @@ impl QueueManager {
                             let Some(source) =
                                 ytdlp_source_url_for_download(&dl.url, dl.referrer.as_deref())
                             else {
+                                // ponytail: leave-Queued continue blocked take_queued(1) forever.
+                                let _ = db.set_status_error_if_current(
+                                    dl_id,
+                                    &[DownloadStatus::Queued],
+                                    &DownloadStatus::Failed,
+                                    Some("not a real media url"),
+                                    None,
+                                );
                                 continue;
                             };
                             let Some(rx) = self.try_claim_stream(db, dl_id) else {
@@ -270,13 +306,9 @@ impl QueueManager {
                             if !fname.to_lowercase().ends_with(".mp4") {
                                 if let Some(stem) = std::path::Path::new(&fname).file_stem() {
                                     fname = format!("{}.mp4", stem.to_string_lossy());
-                                    let _ = db.set_filename_if_current(
-                                        dl_id,
-                                        &[DownloadStatus::Downloading],
-                                        &fname,
-                                    );
                                 }
                             }
+                            fname = uniquify_assigned_filename(db, dl_id, &dl.save_path, &fname);
                             let mut final_path = std::path::PathBuf::from(&dl.save_path);
                             final_path.push(&fname);
                             self.spawn_stream(
@@ -301,8 +333,10 @@ impl QueueManager {
                                 continue;
                             };
                             dl.status = DownloadStatus::Downloading;
+                            let fname =
+                                uniquify_assigned_filename(db, dl_id, &dl.save_path, &dl.filename);
                             let mut final_path = std::path::PathBuf::from(&dl.save_path);
-                            final_path.push(&dl.filename);
+                            final_path.push(&fname);
                             self.spawn_stream(
                                 db,
                                 app_handle.clone(),
@@ -330,8 +364,17 @@ impl QueueManager {
                             let Some(rx) = self.try_claim_stream(db, dl_id) else {
                                 continue;
                             };
+                            let mut fname = dl.filename.clone();
+                            let dest = crate::util::full_file_path(&dl.save_path, &fname);
+                            if http_dest_needs_uniquify(
+                                crate::util::inspect_download_dest(&dest),
+                                dl.downloaded_size,
+                            ) {
+                                fname =
+                                    uniquify_assigned_filename(db, dl_id, &dl.save_path, &fname);
+                            }
                             let mut final_path = std::path::PathBuf::from(&dl.save_path);
-                            final_path.push(&dl.filename);
+                            final_path.push(&fname);
                             self.spawn_stream(
                                 db,
                                 app_handle.clone(),
@@ -355,6 +398,13 @@ impl QueueManager {
                         }
                         DownloadRoute::Aria2 => {
                             let Some(gid) = &dl.aria2_gid else {
+                                let _ = db.set_status_error_if_current(
+                                    dl_id,
+                                    &[DownloadStatus::Queued],
+                                    &DownloadStatus::Failed,
+                                    Some("Download state changed before resume"),
+                                    None,
+                                );
                                 continue;
                             };
                             if engine
@@ -518,10 +568,21 @@ async fn run_stream_task(
         }
     };
 
-    match result {
-        Ok(_) => {
-            let final_size =
-                tokio::fs::metadata(&save_path_str).await.map(|m| m.len()).unwrap_or(0);
+    let outcome = match result {
+        Ok(()) => {
+            let path = save_path_str.to_string();
+            tokio::task::spawn_blocking(move || {
+                crate::util::validate_completed_file(std::path::Path::new(&path))
+            })
+            .await
+            .map_err(|e| format!("stream finalize task failed: {e}"))
+            .and_then(|inner| inner)
+        }
+        Err(e) => Err(e),
+    };
+
+    match outcome {
+        Ok(final_size) => {
             if db.finish_stream_if_active(dl_id, final_size).unwrap_or(false) {
                 let _ = db.clear_session_cookies(dl_id);
                 let _ = app_handle.emit(
@@ -540,39 +601,56 @@ async fn run_stream_task(
                 // Never remove a destination that the user may still own.
             }
         }
+        // Cancelled: leave Downloading/Merging. pause/schedule/concurrency
+        // write Paused or Queued after cancel_and_wait.
+        Err(e) if e == "Cancelled" => {}
         Err(e) => {
-            if e == "Cancelled" {
-                let _ = db.pause_stream_if_active(dl_id);
-            } else {
-                log::error!("stream task {dl_id} error: {e}");
-                // ponytail: classify transient vs fatal. Transient errors (rate
-                // limits, temporary unavailability, network blips) flip the job
-                // back to Queued so the next tick retries it instead of burning
-                // it as permanently Failed — matching the aria2 transient path.
-                let lower = e.to_lowercase();
-                let is_transient = lower.contains("temporarily")
-                    || lower.contains("rate limit")
-                    || lower.contains("too many requests")
-                    || lower.contains("try again")
-                    || lower.contains("timed out")
-                    || lower.contains("timeout")
-                    || lower.contains("connection reset")
-                    || lower.contains("network error");
-                let next_status =
-                    if is_transient { DownloadStatus::Queued } else { DownloadStatus::Failed };
-                if db
-                    .set_status_error_if_current(
-                        dl_id,
-                        &[DownloadStatus::Downloading, DownloadStatus::Merging],
-                        &next_status,
-                        Some(&e),
-                        Some(0.0),
-                    )
-                    .unwrap_or(false)
-                    && !is_transient
-                {
+            log::error!("stream task {dl_id} error: {e}");
+            // ponytail: classify transient vs fatal. Transient errors (rate
+            // limits, temporary unavailability, network blips) flip the job
+            // back to Queued so the next tick retries it instead of burning
+            // it as permanently Failed — matching the aria2 transient path.
+            let lower = e.to_lowercase();
+            let is_transient = lower.contains("temporarily")
+                || lower.contains("rate limit")
+                || lower.contains("too many requests")
+                || lower.contains("try again")
+                || lower.contains("timed out")
+                || lower.contains("timeout")
+                || lower.contains("connection reset")
+                || lower.contains("network error");
+            let next_status =
+                if is_transient { DownloadStatus::Queued } else { DownloadStatus::Failed };
+            if db
+                .set_status_error_if_current(
+                    dl_id,
+                    &[DownloadStatus::Downloading, DownloadStatus::Merging],
+                    &next_status,
+                    Some(&e),
+                    Some(0.0),
+                )
+                .unwrap_or(false)
+            {
+                if !is_transient {
                     let _ = db.clear_session_cookies(dl_id);
                 }
+                let (downloaded_size, total_size) = db
+                    .get_download(dl_id)
+                    .ok()
+                    .map(|row| (row.downloaded_size, row.total_size.max(row.downloaded_size)))
+                    .unwrap_or((0, 0));
+                let _ = app_handle.emit(
+                    "download-progress",
+                    serde_json::json!({
+                        "id": dl_id,
+                        "downloaded_size": downloaded_size,
+                        "total_size": total_size,
+                        "speed": 0.0,
+                        "status": if is_transient { "Queued" } else { "Failed" },
+                        "connections": 0,
+                        "error_message": if is_transient { None::<String> } else { Some(e) }
+                    }),
+                );
             }
         }
     }
@@ -588,6 +666,15 @@ mod tests {
         let qm = QueueManager::new();
         assert_eq!(qm.max_concurrent.load(Ordering::SeqCst), 3);
         assert!(!qm.get_schedule().active);
+    }
+
+    #[test]
+    fn http_dest_uniquifies_occupied_and_foreign_complete() {
+        use crate::util::ExistingDownloadDest;
+        assert!(http_dest_needs_uniquify(ExistingDownloadDest::Occupied, 900));
+        assert!(http_dest_needs_uniquify(ExistingDownloadDest::Complete(1024), 0));
+        assert!(http_dest_needs_uniquify(ExistingDownloadDest::Complete(1024), 512));
+        assert!(!http_dest_needs_uniquify(ExistingDownloadDest::Missing, 0));
     }
 
     #[test]
@@ -687,6 +774,12 @@ mod tests {
         assert_eq!(
             route_queued_download("https://cdn.example.com/a.bin", None, true),
             DownloadRoute::Aria2
+        );
+        let opaque = "https://rr5---sn.googlevideo.com/videoplayback?sabr=1&id=o-APsuIA4T4oPiiO6f7-MNbOU-LO0MDxOui5B37OAnUHZZ";
+        assert_eq!(route_queued_download(opaque, None, false), DownloadRoute::YtDlp);
+        assert!(
+            ytdlp_source_url_for_download(opaque, None).is_none(),
+            "opaque googlevideo without watch page must fail, not stay queued"
         );
     }
 }

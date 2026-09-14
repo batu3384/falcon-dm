@@ -58,23 +58,29 @@ pub fn is_dash_url(url: &str) -> bool {
 }
 
 /// True if a resolved IP lands in a non-routable/private range (SSRF target).
-/// Covers loopback, RFC1918, link-local, unspecified, CGNAT (100.64.0.0/10),
-/// IPv6 ULA/link-local, and IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1).
+/// Covers loopback, RFC1918, link-local, unspecified, 0.0.0.0/8, multicast/broadcast,
+/// CGNAT (100.64.0.0/10), IPv6 ULA/link-local/multicast, and IPv4-mapped IPv6.
 fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
     if loopback_exception(ip) {
         return false;
     }
     match ip {
         std::net::IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || {
-                // CGNAT 100.64.0.0/10 (RFC 6598)
-                let o = v4.octets();
-                o[0] == 100 && (64..=127).contains(&o[1])
-            }
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || {
+                    let o = v4.octets();
+                    o[0] == 0 || o[0] >= 224 || (o[0] == 100 && (64..=127).contains(&o[1]))
+                }
         }
         std::net::IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
+                || v6.is_multicast()
                 || {
                     let s = v6.segments();
                     // unique local fc00::/7 and link-local fe80::/10
@@ -88,7 +94,7 @@ fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
 /// Literal host check: blocks "localhost" and any IP literal in a private range.
 fn is_blocked_download_host(host: &str) -> bool {
     let h = host.trim().trim_matches('[').trim_matches(']').to_lowercase();
-    if h == "localhost" {
+    if h == "localhost" || h.ends_with(".localhost") {
         #[cfg(test)]
         if ALLOW_LOOPBACK.with(|c| c.get()) {
             return false;
@@ -152,6 +158,9 @@ pub fn validate_download_url(url: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("URL is empty".into());
     }
+    if trimmed.len() > 8192 {
+        return Err("URL is too long".into());
+    }
     if trimmed.to_lowercase().starts_with("magnet:") {
         return Err("ERR_UNSUPPORTED_MAGNET".into());
     }
@@ -182,7 +191,11 @@ pub fn validate_fetch_url(raw: &str) -> Result<url::Url, String> {
 pub async fn validate_fetch_url_async(raw: &str) -> Result<url::Url, String> {
     let raw = raw.to_string();
     tokio::time::timeout(std::time::Duration::from_secs(5), async move {
-        let parsed = url::Url::parse(raw.trim()).map_err(|e| format!("Invalid URL: {e}"))?;
+        let trimmed = raw.trim();
+        if trimmed.len() > 8192 {
+            return Err("URL is too long".into());
+        }
+        let parsed = url::Url::parse(trimmed).map_err(|e| format!("Invalid URL: {e}"))?;
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(format!("Unsupported fetch URL scheme: {}", parsed.scheme()));
         }
@@ -248,16 +261,30 @@ fn regex_lite_remove(input: &str, pattern: &str) -> Result<String, ()> {
 
 /// Reject YouTube UI placeholders and tracking endpoints mistaken for media.
 pub fn is_junk_media_url(url: &str) -> bool {
-    let lower = url.to_lowercase();
-    lower.contains("no_input.mp3")
-        || lower.contains("/s/search/")
-        || lower.contains("generate_204")
-        || lower.contains("/ptracking")
-        || lower.contains("/log_event")
-        || lower.contains("doubleclick")
-        || (lower.contains("youtube.com")
-            && lower.contains(".mp3")
-            && !lower.contains("videoplayback"))
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    let mut path_q = parsed.path().to_ascii_lowercase();
+    if let Some(query) = parsed.query() {
+        path_q.push('?');
+        path_q.push_str(&query.to_ascii_lowercase());
+    }
+    if path_q.contains("no_input.mp3") || path_q.contains("generate_204") {
+        return true;
+    }
+    if host == "doubleclick.net" || host.ends_with(".doubleclick.net") {
+        return true;
+    }
+    if is_youtube_host(&host)
+        && (path_q.contains("/s/search/")
+            || path_q.contains("/ptracking")
+            || path_q.contains("/log_event")
+            || (path_q.contains(".mp3") && !path_q.contains("videoplayback")))
+    {
+        return true;
+    }
+    false
 }
 
 pub fn is_youtube_host(host: &str) -> bool {
@@ -299,9 +326,6 @@ pub fn is_googlevideo_url(url: &str) -> bool {
         .ok()
         .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
         .unwrap_or_default();
-    if host.is_empty() {
-        return url.to_ascii_lowercase().contains("googlevideo.com");
-    }
     host == "googlevideo.com" || host.ends_with(".googlevideo.com")
 }
 
@@ -330,18 +354,52 @@ pub fn split_falcon_format(url: &str) -> (String, Option<String>) {
                 .next()
                 .map(|(_, v)| v.into_owned())
                 .unwrap_or_else(|| enc.to_string());
-            if !decoded.is_empty() {
-                return (base.to_string(), Some(decoded));
+            if let Some(clean) = sanitize_ytdlp_format(&decoded) {
+                return (base.to_string(), Some(clean));
             }
+            return (base.to_string(), None);
         }
     }
     (url.to_string(), None)
 }
 
+/// yt-dlp `-f` comes from the extension. Keep it a selector, never extra argv.
+pub fn sanitize_ytdlp_format(fmt: &str) -> Option<String> {
+    let s = fmt.trim();
+    if s.is_empty() || s.len() > 200 || s.starts_with('-') || s.contains("--") {
+        return None;
+    }
+    if !s.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '[' | ']'
+                    | '('
+                    | ')'
+                    | '<'
+                    | '>'
+                    | '='
+                    | '+'
+                    | '/'
+                    | '*'
+                    | ','
+                    | '.'
+                    | ':'
+                    | '~'
+                    | '_'
+                    | '-'
+                    | ' '
+            )
+    }) {
+        return None;
+    }
+    Some(s.to_string())
+}
+
 /// Attach or replace yt-dlp format selector. `format` wins over existing fragment.
 pub fn attach_falcon_format(url: &str, format: Option<&str>) -> String {
     let (base, existing) = split_falcon_format(url);
-    let fmt = format.map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_string()).or(existing);
+    let fmt = format.and_then(sanitize_ytdlp_format).or(existing);
     match fmt {
         Some(f) => {
             let enc: String = url::form_urlencoded::byte_serialize(f.as_bytes()).collect();
@@ -514,7 +572,12 @@ mod tests {
 
     #[test]
     fn test_validate_url() {
-        assert!(validate_download_url("https://example.com/a").is_ok());
+        // Literal public IP — hostname DNS (example.com → `::` on some resolvers) is not the unit.
+        assert!(
+            validate_download_url("https://1.1.1.1/a").is_ok(),
+            "{:?}",
+            validate_download_url("https://1.1.1.1/a")
+        );
         assert!(validate_download_url("magnet:?xt=urn:btih:abc").is_err());
         assert_eq!(
             validate_download_url("magnet:?xt=urn:btih:abc").unwrap_err(),
@@ -525,6 +588,11 @@ mod tests {
         assert!(validate_download_url("http://127.0.0.1/secret").is_err());
         assert!(validate_download_url("http://localhost/x").is_err());
         assert!(validate_download_url("http://192.168.1.1/a").is_err());
+        assert_eq!(
+            validate_download_url(&format!("https://example.com/{}", "a".repeat(8200)))
+                .unwrap_err(),
+            "URL is too long"
+        );
     }
 
     #[test]
@@ -551,6 +619,7 @@ mod tests {
         assert!(validate_fetch_url("http://127.0.0.1/live.m3u8").is_err());
         assert!(validate_fetch_url("http://[::1]/live.m3u8").is_err());
         assert!(validate_fetch_url("file:///tmp/live.m3u8").is_err());
+        assert!(validate_fetch_url("http://127.1/x").is_err());
     }
 
     #[test]
@@ -570,10 +639,17 @@ mod tests {
     #[test]
     fn test_ipv4_mapped_loopback_blocked() {
         assert!(is_blocked_download_host("::ffff:127.0.0.1"));
+        assert!(is_blocked_download_host("::ffff:7f00:1"));
         assert!(is_blocked_download_host("::ffff:192.168.1.1"));
         assert!(!is_blocked_download_host("::ffff:8.8.8.8"));
+        assert!(!is_blocked_download_host("::ffff:808:808"));
         assert!(is_blocked_download_host("::1"));
         assert!(is_blocked_download_host("0.0.0.0"));
+        assert!(is_blocked_download_host("0.0.0.1"));
+        assert!(is_blocked_download_host("224.0.0.1"));
+        assert!(is_blocked_download_host("255.255.255.255"));
+        assert!(is_blocked_download_host("foo.localhost"));
+        assert!(is_blocked_download_host("ff02::1"));
     }
 
     #[test]
@@ -596,6 +672,7 @@ mod tests {
         assert!(!is_youtube_host("notyoutube.com"));
         assert!(!is_youtube_host("evil-youtube.com"));
         assert!(!is_googlevideo_url("https://cdn.example.com/videoplayback?id=1"));
+        assert!(!is_googlevideo_url("not-a-url-googlevideo.com"));
         assert!(is_googlevideo_url("https://rr1---sn-abc.googlevideo.com/videoplayback?id=1"));
     }
 
@@ -673,6 +750,16 @@ mod tests {
             attach_falcon_format("https://x.com/a#falconfmt=old", Some("new")),
             attach_falcon_format("https://x.com/a", Some("new"))
         );
+        assert_eq!(
+            attach_falcon_format("https://x.com/a", Some("best --exec calc")),
+            "https://x.com/a"
+        );
+        assert!(sanitize_ytdlp_format("best[height<=720]").is_some());
+        assert!(
+            sanitize_ytdlp_format("bestvideo[height<=1080][ext=mp4]+bestaudio/bv*+ba/b").is_some()
+        );
+        assert!(sanitize_ytdlp_format("-o /tmp/x").is_none());
+        assert!(sanitize_ytdlp_format("best;calc").is_none());
     }
 
     #[test]
@@ -697,6 +784,12 @@ mod tests {
     #[test]
     fn test_junk_and_normalize_media_url() {
         assert!(is_junk_media_url("https://www.youtube.com/s/search/audio/no_input.mp3"));
+        assert!(is_junk_media_url("https://ad.doubleclick.net/track"));
+        assert!(!is_junk_media_url("https://cdn.example.com/doubleclick-audit.pdf"));
+        assert!(!is_junk_media_url("https://cdn.example.com/file.mp3?ref=youtube.com"));
+        assert!(!is_junk_media_url("https://docs.example.com/s/search/guide.pdf"));
+        assert!(!is_junk_media_url("https://cdn.example.com/api/log_event/export.csv"));
+        assert!(is_junk_media_url("https://www.youtube.com/ptracking?event=1"));
         let n = normalize_media_url(
             "https://rr1.googlevideo.com/videoplayback?itag=18&range=0-100&sq=1",
         );

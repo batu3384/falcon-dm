@@ -6,7 +6,10 @@ use crate::settings::Settings;
 use crate::storage::models::{DownloadFilter, DownloadStatus};
 use crate::storage::Database;
 use crate::util::{self, app_data_dir, is_hls_url};
-use crate::{fail_invalid_download, finalize_completed_download, handle_deep_link_url, AppState};
+use crate::{
+    clear_failed_retry_artifacts, emit_download_status, fail_invalid_download,
+    finalize_completed_download, handle_deep_link_url, AppState,
+};
 use axum::{
     http::{header, HeaderName, Method},
     middleware::from_fn_with_state,
@@ -34,15 +37,14 @@ struct ProgressPayload {
     speed: f64,
     status: String,
     connections: u32,
+    error_message: Option<String>,
 }
 
 fn restore_orphan_downloads(db: &Database) {
     for status in [DownloadStatus::Downloading, DownloadStatus::Merging] {
-        let Ok(active) = db.get_downloads(&DownloadFilter {
-            status: Some(status.clone()),
-            limit: Some(10_000),
-            ..Default::default()
-        }) else {
+        let Ok(active) = db
+            .get_downloads(&DownloadFilter { status: Some(status.clone()), ..Default::default() })
+        else {
             continue;
         };
         for dl in active {
@@ -64,11 +66,9 @@ fn restore_orphan_downloads(db: &Database) {
         }
     }
     for status in [DownloadStatus::Completed, DownloadStatus::Failed] {
-        if let Ok(done) = db.get_downloads(&DownloadFilter {
-            status: Some(status),
-            limit: Some(10_000),
-            ..Default::default()
-        }) {
+        if let Ok(done) =
+            db.get_downloads(&DownloadFilter { status: Some(status), ..Default::default() })
+        {
             for dl in done {
                 if let Some(id) = dl.id {
                     if let Err(e) = db.clear_session_cookies(id) {
@@ -84,7 +84,6 @@ fn cleanup_stale_http_parts(db: &Database) {
     let Ok(completed) = db.get_downloads(&DownloadFilter {
         status: Some(DownloadStatus::Completed),
         archived: None,
-        limit: Some(10_000),
         ..Default::default()
     }) else {
         return;
@@ -92,7 +91,6 @@ fn cleanup_stale_http_parts(db: &Database) {
     let Ok(archived) = db.get_downloads(&DownloadFilter {
         status: Some(DownloadStatus::Completed),
         archived: Some(true),
-        limit: Some(10_000),
         ..Default::default()
     }) else {
         return;
@@ -122,7 +120,11 @@ fn cleanup_stale_temp_dirs(root: &std::path::Path) {
         let path = entry.path();
         if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.ends_with(".falcondm-temp") {
+                if name.ends_with(".falcondm-temp")
+                    || name.strip_prefix("hls-").is_some_and(|rest| {
+                        !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                    })
+                {
                     let _ = std::fs::remove_dir_all(&path);
                 }
             }
@@ -232,7 +234,6 @@ fn spawn_progress_poll(app_handle: tauri::AppHandle) {
                 let state = app_handle.state::<AppState>();
                 if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
                     status: Some(DownloadStatus::Downloading),
-                    limit: Some(256),
                     ..Default::default()
                 }) {
                     // Batch all active aria2 statuses in one RPC; fall back to per-gid tellStatus
@@ -364,7 +365,7 @@ fn spawn_progress_poll(app_handle: tauri::AppHandle) {
                             speed = 0.0;
                         }
 
-                        let poll_id = dl.id.unwrap();
+                        let Some(poll_id) = dl.id else { continue };
                         let committed = match state.db.update_progress_if_current(
                             poll_id,
                             &[DownloadStatus::Downloading],
@@ -404,13 +405,14 @@ fn spawn_progress_poll(app_handle: tauri::AppHandle) {
                         }
 
                         let payload = ProgressPayload {
-                            id: dl.id.unwrap(),
+                            id: poll_id,
                             downloaded_size: dl.downloaded_size,
                             // ponytail: guard stale/underreported total so the UI never shows >100%.
                             total_size: dl.total_size.max(dl.downloaded_size),
                             speed,
                             status: status_str,
                             connections,
+                            error_message: dl.error_message.clone(),
                         };
                         let _ = app_handle.emit("download-progress", payload);
                     }
@@ -448,40 +450,35 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 let app_h = app.clone();
                 tauri::async_runtime::spawn(async move {
                     let state = app_h.state::<AppState>();
-                    let mut downloads = state.db.get_downloads(&DownloadFilter {
-                        status: Some(DownloadStatus::Downloading),
-                        limit: Some(256),
+                    let downloads = state.db.get_downloads(&DownloadFilter {
+                        statuses: Some(vec![
+                            DownloadStatus::Queued,
+                            DownloadStatus::Downloading,
+                            DownloadStatus::Merging,
+                        ]),
                         ..Default::default()
                     });
-                    if let Ok(mut merging) = state.db.get_downloads(&DownloadFilter {
-                        status: Some(DownloadStatus::Merging),
-                        limit: Some(256),
-                        ..Default::default()
-                    }) {
-                        if let Ok(ref mut active) = downloads {
-                            active.append(&mut merging);
-                        }
-                    }
                     if let Ok(downloads) = downloads {
                         for dl in downloads {
                             if let Some(gid) = &dl.aria2_gid {
                                 let _ = state.engine.pause(gid).await;
                             }
-                            if let Some(id) = dl.id {
-                                if !state.queue.cancel_and_wait_stream(id).await {
-                                    log::warn!("tray pause timed out for download {id}");
-                                    continue;
-                                }
+                            let Some(id) = dl.id else { continue };
+                            if !state.queue.cancel_and_wait_stream(id).await {
+                                log::warn!("tray pause timed out for download {id}");
                             }
-                            let id = dl.id.unwrap();
                             match state.db.set_status_error_if_current(
                                 id,
-                                &[DownloadStatus::Downloading, DownloadStatus::Merging],
+                                &[
+                                    DownloadStatus::Queued,
+                                    DownloadStatus::Downloading,
+                                    DownloadStatus::Merging,
+                                ],
                                 &DownloadStatus::Paused,
                                 None,
                                 Some(0.0),
                             ) {
-                                Ok(true) => {}
+                                Ok(true) => emit_download_status(&app_h, &state.db, id, "Paused"),
                                 Ok(false) => {}
                                 Err(e) => {
                                     log::warn!("tray pause-all: {id} DB update failed: {e}");
@@ -496,18 +493,30 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 tauri::async_runtime::spawn(async move {
                     let state = app_h.state::<AppState>();
                     if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
-                        status: Some(DownloadStatus::Paused),
+                        statuses: Some(vec![DownloadStatus::Paused, DownloadStatus::Failed]),
                         ..Default::default()
                     }) {
                         for dl in downloads {
-                            // Respect queue concurrency — mark Queued, let tick start
-                            let id = dl.id.unwrap();
-                            if let Err(e) = state.db.set_status_if_current(
+                            let Some(id) = dl.id else { continue };
+                            let was_failed = dl.status == DownloadStatus::Failed;
+                            match state.db.resume_if_current(
                                 id,
-                                &[DownloadStatus::Paused],
-                                &DownloadStatus::Queued,
+                                &[DownloadStatus::Paused, DownloadStatus::Failed],
                             ) {
-                                log::warn!("tray resume-all: {id} DB update failed: {e}");
+                                Ok(true) => {
+                                    if was_failed {
+                                        clear_failed_retry_artifacts(
+                                            &dl.save_path,
+                                            &dl.filename,
+                                            id,
+                                        );
+                                    }
+                                    emit_download_status(&app_h, &state.db, id, "Queued");
+                                }
+                                Ok(false) => {}
+                                Err(e) => {
+                                    log::warn!("tray resume-all: {id} DB update failed: {e}");
+                                }
                             }
                         }
                     }

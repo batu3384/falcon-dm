@@ -22,11 +22,11 @@ use storage::Database;
 use storage::InsertDownloadResult;
 use tauri::{AppHandle, Emitter, Manager};
 use util::{
-    app_data_dir, default_download_dir, full_file_path, is_googlevideo_url, is_hls_url,
-    is_junk_media_url, is_youtube_host, lock_or_recover, normalize_media_url,
+    app_data_dir, default_download_dir, full_file_path, inspect_download_dest, is_googlevideo_url,
+    is_hls_url, is_junk_media_url, is_youtube_host, lock_or_recover, normalize_media_url,
     resolve_download_filename, resolve_download_target, resolve_save_dir, sanitize_filename,
-    sanitize_header_value, validate_completed_file, validate_fetch_url_async,
-    LEGACY_DEFAULT_API_TOKEN,
+    sanitize_header_value, unique_download_filename, validate_completed_file,
+    validate_fetch_url_async, write_file_exclusive, ExistingDownloadDest, LEGACY_DEFAULT_API_TOKEN,
 };
 
 use axum::http::{HeaderMap, StatusCode};
@@ -61,6 +61,15 @@ pub(crate) fn is_valid_extension_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
 }
 
+pub(crate) fn parse_extension_id(raw: &str) -> Result<&str, String> {
+    let id = raw.trim();
+    if is_valid_extension_id(id) {
+        Ok(id)
+    } else {
+        Err("invalid extension id".into())
+    }
+}
+
 pub(crate) fn cookie_url_matches_download(download_url: &str, cookie_url: Option<&str>) -> bool {
     let Some(cookie_url) = cookie_url else {
         return false;
@@ -91,6 +100,46 @@ pub(crate) fn cookie_url_matches_download(download_url: &str, cookie_url: Option
         }
     }
     false
+}
+
+/// Pause/resume (IPC + tray) must notify the UI — the 5s list poll and
+/// sticky Paused ticks otherwise leave the row looking paused while it runs.
+pub(crate) fn emit_download_status(app: &AppHandle, db: &Database, id: i64, status: &str) {
+    let Ok(row) = db.get_download(id) else {
+        return;
+    };
+    let _ = app.emit(
+        "download-progress",
+        serde_json::json!({
+            "id": id,
+            "downloaded_size": row.downloaded_size,
+            "total_size": row.total_size.max(row.downloaded_size),
+            "speed": 0.0,
+            "status": status,
+            "connections": 0,
+            "error_message": row.error_message,
+        }),
+    );
+}
+
+/// `resume_if_current` zeros Failed bytes. Leftover `.part` / HLS / error-page dest
+/// would resume corrupt data or block with "already exists".
+pub(crate) fn clear_failed_retry_artifacts(save_path: &str, filename: &str, id: i64) {
+    if let Some(part) = download::http::part_path_for(save_path, filename, id) {
+        let _ = std::fs::remove_file(part);
+    }
+    if let Some(dir) = download::http::segment_dir_for(save_path, filename, id) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    let hls = download::hls::hls_session_dir(id);
+    let _ = std::fs::remove_dir_all(&hls);
+    if let Some(parent) = hls.parent() {
+        let _ = std::fs::remove_dir_all(parent.join(format!("hls-{id}")));
+    }
+    let dest = full_file_path(save_path, filename);
+    if inspect_download_dest(&dest) == ExistingDownloadDest::Occupied {
+        let _ = std::fs::remove_file(&dest);
+    }
 }
 
 pub struct AppState {
@@ -177,6 +226,7 @@ pub(crate) async fn enqueue_download(
         .filter(|s| !s.is_empty())
         .or(save_subdir.as_deref());
     let save_path = resolve_download_save_path_with(&settings, requested_save, &category)?;
+    let filename = unique_download_filename(&save_path, &filename)?;
 
     let prof_referrer = profile.and_then(|p| p.referrer.clone());
     let prof_ua = profile.and_then(|p| p.user_agent.clone());
@@ -214,7 +264,7 @@ pub(crate) async fn enqueue_download(
         archived: false,
     };
 
-    let insert_result = state.db.insert_download_deduped(&dl).map_err(|e| e.to_string())?;
+    let insert_result = state.db.insert_download_deduped(&mut dl).map_err(|e| e.to_string())?;
     let id = insert_result.id();
     if matches!(insert_result, InsertDownloadResult::Created(_)) {
         dl.id = Some(id);
@@ -269,8 +319,6 @@ pub(crate) async fn ingest_uploaded_file(
         cached
     };
     let save_path = resolve_download_save_path_with(&settings, None, &category)?;
-    let dest = resolve_download_target(&save_path, &safe)?;
-    std::fs::write(&dest, &bytes).map_err(|e| format!("Could not save upload: {e}"))?;
     let size = bytes.len() as u64;
     let now = Utc::now().to_rfc3339();
     let state = app.state::<AppState>();
@@ -278,7 +326,7 @@ pub(crate) async fn ingest_uploaded_file(
         id: None,
         url: source_page.unwrap_or_else(|| "blob:".into()),
         filename: safe,
-        save_path,
+        save_path: save_path.clone(),
         total_size: size,
         downloaded_size: size,
         status: DownloadStatus::Completed,
@@ -295,19 +343,19 @@ pub(crate) async fn ingest_uploaded_file(
         aria2_gid: None,
         archived: false,
     };
-    let insert_result = match state.db.insert_download_deduped(&dl) {
-        Ok(result) => result,
-        Err(e) => {
-            let _ = std::fs::remove_file(&dest);
-            return Err(e.to_string());
-        }
-    };
+    let insert_result = state.db.insert_download_deduped(&mut dl).map_err(|e| e.to_string())?;
     let id = insert_result.id();
-    if matches!(insert_result, InsertDownloadResult::Created(_)) {
-        dl.id = Some(id);
-        let _ = app.emit("download-added", &dl);
-        let _ = app.emit("download-completed", &dl);
+    if matches!(insert_result, InsertDownloadResult::Existing(_)) {
+        return Ok(id);
     }
+    let dest = resolve_download_target(&save_path, &dl.filename)?;
+    if let Err(e) = write_file_exclusive(&dest, &bytes) {
+        let _ = state.db.delete_download(id);
+        return Err(format!("Could not save upload: {e}"));
+    }
+    dl.id = Some(id);
+    let _ = app.emit("download-added", &dl);
+    let _ = app.emit("download-completed", &dl);
     Ok(id)
 }
 
@@ -348,7 +396,9 @@ fn resolve_download_save_path_with(
         fallback.clone()
     } else {
         let expanded = util::expand_tilde(&settings.default_download_path);
-        if std::fs::create_dir_all(&expanded).is_ok() {
+        if util::is_unsafe_download_root(&expanded) {
+            fallback.clone()
+        } else if std::fs::create_dir_all(&expanded).is_ok() {
             expanded
         } else {
             fallback.clone()
@@ -434,8 +484,7 @@ pub(crate) fn finalize_completed_download(dl: &mut Download) -> Result<(), Strin
 }
 
 pub(crate) fn fail_invalid_download(dl: &mut Download, reason: String) {
-    let file_path = full_file_path(&dl.save_path, &dl.filename);
-    let _ = std::fs::remove_file(&file_path);
+    // Never delete dest — it may be a pre-existing user file (F-31 class).
     dl.status = DownloadStatus::Failed;
     dl.error_message = Some(reason);
     dl.speed = 0.0;
@@ -454,6 +503,8 @@ mod tests {
         assert!(extension_id_from_origin("https://example.com").is_none());
         assert!(!is_valid_extension_id("short"));
         assert!(!is_valid_extension_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
+        assert!(parse_extension_id(" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ").is_ok());
+        assert!(parse_extension_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err());
     }
 
     #[test]
@@ -498,5 +549,86 @@ mod tests {
         assert!(validate_upload_file("video.mp4", MAX_UPLOAD_BYTES + 1).is_err());
         assert!(validate_upload_file("", 1).is_err());
         assert!(validate_upload_file("ok.mp4", 1024).is_ok());
+    }
+
+    #[test]
+    fn fail_invalid_download_does_not_delete_existing_dest() {
+        let dir = std::env::temp_dir().join(format!("falcon-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("keep.bin");
+        std::fs::write(&dest, b"user-bytes").unwrap();
+        let mut dl = Download {
+            id: Some(1),
+            url: "https://example.com/a".into(),
+            filename: "keep.bin".into(),
+            save_path: dir.to_string_lossy().into(),
+            total_size: 10,
+            downloaded_size: 10,
+            status: DownloadStatus::Downloading,
+            category: DownloadCategory::Other,
+            speed: 1.0,
+            segments: 1,
+            priority: 1,
+            created_at: "t".into(),
+            completed_at: None,
+            error_message: None,
+            referrer: None,
+            user_agent: None,
+            cookies: None,
+            aria2_gid: None,
+            archived: false,
+        };
+        fail_invalid_download(&mut dl, "invalid".into());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"user-bytes");
+        assert_eq!(dl.status, DownloadStatus::Failed);
+        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn save_path_outside_root_is_rejected_not_redirected() {
+        let settings = Settings::default();
+        let requested = std::env::temp_dir().join(format!(
+            "falcon-dm-outside-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let err = resolve_download_save_path_with(
+            &settings,
+            Some(requested.to_str().expect("utf8 temp path")),
+            &DownloadCategory::Other,
+        )
+        .expect_err("outside-root save must error, not fall back to Downloads");
+        assert!(err.contains("outside allowed") || err.contains("Invalid save path"), "{err}");
+        assert!(!requested.exists());
+    }
+
+    #[test]
+    fn failed_retry_clears_occupied_part_not_complete() {
+        let dir = std::env::temp_dir().join(format!("falcon-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_string_lossy().to_string();
+        let retry_id = 1_000_000_000_000i64 + i64::from(std::process::id());
+        let occupied = dir.join("bad.bin");
+        std::fs::write(&occupied, b"<html>err</html>").unwrap();
+        let complete = dir.join("keep.bin");
+        std::fs::write(&complete, vec![0u8; 1024]).unwrap();
+        let part = crate::download::http::part_path_for(&save, "bad.bin", retry_id).unwrap();
+        std::fs::write(&part, b"partial").unwrap();
+        let segs = crate::download::http::segment_dir_for(&save, "bad.bin", retry_id).unwrap();
+        std::fs::create_dir_all(&segs).unwrap();
+        std::fs::write(segs.join("x"), b"s").unwrap();
+
+        clear_failed_retry_artifacts(&save, "bad.bin", retry_id);
+        assert!(!occupied.exists());
+        assert!(!part.exists());
+        assert!(!segs.exists());
+
+        clear_failed_retry_artifacts(&save, "keep.bin", retry_id + 1);
+        assert_eq!(std::fs::read(&complete).unwrap().len(), 1024);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

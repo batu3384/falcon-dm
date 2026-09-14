@@ -1,6 +1,7 @@
+use crate::is_valid_extension_id;
 use crate::util::LEGACY_DEFAULT_API_TOKEN;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use url::Url;
 use uuid::Uuid;
@@ -26,7 +27,8 @@ pub struct DownloadProfile {
 }
 
 impl DownloadProfile {
-    /// Match exact hostname; explicit scheme/port in the pattern also match.
+    /// Host-only patterns (`example.com`) match any port. Explicit origins
+    /// (`https://host[:port]`) use scheme + `port_or_known_default` (443/80).
     pub fn matches(&self, url: &str) -> bool {
         let raw_pattern = self.url_pattern.trim();
         if raw_pattern.is_empty() {
@@ -54,7 +56,8 @@ impl DownloadProfile {
             && pattern.host_str().map(str::to_ascii_lowercase)
                 == target.host_str().map(str::to_ascii_lowercase)
             && (!explicit_scheme || pattern.scheme() == target.scheme())
-            && (pattern.port().is_none() || pattern.port() == target.port())
+            && (!explicit_scheme
+                || pattern.port_or_known_default() == target.port_or_known_default())
     }
 }
 
@@ -83,7 +86,7 @@ pub struct Settings {
     /// Optional absolute path to yt-dlp binary (empty = PATH + common locations).
     #[serde(default)]
     pub ytdlp_path: String,
-    /// When true, pass browser Cookie headers to yt-dlp (opt-in; can break anonymous YT).
+    /// When true, yt-dlp reads Chrome cookies (`--cookies-from-browser`). Off by default.
     #[serde(default)]
     pub ytdlp_use_browser_cookies: bool,
     /// ponytail: per-site download profiles. Empty by default. When a download
@@ -118,6 +121,76 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn clamp_runtime_bounds(&mut self) {
+        self.max_concurrent_downloads = self.max_concurrent_downloads.clamp(1, 32);
+        self.max_connections_per_server = self.max_connections_per_server.clamp(1, 16);
+        self.speed_limit_kbps = self.speed_limit_kbps.min(1_048_576);
+        if !matches!(self.theme.as_str(), "system" | "light" | "dark") {
+            self.theme = "system".into();
+        }
+        if self.proxy.as_ref().is_some_and(|proxy| proxy.trim().is_empty()) {
+            self.proxy = None;
+        }
+        self.allowed_extension_ids.retain(|id| is_valid_extension_id(id));
+        let mut seen = HashSet::new();
+        self.allowed_extension_ids.retain(|id| seen.insert(id.clone()));
+        if crate::util::is_unsafe_download_root(&crate::util::expand_tilde(
+            &self.default_download_path,
+        )) {
+            self.default_download_path =
+                crate::util::default_download_dir().to_string_lossy().into();
+        }
+        for path in self.category_paths.values_mut() {
+            if crate::util::is_unsafe_download_root(&crate::util::expand_tilde(path)) {
+                path.clear();
+            }
+        }
+    }
+
+    fn profile_cookies_blank(profile: &DownloadProfile) -> bool {
+        profile.cookies.as_deref().map(str::trim).unwrap_or("").is_empty()
+    }
+
+    /// UI never sees stored cookies (empty = keep). Name/pattern edits must not drop them.
+    pub fn restore_blank_profile_cookies(&mut self, current: &[DownloadProfile]) {
+        let mut used = vec![false; current.len()];
+        for profile in &mut self.download_profiles {
+            if !Self::profile_cookies_blank(profile) {
+                continue;
+            }
+            if let Some((idx, old)) = current.iter().enumerate().find(|(idx, old)| {
+                !used[*idx] && old.name == profile.name && old.url_pattern == profile.url_pattern
+            }) {
+                used[idx] = true;
+                profile.cookies = old.cookies.clone();
+            }
+        }
+        for (idx, profile) in self.download_profiles.iter_mut().enumerate() {
+            if !Self::profile_cookies_blank(profile) || idx >= current.len() || used[idx] {
+                continue;
+            }
+            used[idx] = true;
+            profile.cookies = current[idx].cookies.clone();
+        }
+    }
+
+    /// Pairing writes the allowlist; Settings / speed-toggle snapshots must not.
+    pub fn preserve_command_owned_fields(&mut self, current: &Settings) {
+        self.allowed_extension_ids = current.allowed_extension_ids.clone();
+    }
+
+    /// Live schedule lives on the queue. Stale Settings mutex must not win.
+    pub fn apply_live_schedule(
+        &mut self,
+        active: bool,
+        start: Option<String>,
+        stop: Option<String>,
+    ) {
+        self.schedule_active = active;
+        self.schedule_start = start;
+        self.schedule_stop = stop;
+    }
+
     fn ensure_secure_token(mut settings: Self) -> Self {
         let weak =
             settings.api_token.trim().is_empty() || settings.api_token == LEGACY_DEFAULT_API_TOKEN;
@@ -138,6 +211,7 @@ impl Settings {
         } else {
             Self::default()
         };
+        settings.clamp_runtime_bounds();
         let before = settings.api_token.clone();
         settings = Self::ensure_secure_token(settings);
         if settings.api_token != before || !settings_path.exists() {
@@ -196,6 +270,7 @@ mod tests {
     fn profile_matching_uses_hostname_boundaries() {
         let profile = DownloadProfile { url_pattern: "example.com".into(), ..Default::default() };
         assert!(profile.matches("https://example.com/video.mp4"));
+        assert!(profile.matches("https://example.com:8443/video.mp4"));
         assert!(!profile.matches("https://example.com.evil.test/video.mp4"));
         assert!(!profile.matches("https://attacker.example.com/video.mp4"));
     }
@@ -212,6 +287,39 @@ mod tests {
     }
 
     #[test]
+    fn clamp_runtime_bounds_caps_queue_and_drops_invalid_ids() {
+        let mut settings = Settings {
+            theme: "neon".into(),
+            max_concurrent_downloads: 99,
+            max_connections_per_server: 0,
+            speed_limit_kbps: 9_999_999,
+            proxy: Some("   ".into()),
+            allowed_extension_ids: vec![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                "not-an-id".into(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            ],
+            default_download_path: "/etc".into(),
+            category_paths: HashMap::from([("Video".into(), "/tmp".into())]),
+            ..Default::default()
+        };
+        settings.clamp_runtime_bounds();
+        assert_eq!(settings.theme, "system");
+        assert_eq!(settings.max_concurrent_downloads, 32);
+        assert_eq!(settings.max_connections_per_server, 1);
+        assert_eq!(settings.speed_limit_kbps, 1_048_576);
+        assert_eq!(settings.proxy, None);
+        assert_eq!(
+            settings.allowed_extension_ids,
+            vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]
+        );
+        assert!(!crate::util::is_unsafe_download_root(std::path::Path::new(
+            &settings.default_download_path
+        )));
+        assert_eq!(settings.category_paths.get("Video").map(String::as_str), Some(""));
+    }
+
+    #[test]
     fn explicit_profile_origin_matches_scheme_and_port() {
         let profile = DownloadProfile {
             url_pattern: "https://example.com:8443".into(),
@@ -220,5 +328,115 @@ mod tests {
         assert!(profile.matches("https://example.com:8443/video.mp4"));
         assert!(!profile.matches("http://example.com:8443/video.mp4"));
         assert!(!profile.matches("https://example.com/video.mp4"));
+
+        let default_https =
+            DownloadProfile { url_pattern: "https://example.com".into(), ..Default::default() };
+        assert!(default_https.matches("https://example.com/video.mp4"));
+        assert!(default_https.matches("https://example.com:443/video.mp4"));
+        assert!(!default_https.matches("https://example.com:8443/video.mp4"));
+
+        let colon443 =
+            DownloadProfile { url_pattern: "https://example.com:443".into(), ..Default::default() };
+        assert!(colon443.matches("https://example.com/video.mp4"));
+        assert!(colon443.matches("https://example.com:443/video.mp4"));
+        assert!(!colon443.matches("https://example.com:8443/video.mp4"));
+    }
+
+    #[test]
+    fn save_payload_cannot_clobber_scheduler_or_allowlist() {
+        let current = Settings {
+            schedule_active: true,
+            schedule_start: Some("22:00".into()),
+            schedule_stop: Some("07:00".into()),
+            allowed_extension_ids: vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+            ..Default::default()
+        };
+        let mut incoming = Settings::default();
+        incoming.schedule_active = false;
+        incoming.allowed_extension_ids = vec!["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()];
+        incoming.preserve_command_owned_fields(&current);
+        incoming.apply_live_schedule(
+            current.schedule_active,
+            current.schedule_start.clone(),
+            current.schedule_stop.clone(),
+        );
+        assert!(incoming.schedule_active);
+        assert_eq!(incoming.schedule_start.as_deref(), Some("22:00"));
+        assert_eq!(incoming.schedule_stop.as_deref(), Some("07:00"));
+        assert_eq!(incoming.allowed_extension_ids, current.allowed_extension_ids);
+    }
+
+    #[test]
+    fn blank_profile_cookies_survive_rename_not_delete() {
+        let current = vec![
+            DownloadProfile {
+                name: "A".into(),
+                url_pattern: "a.com".into(),
+                cookies: Some("sid=1".into()),
+                ..Default::default()
+            },
+            DownloadProfile {
+                name: "B".into(),
+                url_pattern: "b.com".into(),
+                cookies: Some("sid=2".into()),
+                ..Default::default()
+            },
+        ];
+        let mut renamed = Settings {
+            download_profiles: vec![
+                DownloadProfile {
+                    name: "A-renamed".into(),
+                    url_pattern: "a.com".into(),
+                    cookies: None,
+                    ..Default::default()
+                },
+                DownloadProfile {
+                    name: "B".into(),
+                    url_pattern: "b.com".into(),
+                    cookies: None,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        renamed.restore_blank_profile_cookies(&current);
+        assert_eq!(renamed.download_profiles[0].cookies.as_deref(), Some("sid=1"));
+        assert_eq!(renamed.download_profiles[1].cookies.as_deref(), Some("sid=2"));
+
+        let mut rehost = Settings {
+            download_profiles: vec![DownloadProfile {
+                name: "A".into(),
+                url_pattern: "a2.com".into(),
+                cookies: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rehost.restore_blank_profile_cookies(&current);
+        assert_eq!(rehost.download_profiles[0].cookies.as_deref(), Some("sid=1"));
+
+        let mut dropped_first = Settings {
+            download_profiles: vec![DownloadProfile {
+                name: "B".into(),
+                url_pattern: "b.com".into(),
+                cookies: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        dropped_first.restore_blank_profile_cookies(&current);
+        assert_eq!(dropped_first.download_profiles[0].cookies.as_deref(), Some("sid=2"));
+
+        let mut explicit = Settings {
+            download_profiles: vec![DownloadProfile {
+                name: "A".into(),
+                url_pattern: "a.com".into(),
+                cookies: Some("sid=new".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        explicit.restore_blank_profile_cookies(&current);
+        assert_eq!(explicit.download_profiles[0].cookies.as_deref(), Some("sid=new"));
     }
 }
