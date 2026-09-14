@@ -31,12 +31,10 @@ export const OnboardingWizard = ({ onComplete, onSkip }: OnboardingProps) => {
     onSkip?.();
     onComplete();
   }, [onSkip, onComplete]);
-  const stepRef = useRef(step);
-  stepRef.current = step;
   const requestEscape = useCallback(() => {
-    if (stepRef.current > 1) setStep((current) => current - 1);
+    if (step > 1) setStep((current) => current - 1);
     else handleClose();
-  }, [handleClose]);
+  }, [step, handleClose]);
   useModalA11y(panelRef, requestEscape);
 
   const refreshStatus = useCallback(async () => {

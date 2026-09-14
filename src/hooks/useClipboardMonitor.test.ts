@@ -22,9 +22,7 @@ describe('isQueueableClipboardUrl', () => {
   });
 
   it('host-gates YouTube UI junk the same way as isJunkUrl', () => {
-    expect(isQueueableClipboardUrl('https://cdn.example.com/api/log_event/export.csv')).toBe(
-      true,
-    );
+    expect(isQueueableClipboardUrl('https://cdn.example.com/api/log_event/export.csv')).toBe(true);
     expect(isQueueableClipboardUrl('https://docs.example.com/s/search/guide.pdf')).toBe(true);
     expect(isQueueableClipboardUrl('https://www.youtube.com/api/stats')).toBe(false);
     expect(isQueueableClipboardUrl('https://www.youtube.com/ptracking?event=1')).toBe(false);

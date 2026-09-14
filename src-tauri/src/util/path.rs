@@ -12,8 +12,7 @@ pub fn sanitize_filename(name: &str) -> String {
         .chars()
         .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\0'))
         .collect::<String>();
-    base =
-        base.trim().trim_start_matches('.').trim_end_matches(|c| c == ' ' || c == '.').to_string();
+    base = base.trim().trim_start_matches('.').trim_end_matches([' ', '.']).to_string();
     if base.is_empty() || base == ".." {
         return "falcon_download".to_string();
     }

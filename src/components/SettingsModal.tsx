@@ -61,12 +61,15 @@ export const SettingsModal = ({ onClose }: SettingsModalProps) => {
     }
     e.preventDefault();
     const i = SETTINGS_TABS.indexOf(activeTab);
-    let next = i;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % SETTINGS_TABS.length;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp')
-      next = (i - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length;
-    else if (e.key === 'Home') next = 0;
-    else next = SETTINGS_TABS.length - 1;
+    const len = SETTINGS_TABS.length;
+    const next =
+      e.key === 'Home'
+        ? 0
+        : e.key === 'End'
+          ? len - 1
+          : e.key === 'ArrowRight' || e.key === 'ArrowDown'
+            ? (i + 1) % len
+            : (i - 1 + len) % len;
     const id = SETTINGS_TABS[next];
     setActiveTab(id);
     requestAnimationFrame(() => document.getElementById(`settings-tab-${id}`)?.focus());

@@ -41,7 +41,11 @@ export function GeneralTab({
     setCheckingUpdate(true);
     try {
       const result = await api.checkForUpdates();
-      if (result.update_available && result.release_url && isFalconGithubReleaseUrl(result.release_url)) {
+      if (
+        result.update_available &&
+        result.release_url &&
+        isFalconGithubReleaseUrl(result.release_url)
+      ) {
         showToast('info', t('settings.update_available', { version: result.latest_version || '' }));
         await openUrl(result.release_url);
       } else if (result.update_available) {
@@ -158,7 +162,12 @@ export function GeneralTab({
           {t('settings.api_token_rotate')}
         </button>
       </div>
-      <div className="field" role="group" aria-labelledby="set-extension-label" aria-describedby="set-extension-hint">
+      <div
+        className="field"
+        role="group"
+        aria-labelledby="set-extension-label"
+        aria-describedby="set-extension-hint"
+      >
         <label className="field-label" id="set-extension-label">
           {t('settings.extension')}
         </label>

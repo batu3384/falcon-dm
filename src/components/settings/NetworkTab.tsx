@@ -37,10 +37,7 @@ export function NetworkTab({ settings, handleChange }: Props) {
           max="16"
           value={settings.max_connections_per_server}
           onChange={(e) =>
-            handleChange(
-              'max_connections_per_server',
-              Number.parseInt(e.target.value, 10) || 1,
-            )
+            handleChange('max_connections_per_server', Number.parseInt(e.target.value, 10) || 1)
           }
           className="field-input"
           aria-describedby="set-conn-hint"

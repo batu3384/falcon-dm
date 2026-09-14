@@ -269,8 +269,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
               speed: 0,
               downloaded_size: Math.max(p.downloaded_size, d.downloaded_size),
               total_size: Math.max(p.total_size, d.total_size),
-              error_message:
-                p.status === 'Failed' ? (p.error_message ?? d.error_message) : null,
+              error_message: p.status === 'Failed' ? (p.error_message ?? d.error_message) : null,
             };
           }
           return {
@@ -311,8 +310,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
           speed: halt ? 0 : liveSpeed(p.speed, d.speed),
           status: p.status,
           segments: p.connections || d.segments,
-          error_message:
-            p.status === 'Failed' ? (p.error_message ?? d.error_message) : null,
+          error_message: p.status === 'Failed' ? (p.error_message ?? d.error_message) : null,
         };
       });
       const selectedDownload =

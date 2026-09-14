@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { SettingsModel } from '../../types';
@@ -16,13 +16,15 @@ function allocProfileUiKey() {
 
 export function ProfilesTab({ settings, setSettings }: Props) {
   const { t } = useTranslation();
-  const keysRef = useRef<string[]>([]);
   const profiles = settings.download_profiles || [];
-  if (keysRef.current.length < profiles.length) {
-    keysRef.current = [
-      ...keysRef.current,
-      ...Array.from({ length: profiles.length - keysRef.current.length }, allocProfileUiKey),
+  const [keys, setKeys] = useState<string[]>([]);
+  let cardKeys = keys;
+  if (cardKeys.length < profiles.length) {
+    cardKeys = [
+      ...cardKeys,
+      ...Array.from({ length: profiles.length - cardKeys.length }, allocProfileUiKey),
     ];
+    setKeys(cardKeys);
   }
   return (
     <>
@@ -33,7 +35,7 @@ export function ProfilesTab({ settings, setSettings }: Props) {
         {t('settings.profile_host_hint')}
       </p>
       {profiles.map((p, i) => (
-        <div className="profile-card" key={keysRef.current[i]}>
+        <div className="profile-card" key={cardKeys[i]}>
           <div className="profile-card-head">
             <span className="profile-card-title">{p.name || t('settings.profile_untitled')}</span>
             <button
@@ -41,7 +43,7 @@ export function ProfilesTab({ settings, setSettings }: Props) {
               className="icon-btn danger"
               aria-label={t('settings.profile_remove')}
               onClick={() => {
-                keysRef.current = keysRef.current.filter((_, idx) => idx !== i);
+                setKeys((prev) => prev.filter((_, idx) => idx !== i));
                 setSettings((prev) => ({
                   ...prev,
                   download_profiles: (prev.download_profiles || []).filter((_, idx) => idx !== i),
@@ -152,7 +154,7 @@ export function ProfilesTab({ settings, setSettings }: Props) {
         type="button"
         className="btn-secondary"
         onClick={() => {
-          keysRef.current = [...keysRef.current, allocProfileUiKey()];
+          setKeys((prev) => [...prev, allocProfileUiKey()]);
           setSettings((prev) => ({
             ...prev,
             download_profiles: [

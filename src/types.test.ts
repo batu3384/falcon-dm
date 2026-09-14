@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { formatBytes, calculateETA, progressPercent, progressIndeterminate, loadedCountLabel, fileExtension, fileFullPath, formatLocaleDate } from './types';
+import {
+  formatBytes,
+  calculateETA,
+  progressPercent,
+  progressIndeterminate,
+  loadedCountLabel,
+  fileExtension,
+  fileFullPath,
+  formatLocaleDate,
+} from './types';
 
 // ponytail: pure formatting helpers are the easiest high-value tests — they're
 // used everywhere and a regression (e.g. NaN bytes, off-by-one percent) would

@@ -200,7 +200,12 @@ export function SchedulerModal({ isOpen, onClose }: SchedulerModalProps) {
               {t('scheduler.retry')}
             </button>
           ) : (
-            <button type="button" className="btn-primary" onClick={handleSave} disabled={saving || !hydrated}>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={handleSave}
+              disabled={saving || !hydrated}
+            >
               {saving ? t('scheduler.saving') : t('scheduler.save')}
             </button>
           )}

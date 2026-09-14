@@ -351,9 +351,11 @@ mod tests {
             allowed_extension_ids: vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
             ..Default::default()
         };
-        let mut incoming = Settings::default();
-        incoming.schedule_active = false;
-        incoming.allowed_extension_ids = vec!["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()];
+        let mut incoming = Settings {
+            schedule_active: false,
+            allowed_extension_ids: vec!["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()],
+            ..Default::default()
+        };
         incoming.preserve_command_owned_fields(&current);
         incoming.apply_live_schedule(
             current.schedule_active,

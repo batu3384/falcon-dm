@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { isBlockedLiteralHost, isPublicHttpUrl, publicHttpUrlsFromMixedText, publicHttpUrlsFromText, enqueueCookieUrl, isFalconGithubReleaseUrl } from './publicHttpUrl';
+import {
+  isBlockedLiteralHost,
+  isPublicHttpUrl,
+  publicHttpUrlsFromMixedText,
+  publicHttpUrlsFromText,
+  enqueueCookieUrl,
+  isFalconGithubReleaseUrl,
+} from './publicHttpUrl';
 
 describe('isPublicHttpUrl', () => {
   it('accepts public https', () => {
@@ -39,9 +46,9 @@ describe('isPublicHttpUrl', () => {
   });
 
   it('allows signed CDN URLs up to 8192 chars', () => {
-    expect(isPublicHttpUrl(`https://rr1---sn-abc.googlevideo.com/videoplayback?${'a'.repeat(3000)}`)).toBe(
-      true,
-    );
+    expect(
+      isPublicHttpUrl(`https://rr1---sn-abc.googlevideo.com/videoplayback?${'a'.repeat(3000)}`),
+    ).toBe(true);
     expect(isPublicHttpUrl(`https://example.com/${'a'.repeat(8200)}`)).toBe(false);
   });
 });

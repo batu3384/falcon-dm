@@ -117,3 +117,30 @@ export function isFalconGithubReleaseUrl(raw: string): boolean {
     return false;
   }
 }
+
+/** Hostname-only — `evil.com/youtube.com` must not look like YouTube. */
+export function youtubeDownloadHost(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return (
+      h === 'youtu.be' ||
+      h === 'youtube.com' ||
+      h.endsWith('.youtube.com') ||
+      h === 'youtube-nocookie.com' ||
+      h.endsWith('.youtube-nocookie.com') ||
+      h === 'googlevideo.com' ||
+      h.endsWith('.googlevideo.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function hlsDownloadUrl(url: string): boolean {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    return path.endsWith('.m3u8') || path.includes('.m3u8/');
+  } catch {
+    return false;
+  }
+}

@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { hlsDownloadUrl, youtubeDownloadHost } from './InspectorPanel';
+import { hlsDownloadUrl, youtubeDownloadHost } from '../lib/publicHttpUrl';
 
 describe('youtubeDownloadHost', () => {
   it('accepts YouTube hosts only', () => {
     expect(youtubeDownloadHost('https://www.youtube.com/watch?v=a')).toBe(true);
     expect(youtubeDownloadHost('https://youtu.be/a')).toBe(true);
-    expect(
-      youtubeDownloadHost('https://rr3---sn-abc.googlevideo.com/videoplayback?id=1'),
-    ).toBe(true);
+    expect(youtubeDownloadHost('https://rr3---sn-abc.googlevideo.com/videoplayback?id=1')).toBe(
+      true,
+    );
   });
 
   it('rejects path spoof', () => {

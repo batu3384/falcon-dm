@@ -6,7 +6,11 @@ import { useModalA11y } from '../hooks/useModalA11y';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useToastStore } from '../store/toast';
 import * as api from '../api/commands';
-import { isPublicHttpUrl, publicHttpUrlsFromMixedText, enqueueCookieUrl } from '../lib/publicHttpUrl';
+import {
+  isPublicHttpUrl,
+  publicHttpUrlsFromMixedText,
+  enqueueCookieUrl,
+} from '../lib/publicHttpUrl';
 
 function parseUrlsFromText(text: string): string[] {
   return publicHttpUrlsFromMixedText(text);

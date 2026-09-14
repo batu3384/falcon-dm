@@ -69,11 +69,7 @@ export default function DownloadList({
     overscan: 8,
     rangeExtractor: (range) => {
       const indexes = defaultRangeExtractor(range);
-      if (
-        selectedIndex >= 0 &&
-        selectedIndex < range.count &&
-        !indexes.includes(selectedIndex)
-      ) {
+      if (selectedIndex >= 0 && selectedIndex < range.count && !indexes.includes(selectedIndex)) {
         return [...indexes, selectedIndex].sort((a, b) => a - b);
       }
       return indexes;

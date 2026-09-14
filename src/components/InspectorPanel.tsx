@@ -14,38 +14,18 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import type { DownloadModel } from '../types';
-import { formatBytes, progressPercent, progressIndeterminate, fileFullPath, formatLocaleDate } from '../types';
+import {
+  formatBytes,
+  progressPercent,
+  progressIndeterminate,
+  fileFullPath,
+  formatLocaleDate,
+} from '../types';
 import { getDownloadCapabilities } from '../lib/downloadCapabilities';
+import { hlsDownloadUrl, youtubeDownloadHost } from '../lib/publicHttpUrl';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useToastStore } from '../store/toast';
 import * as api from '../api/commands';
-
-/** Hostname-only — `evil.com/youtube.com` must not look like YouTube. */
-export function youtubeDownloadHost(url: string): boolean {
-  try {
-    const h = new URL(url).hostname.toLowerCase();
-    return (
-      h === 'youtu.be' ||
-      h === 'youtube.com' ||
-      h.endsWith('.youtube.com') ||
-      h === 'youtube-nocookie.com' ||
-      h.endsWith('.youtube-nocookie.com') ||
-      h === 'googlevideo.com' ||
-      h.endsWith('.googlevideo.com')
-    );
-  } catch {
-    return false;
-  }
-}
-
-export function hlsDownloadUrl(url: string): boolean {
-  try {
-    const path = new URL(url).pathname.toLowerCase();
-    return path.endsWith('.m3u8') || path.includes('.m3u8/');
-  } catch {
-    return false;
-  }
-}
 
 interface InspectorPanelProps {
   download: DownloadModel;
@@ -200,8 +180,7 @@ export function InspectorPanel({ download, onClose, onRefresh }: InspectorPanelP
             <div className="metric">
               <span className="metric-key">{t('inspector.downloaded')}</span>
               <span className="metric-val">
-                {formatBytes(download.downloaded_size)} (
-                {indeterminate ? '…' : `${pct}%`})
+                {formatBytes(download.downloaded_size)} ({indeterminate ? '…' : `${pct}%`})
               </span>
             </div>
             <div className="metric">

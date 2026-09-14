@@ -149,12 +149,15 @@ export function LogPanel({ onClose }: LogPanelProps) {
               }
               e.preventDefault();
               const i = LEVELS.indexOf(level);
-              let next = i;
-              if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % LEVELS.length;
-              else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp')
-                next = (i - 1 + LEVELS.length) % LEVELS.length;
-              else if (e.key === 'Home') next = 0;
-              else next = LEVELS.length - 1;
+              const len = LEVELS.length;
+              const next =
+                e.key === 'Home'
+                  ? 0
+                  : e.key === 'End'
+                    ? len - 1
+                    : e.key === 'ArrowRight' || e.key === 'ArrowDown'
+                      ? (i + 1) % len
+                      : (i - 1 + len) % len;
               const lv = LEVELS[next];
               setLevel(lv);
               requestAnimationFrame(() => document.getElementById(`logs-tab-${lv}`)?.focus());

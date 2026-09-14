@@ -37,6 +37,8 @@ import * as api from '../api/commands';
 import { useModalA11y } from '../hooks/useModalA11y';
 
 /** Arrow/Home/End index inside a context menu. `current` may be -1. */
+// Helper is imported by unit tests; keep it next to the menu it drives.
+// eslint-disable-next-line react-refresh/only-export-components
 export function contextMenuNavIndex(len: number, current: number, key: string): number | null {
   if (len <= 0) return null;
   const idx = current < 0 || current >= len ? 0 : current;
@@ -262,9 +264,7 @@ function DownloadItemInner({
           <div
             className={`dl-track${indeterminate ? ' indeterminate' : ''}`}
             role="progressbar"
-            aria-label={
-              indeterminate ? si.label : t('downloadItem.progress', { percent: pct })
-            }
+            aria-label={indeterminate ? si.label : t('downloadItem.progress', { percent: pct })}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={indeterminate ? undefined : pct}

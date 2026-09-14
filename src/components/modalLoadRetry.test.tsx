@@ -44,7 +44,9 @@ describe('modal load retry', () => {
     render(<SchedulerModal isOpen onClose={vi.fn()} />);
     expect(await screen.findByRole('alert')).toHaveTextContent(i18n.t('scheduler.load_failed'));
     expect(screen.getByRole('button', { name: i18n.t('scheduler.retry') })).toBeEnabled();
-    expect(screen.queryByRole('button', { name: i18n.t('scheduler.save') })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: i18n.t('scheduler.save') }),
+    ).not.toBeInTheDocument();
 
     mockedGetSchedule.mockResolvedValueOnce({
       active: false,
