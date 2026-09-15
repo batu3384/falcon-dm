@@ -38,9 +38,9 @@ Desktop app needs `yt-dlp` on PATH (or set path in Falcon Settings). Extension s
 ## Permissions
 
 - `<all_urls>` host permission is required to intercept browser downloads and sniff media on any site. There is no narrower scope: the download-hijack + media-overlay feature must work on arbitrary pages. The extension talks only to `127.0.0.1:14201` (Falcon DM) — no other network.
-- Content scripts are injected **on demand** via `chrome.scripting.executeScript` (popup open or media sniffed), not via an always-on `content_scripts` entry.
+- YouTube watch/Shorts pages load a static `content_scripts` entry (`youtube.js` at `document_idle`) so the overlay is ready without waiting for a network sniff. Other sites inject **on demand** via `chrome.scripting.executeScript` (popup open or media sniffed).
 - `nativeMessaging` is required for the app-authenticated pairing proof; the host communicates with Falcon DM through a local 0600 Unix socket.
-- `tabs`/`activeTab` were dropped: tab URL/title access is covered by `<all_urls>`, and `scripting` covers on-demand injection.
+- `tabs`/`activeTab` are not requested: tab URL/title access is covered by `<all_urls>`, and `scripting` covers on-demand injection.
 
 Session cookies are accepted only on enqueue requests that need them. They are
 not returned in download list payloads, not copied into the frontend model, and

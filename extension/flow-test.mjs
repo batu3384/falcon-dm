@@ -392,6 +392,13 @@ try {
 if (!live) {
   console.log('live Falcon API skipped (not listening)');
 } else {
+  const noToken = await fetch('http://127.0.0.1:14201/api/intercept', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: 'https://example.com/file.bin' }),
+    signal: AbortSignal.timeout(3000),
+  });
+  assert(noToken.status === 401, `intercept without token expected 401, got ${noToken.status}`);
   const settingsPath = path.join(
     homedir(),
     'Library/Application Support/com.falcondm.app/settings.json',

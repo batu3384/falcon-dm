@@ -289,7 +289,10 @@ assert(
 );
 const chromeCss = readFileSync(path.join(__dirname, 'chrome.css'), 'utf8');
 assert(chromeCss.includes('.check-row'), 'popup checkbox row');
-assert(manifest.permissions.includes('tabs'), 'tabs permission');
+assert(
+  !manifest.permissions.includes('tabs'),
+  'tabs not requested; <all_urls> covers tab URL',
+);
 assert(manifest.permissions.includes('clipboardRead'), 'clipboard permission');
 assert(manifest.permissions.includes('alarms'), 'alarms permission');
 assert(src.includes('GRABBER_EXT_RE'), 'grabber extension list');
@@ -304,6 +307,10 @@ assert(shared.includes('validate_upload_b64_len') || readFileSync(path.join(__di
 assert(src.includes('BLOB_MAX_BYTES = 32'), 'blob size cap');
 assert(popupHtml.includes('clipboard-monitor'), 'popup clipboard toggle');
 assert(Array.isArray(manifest.content_scripts) && manifest.content_scripts.length, 'youtube content_scripts');
+assert(
+  readFileSync(path.join(__dirname, 'README.md'), 'utf8').includes('content_scripts'),
+  'README documents YouTube content_scripts',
+);
 assert(content.includes('youtubeFallbackSources'), 'youtube fallback tiers');
 assert(content.includes('let fabHost = null'), 'fab host state declared');
 assert(content.includes('dismissFabForPage'), 'page-scoped fab dismiss');
@@ -406,17 +413,38 @@ assert(
   appTsx.includes('if (isForegroundDialogOpen()) return false'),
   'clipboard overlay skip does not consume the URL',
 );
+assert(appTsx.includes('setUiLanguage'), 'UI syncs tray language');
 assert(
   readFileSync(path.join(__dirname, '../src/hooks/useClipboardMonitor.ts'), 'utf8').includes(
     'clipboardUrlConsumed',
   ),
   'clipboard lastRef waits for overlay accept',
 );
+{
+  const settingsModal = readFileSync(
+    path.join(__dirname, '../src/components/SettingsModal.tsx'),
+    'utf8',
+  );
+  assert(
+    settingsModal.includes("'ArrowUp'") && settingsModal.includes("'ArrowDown'"),
+    'settings tabs use Up/Down as well as Left/Right',
+  );
+}
 assert(
-  readFileSync(path.join(__dirname, '../src/components/SettingsModal.tsx'), 'utf8').includes(
-    "e.key === 'ArrowUp'",
+  readFileSync(path.join(__dirname, '../src/App.css'), 'utf8').includes('--target: 44px'),
+  'pointer targets use WCAG 44px token',
+);
+assert(
+  readFileSync(path.join(__dirname, '../src-tauri/src/util/cookie_crypto.rs'), 'utf8').includes(
+    'pub fn seal_cookies',
   ),
-  'settings tabs use Up/Down as well as Left/Right',
+  'cookies sealed at rest',
+);
+assert(
+  readFileSync(path.join(__dirname, '../src-tauri/src/download/queue.rs'), 'utf8').includes(
+    'leaving active until worker ends',
+  ),
+  'schedule cancel timeout does not demote',
 );
 const paletteTsx = readFileSync(path.join(__dirname, '../src/components/CommandPalette.tsx'), 'utf8');
 assert(paletteTsx.includes('aria-haspopup="listbox"'), 'command palette combobox has listbox popup');

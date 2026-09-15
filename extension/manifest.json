@@ -17,7 +17,6 @@
     "contextMenus",
     "storage",
     "scripting",
-    "tabs",
     "nativeMessaging",
     "clipboardRead",
     "alarms"
