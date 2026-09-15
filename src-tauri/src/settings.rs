@@ -211,10 +211,19 @@ impl Settings {
         } else {
             Self::default()
         };
+        let needs_cookie_reseal = settings.download_profiles.iter().any(|profile| {
+            profile
+                .cookies
+                .as_deref()
+                .is_some_and(|c| !c.trim().is_empty() && !crate::util::cookies_are_sealed(Some(c)))
+        });
+        for profile in &mut settings.download_profiles {
+            profile.cookies = crate::util::open_cookies(profile.cookies.as_deref());
+        }
         settings.clamp_runtime_bounds();
         let before = settings.api_token.clone();
         settings = Self::ensure_secure_token(settings);
-        if settings.api_token != before || !settings_path.exists() {
+        if settings.api_token != before || !settings_path.exists() || needs_cookie_reseal {
             let _ = settings.save(app_data_dir);
         }
         // Restrict settings.json permissions on Unix
@@ -231,7 +240,14 @@ impl Settings {
         if let Some(parent) = settings_path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let content = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        let content = serde_json::to_string_pretty(&{
+            let mut disk = self.clone();
+            for profile in &mut disk.download_profiles {
+                profile.cookies = crate::util::seal_cookies(profile.cookies.as_deref());
+            }
+            disk
+        })
+        .map_err(|e| e.to_string())?;
         // ponytail: atomic write — write to a temp sibling then rename. A direct
         // fs::write can leave a half-written settings.json if the app crashes
         // mid-write, silently wiping the user's config on the next load.
@@ -440,5 +456,25 @@ mod tests {
         };
         explicit.restore_blank_profile_cookies(&current);
         assert_eq!(explicit.download_profiles[0].cookies.as_deref(), Some("sid=new"));
+    }
+
+    #[test]
+    fn profile_cookies_encrypted_on_disk() {
+        let dir = std::env::temp_dir().join(format!("falcon-settings-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut settings = Settings::default();
+        settings.download_profiles.push(DownloadProfile {
+            name: "p".into(),
+            url_pattern: "example.com".into(),
+            cookies: Some("sid=disk".into()),
+            ..Default::default()
+        });
+        settings.save(&dir).unwrap();
+        let json = fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(!json.contains("sid=disk"), "{json}");
+        assert!(json.contains("v1:"), "{json}");
+        let loaded = Settings::load(&dir);
+        assert_eq!(loaded.download_profiles[0].cookies.as_deref(), Some("sid=disk"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

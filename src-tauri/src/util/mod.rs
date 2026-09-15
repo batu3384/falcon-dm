@@ -11,10 +11,12 @@ pub fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, 
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+mod cookie_crypto;
 mod http_client;
 mod net;
 mod path;
 
+pub use cookie_crypto::*;
 pub use http_client::*;
 pub use net::*;
 pub use path::*;

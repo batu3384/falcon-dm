@@ -631,4 +631,41 @@ mod tests {
         assert_eq!(std::fs::read(&complete).unwrap().len(), 1024);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    fn hijack_api_state(token: &str, ext_id: &str) -> AppState {
+        let settings =
+            Settings { allowed_extension_ids: vec![ext_id.to_string()], ..Default::default() };
+        AppState {
+            db: Database::in_memory().unwrap(),
+            engine: Aria2Engine::new(),
+            queue: QueueManager::new(),
+            api_token: Arc::new(Mutex::new(token.to_string())),
+            settings: Arc::new(Mutex::new(settings)),
+            rate_bucket: Arc::new(Mutex::new(VecDeque::new())),
+            pending_pair_ids: Arc::new(Mutex::new(VecDeque::new())),
+            pair_proofs: Arc::new(PairProofStore::default()),
+        }
+    }
+
+    #[test]
+    fn intercept_auth_requires_token_origin_and_allowlist() {
+        let ext = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token = "live-hijack-token";
+        let state = hijack_api_state(token, ext);
+        let origin = format!("chrome-extension://{ext}");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-falcon-token", token.parse().unwrap());
+        assert!(check_api_token(&headers, &state, Some(&origin)).is_ok());
+        assert_eq!(check_api_token(&headers, &state, None), Err(StatusCode::FORBIDDEN));
+        let unknown = hijack_api_state(token, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(check_api_token(&headers, &unknown, Some(&origin)), Err(StatusCode::FORBIDDEN));
+        let mut bad = HeaderMap::new();
+        bad.insert("x-falcon-token", "wrong".parse().unwrap());
+        assert_eq!(check_api_token(&bad, &state, Some(&origin)), Err(StatusCode::UNAUTHORIZED));
+        let legacy = hijack_api_state(LEGACY_DEFAULT_API_TOKEN, ext);
+        assert_eq!(
+            check_api_token(&headers, &legacy, Some(&origin)),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+    }
 }

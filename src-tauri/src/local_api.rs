@@ -267,3 +267,15 @@ pub(crate) async fn handle_ping(
     check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn health_is_unauthenticated_ok() {
+        let Json(body) = handle_health().await;
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["service"], "falcon-dm");
+    }
+}

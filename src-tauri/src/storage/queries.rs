@@ -1,6 +1,6 @@
 use super::database::{Database, DatabaseError, Result};
 use super::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
-use crate::util::youtube_dedup_base;
+use crate::util::{open_cookies, seal_cookies, youtube_dedup_base};
 use chrono::Utc;
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Row, TransactionBehavior};
@@ -70,7 +70,7 @@ impl Database {
                 download.error_message,
                 download.referrer,
                 download.user_agent,
-                download.cookies,
+                seal_cookies(download.cookies.as_deref()),
                 download.aria2_gid,
                 download.archived as i64,
             ],
@@ -152,7 +152,7 @@ impl Database {
                 download.error_message,
                 download.referrer,
                 download.user_agent,
-                download.cookies,
+                seal_cookies(download.cookies.as_deref()),
                 download.aria2_gid,
                 download.archived as i64,
             ],
@@ -227,7 +227,7 @@ impl Database {
                 download.error_message,
                 download.referrer,
                 download.user_agent,
-                download.cookies,
+                seal_cookies(download.cookies.as_deref()),
                 download.aria2_gid,
                 download.archived as i64,
                 id,
@@ -478,11 +478,9 @@ impl Database {
         Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
     }
 
-    /// Completes Downloading/Merging/Queued. Queued is included so a worker that
-    /// finished after the 35s cancel-wait (schedule/concurrency) still records
-    /// the dest instead of leaving a complete file as Queued (which would restart).
-    /// Paused is excluded — user pause must not complete. Off-window completion
-    /// after that timeout is the cancel-wait ceiling (R-07).
+    /// Completes Downloading/Merging/Queued. Queued is only for orphan dest
+    /// (F-65): schedule/concurrency no longer demote while a worker is still
+    /// alive, so a live finish lands on Downloading/Merging.
     pub fn finish_stream_if_active(&self, id: i64, size: u64) -> Result<bool> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let rows = conn.execute(
@@ -506,6 +504,30 @@ impl Database {
             params![id],
         )?;
         Ok(rows == 1)
+    }
+
+    /// Upgrade leftover plaintext cookie rows after a version bump (R-03).
+    pub fn reseal_legacy_cookies(&self) -> Result<()> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let mut stmt =
+            conn.prepare("SELECT id, cookies FROM downloads WHERE cookies IS NOT NULL")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)))?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let (id, stored) = row?;
+            if crate::util::cookies_are_sealed(stored.as_deref()) {
+                continue;
+            }
+            if let Some(sealed) = seal_cookies(stored.as_deref()) {
+                pending.push((id, sealed));
+            }
+        }
+        drop(stmt);
+        for (id, sealed) in pending {
+            conn.execute("UPDATE downloads SET cookies = ?1 WHERE id = ?2", params![sealed, id])?;
+        }
+        Ok(())
     }
 
     pub fn update_download_progress(
@@ -790,7 +812,7 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
         error_message,
         referrer,
         user_agent,
-        cookies,
+        cookies: open_cookies(cookies.as_deref()),
         aria2_gid,
         archived,
     })

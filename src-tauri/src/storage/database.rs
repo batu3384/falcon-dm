@@ -82,6 +82,7 @@ impl Database {
 
         let db = Self { conn: Arc::new(pool) };
         db.run_migrations()?;
+        db.reseal_legacy_cookies()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -105,6 +106,7 @@ impl Database {
 
         let db = Self { conn: Arc::new(pool) };
         db.run_migrations()?;
+        db.reseal_legacy_cookies()?;
         Ok(db)
     }
 
@@ -539,6 +541,45 @@ mod tests {
 
         assert!(db.clear_session_cookies(id).unwrap());
         assert!(db.get_download(id).unwrap().cookies.is_none());
+    }
+
+    #[test]
+    fn cookies_are_sealed_in_sqlite() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("secret.bin");
+        download.cookies = Some("sid=secret".into());
+        let id = db.insert_download(&download).unwrap();
+        assert_eq!(db.get_download(id).unwrap().cookies.as_deref(), Some("sid=secret"));
+        let raw: String = {
+            let conn = db.conn.get().unwrap();
+            conn.query_row("SELECT cookies FROM downloads WHERE id = ?1", [id], |row| row.get(0))
+                .unwrap()
+        };
+        assert!(raw.starts_with("v1:"), "{raw}");
+        assert!(!raw.contains("sid=secret"));
+    }
+
+    #[test]
+    fn reseal_legacy_plaintext_cookies() {
+        let db = Database::in_memory().unwrap();
+        let id = db.insert_download(&create_test_download("legacy.bin")).unwrap();
+        {
+            let conn = db.conn.get().unwrap();
+            conn.execute(
+                "UPDATE downloads SET cookies = ?1 WHERE id = ?2",
+                rusqlite::params!["sid=legacy", id],
+            )
+            .unwrap();
+        }
+        db.reseal_legacy_cookies().unwrap();
+        assert_eq!(db.get_download(id).unwrap().cookies.as_deref(), Some("sid=legacy"));
+        let raw: String = {
+            let conn = db.conn.get().unwrap();
+            conn.query_row("SELECT cookies FROM downloads WHERE id = ?1", [id], |row| row.get(0))
+                .unwrap()
+        };
+        assert!(raw.starts_with("v1:"), "{raw}");
+        assert!(!raw.contains("sid=legacy"));
     }
 
     #[test]

@@ -172,11 +172,19 @@ impl QueueManager {
         lock_or_recover(&self.active_stream_tasks).contains_key(&id)
     }
 
+    fn stream_cancel_wait() -> std::time::Duration {
+        if cfg!(test) {
+            std::time::Duration::from_millis(120)
+        } else {
+            std::time::Duration::from_secs(35)
+        }
+    }
+
     pub async fn cancel_and_wait_stream(&self, id: i64) -> bool {
         if !self.cancel_stream(id) {
             return true;
         }
-        tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        tokio::time::timeout(Self::stream_cancel_wait(), async {
             while self.is_stream_active(id) {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
@@ -242,7 +250,10 @@ impl QueueManager {
                 if let Some(gid) = &dl.aria2_gid {
                     let _ = engine.pause(gid).await;
                 } else if !self.cancel_and_wait_stream(id).await {
-                    log::warn!("scheduled pause timed out for download {id}");
+                    log::warn!(
+                        "scheduled pause timed out for download {id}; leaving active until worker ends"
+                    );
+                    continue;
                 }
                 Self::demote_active_to_queued(db, &app_handle, id);
             }
@@ -261,7 +272,10 @@ impl QueueManager {
                 if let Some(gid) = &dl.aria2_gid {
                     let _ = engine.pause(gid).await;
                 } else if !self.cancel_and_wait_stream(id).await {
-                    log::warn!("concurrency pause timed out for download {id}");
+                    log::warn!(
+                        "concurrency pause timed out for download {id}; leaving active until worker ends"
+                    );
+                    continue;
                 }
                 Self::demote_active_to_queued(db, &app_handle, id);
                 active_count = active_count.saturating_sub(1);
@@ -707,6 +721,15 @@ mod tests {
 
         assert!(qm.cancel_and_wait_stream(7).await);
         assert!(!qm.is_stream_active(7));
+    }
+
+    #[tokio::test]
+    async fn cancel_and_wait_stream_timeout_leaves_stuck_worker() {
+        let qm = QueueManager::new();
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        qm.active_stream_tasks.lock().unwrap().insert(7, tx);
+        assert!(!qm.cancel_and_wait_stream(7).await);
+        assert!(qm.is_stream_active(7));
     }
 
     #[test]
