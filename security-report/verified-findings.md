@@ -16,7 +16,7 @@
 |----|----------|----------|---------|-----------|
 | R-01 | Low | YouTube CDN | Signed URLs expire without playback | Inherent to YouTube; yt-dlp fallback exists |
 | R-02 | Info | extension manifest | `<all_urls>` permission | Required for generic download capture |
-| R-03 | Low | SQLite | Active cookies plaintext in DB | Local-only; cleared on complete |
+| R-03 | Low | SQLite | Active cookies plaintext in DB | **Closed (F-176)** — ChaCha20-Poly1305 `v1:` blobs; key `cookie.key` 0600 |
 | R-04 | Info | index.html | Google Fonts CDN | **Closed (F-131)** — system font stack; production CSP `font-src 'self'` |
 
 ## False positives eliminated
@@ -191,14 +191,23 @@
 | F-168 | Low | SettingsModal pending pairs | `getPendingPairs` fail was `catch(() => {})` | **Fixed** — `pair_load_failed` toast; Retry refetches |
 | F-169 | Low | CommandPalette arrows | Empty list ArrowDown set `activeIndex` to `-1` | **Fixed** — ignore arrows/Home/End when no results |
 | F-170 | Low | NewDownloadModal batch | Sequential `addDownload` stopped on first error; earlier URLs stayed queued with a single fail toast | **Fixed** — `Promise.allSettled` + `batch_result`; close if any succeeded |
+| F-171 | Low | extension/smoke-test.mjs | Grep required `e.key === 'ArrowUp'` while SettingsModal used `!==` — CI smoke failed | **Fixed** — assert `'ArrowUp'` + `'ArrowDown'` presence |
+| F-172 | Info | extension README vs manifest | README claimed no `content_scripts` and dropped `tabs` while both existed | **Fixed** — YouTube CS documented; `tabs` dropped (`<all_urls>` covers tab URL) |
+| F-173 | Low | lifecycle.rs tray | Tray labels hardcoded English | **Fixed** — `LANG` + `set_ui_language` EN/TR |
+| F-174 | Info | SchedulerModal hint | R-07 35s cancel-wait not visible to users | **Fixed** — EN/TR scope hint names the ceiling |
+| F-175 | Medium | queue.rs schedule/concurrency | Cancel timeout still demoted to Queued while worker wrote, then `finish_stream` Completed off-window | **Fixed** — demote only after cancel succeeds; timeout leaves Downloading |
+| F-176 | Low | downloads.cookies + settings profiles | Session/profile cookies plaintext on disk | **Fixed** — ChaCha20-Poly1305; legacy rows resealed on open |
+| F-177 | Low | App.css targets | Toolbar/row/nav/tabs 32–36px vs WCAG 2.5.5 44px | **Fixed** — `--target: 44px` on pointer controls |
+| F-178 | Info | `/api/intercept` auth | Live Chrome hijack needed 14201; contract untested when app down | **Fixed** — `check_api_token` unit tests; flow-test 401 without token when API is up |
 
-## Residual after 2026-09-14 follow-up
+## Residual after 2026-09-15 follow-up
 
 | ID | Severity | Location | Finding | Rationale |
 |----|----------|----------|---------|-----------|
-| R-05 | Info | Toolbar / row actions | 36px / 32px targets vs WCAG 44px | Layout density; focus rings present |
-| R-06 | Info | Live Chrome hijack | Unpacked extension + real download not exercised | Falcon API `127.0.0.1:14201` not listening this pass; `flow-test.mjs` mocks Chrome |
-| R-07 | Info | `finish_stream_if_active` Queued | Worker that finishes after 35s cancel-wait Completes a Queued row (may be off-window) | F-65: complete dest must not restart; schedule resume needs Queued not Paused. Ceiling: dedicated hold status |
+| R-01 | Low | YouTube CDN | Signed URLs expire without playback | Inherent to YouTube; yt-dlp fallback exists |
+| R-02 | Info | extension manifest | `<all_urls>` permission | Required for generic download capture |
 
 ## Confidence
-Fixed items verified by cargo `--lib` 123, vitest 142, `npx tsc --noEmit`, `node extension/smoke-test.mjs` / `flow-test.mjs`. Live Chrome hijack E2E not run — desktop API `127.0.0.1:14201` not listening.
+Fixed items verified by cargo `--lib` 131, vitest 142, clippy `-D warnings`, `node extension/smoke-test.mjs` / `flow-test.mjs`. Live Chrome hijack still needs a running desktop app; intercept auth contract is covered in-process (F-178).
+
+F-160 is unused (numbering hole).

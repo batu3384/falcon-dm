@@ -72,9 +72,10 @@ Axum serves `http://127.0.0.1:14201`:
 | `POST /api/pair` | Extension pairing (`200` token or `202` pending approval) |
 | `POST /api/intercept` | Media / hijacked download |
 | `POST /api/add` | Direct URL (e.g. grabber batch) |
-| `GET /api/health` | Liveness |
+| `POST /api/upload` | Blob media (32 MB cap) |
+| `GET /api/health` | Liveness (loopback, no token) |
 
-Requests require `X-Falcon-Token` and a `chrome-extension://` (or Firefox/Edge) `Origin` on the allowlist after you approve in Settings. See [extension/README.md](extension/README.md).
+Mutating requests require `X-Falcon-Token` and a `chrome-extension://` (or Firefox/Edge) `Origin` on the allowlist after you approve in Settings. `GET /api/health` is unauthenticated on loopback. See [extension/README.md](extension/README.md).
 
 ## Build requirements
 

@@ -40,7 +40,7 @@ The in-app installer also writes manifests on **Linux** and **Windows** Chromium
 
 When the browser starts a file download, the extension can send it to Falcon instead.
 
-**Overlay FAB** appears only on YouTube watch/Shorts pages or when a visible `<video>` (≥120×120 px) plays a capturable `http(s)`/blob source. Generic PDF/ZIP/manifest responses do not inject the overlay.
+**Overlay FAB** appears only on YouTube watch/Shorts pages or when a visible `<video>` (≥120×120 px) plays a capturable `http(s)`/blob source. YouTube pages load `youtube.js` via a static `content_scripts` entry; other sites inject on demand. Generic PDF/ZIP/manifest responses do not inject the overlay.
 
 | Control | Where | Effect |
 |---------|-------|--------|

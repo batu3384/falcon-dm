@@ -27,18 +27,22 @@ Product direction for **Falcon DM**. This page tracks milestones — not a relea
 | Cross-platform native host manifests | macOS, Linux, Windows paths — CA-003 closed |
 | Slim native host crate | `falcon-dm-native-host` (no AppKit; Chrome spawn safe) |
 | Wiki + onboarding docs | Source in `wiki/`, sync via `./scripts/sync-wiki.sh` |
+| CI (fmt, clippy, prettier, cargo-deny) | GitHub Actions on PR/push |
+| Hijack API auth contract | Token + Origin unit tests; flow-test 401 when API up |
+| Cookie at-rest encryption | ChaCha20-Poly1305 in SQLite + settings profiles |
+| WCAG 2.5.5 44px targets | `--target` token on pointer controls |
+| Schedule cancel-timeout | No Queued demote while worker still writing |
 
 ## Now
 
 | Item | Status | Notes |
 |------|--------|-------|
-| CI green (fmt, clippy, cargo-deny) | **Now** | Supply-chain advisories and formatting gates |
+| Linux desktop build + packaging | **Now** | Tauri matrix; validate sidecars on distros |
 
 ## Next
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Linux desktop build + packaging | **Next** | Tauri matrix; validate sidecars on distros |
 | Windows desktop build + packaging | **Next** | Native host + installer smoke |
 | Parallel HTTP integration tests | **Next** | Mock 206 server — CA-008 |
 | Firefox MV3 extension | **Next** | Pairing + intercept parity with Chromium |
@@ -65,7 +69,7 @@ gantt
     section Core engine
     Parallel HTTP + dedupe           :done, core1, 2026-08-01, 2026-08-18
     HTTP/HLS/yt-dlp parity           :done, core4, 2026-08-18, 2026-09-06
-    CI + supply-chain hygiene        :active, core2, 2026-08-18, 2026-09-01
+    CI + supply-chain hygiene        :done, core2, 2026-08-18, 2026-09-15
     HTTP integration tests           :core3, 2026-09-01, 2026-09-15
 
     section Platform

@@ -13,7 +13,7 @@
 
 `QueueManager` polls every 500ms, limits concurrency with atomics, and cancels in-flight jobs via `tokio::sync::watch`. State persists in SQLite (WAL mode).
 
-**Scheduler:** optional start/stop time window gates new work. Shutdown-after-complete and dial-up modes are **not** implemented.
+**Scheduler:** optional start/stop time window. New work waits off-window. In-flight Rust streams stay **Downloading** until cancel succeeds (35s wait) or the worker finishes; they are not demoted to Queued while still writing. Aria2 jobs pause immediately. Shutdown-after-complete and dial-up modes are **not** implemented.
 
 ## Local API
 
@@ -21,10 +21,11 @@ Axum on `http://127.0.0.1:14201`:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/health` | Liveness |
+| `GET /api/health` | Liveness (unauthenticated, loopback only) |
 | `POST /api/pair` | Extension pairing |
 | `POST /api/intercept` | Hijacked / media download |
 | `POST /api/add` | Direct URL enqueue (grabber batch, context menu) |
+| `POST /api/upload` | Blob media (32 MB cap, token + Origin) |
 
 All mutating requests require `X-Falcon-Token` and an allowed extension `Origin`.
 
@@ -42,10 +43,12 @@ Enqueue uses an immediate SQLite transaction: if the same URL is already active 
 | **Proxy** | HTTP, HLS, yt-dlp |
 | **yt-dlp path** | Custom binary; empty = PATH + common locations |
 | **Use browser cookies for yt-dlp** | Off by default; passes `Cookie` header to yt-dlp when enabled |
-| **Download profiles** | Per-site UA, referrer, cookies (HTTPS only), save subdir |
-| **Scheduler** | Active window for queue processing |
+| **Download profiles** | Per-site UA, referrer, cookies (HTTPS only, encrypted at rest), save subdir |
+| **Scheduler** | Active window for new work; in-flight cancel wait 35s before demote |
 
 ## Extension integration
+
+YouTube watch/Shorts pages load a static MV3 `content_scripts` entry. Other sites inject on demand via `chrome.scripting.executeScript`. The `tabs` permission is not requested (`<all_urls>` covers tab URL).
 
 | Control | Behavior |
 |---------|----------|

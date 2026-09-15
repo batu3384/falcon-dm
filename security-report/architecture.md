@@ -1,4 +1,4 @@
-# Architecture Map — Falcon DM (2026-09-06)
+# Architecture Map — Falcon DM (2026-09-15)
 
 ## Application type
 Desktop app (Tauri 2) + Chrome MV3 extension + localhost REST API bridge.
@@ -22,12 +22,13 @@ Desktop app (Tauri 2) + Chrome MV3 extension + localhost REST API bridge.
 | Surface | Input | Auth |
 |---------|-------|------|
 | Tauri webview | User UI, Tauri commands | Local process |
-| `POST /api/add`, `/api/intercept` | Extension JSON | Bearer token + extension Origin allowlist |
-| `GET /api/health` | None | Public |
+| `POST /api/add`, `/api/intercept`, `/api/upload` | Extension JSON / blob | Bearer token + extension Origin allowlist |
+| `GET /api/health` | None | Unauthenticated (loopback bind only) |
 | Native messaging | Extension pairing proof | Pair consent in app |
 | Deep link `falcon-dm://` | URL wake only | No enqueue via URL |
 | Chrome `webRequest` | Passive media capture | Extension permissions |
 | Chrome `downloads.onDeterminingFilename` | Browser download hijack | Same API token path |
+| Chrome YouTube `content_scripts` | Watch/Shorts overlay | Static inject; other sites on-demand |
 
 ## Trust boundaries
 1. **Web page → content script** — untrusted page; only `location.href` + captured URLs
@@ -35,6 +36,7 @@ Desktop app (Tauri 2) + Chrome MV3 extension + localhost REST API bridge.
 3. **Background → localhost API** — token + pinned extension ID
 4. **API → download workers** — URL SSRF validation, cookie host matching
 5. **Workers → filesystem** — sanitized filenames, save path allowlist
+6. **SQLite / settings.json cookies** — ChaCha20-Poly1305 at rest (`v1:`); memory plaintext for workers
 
 ## Data flow (YouTube A-path)
 1. Content overlay picks muxed `googlevideo.com` URL or watch URL + format
