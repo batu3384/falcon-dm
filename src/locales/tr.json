@@ -255,7 +255,7 @@
     "load_failed": "Zamanlama yüklenemedi",
     "retry": "Tekrar Dene",
     "invalid_time": "Geçersiz: her iki saat HH:MM olmalı ve birbirinden farklı olmalı",
-    "scope_hint": "Kuyruk yalnızca belirlenen saat aralığında indirir. Tamamlanınca kapatma ve çevirmeli bağlantı desteklenmiyor.",
+    "scope_hint": "Kuyruk yalnızca belirlenen saat aralığında indirir. İptal 35 sn'yi aşarsa iş Downloading kalır ve bitince tamamlanır. Tamamlanınca kapatma ve çevirmeli bağlantı desteklenmiyor.",
     "confirm_close": "Kaydedilmemiş zamanlama değişiklikleri silinsin mi?"
   },
   "onboarding": {

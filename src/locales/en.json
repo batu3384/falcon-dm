@@ -255,7 +255,7 @@
     "load_failed": "Failed to load schedule",
     "retry": "Retry",
     "invalid_time": "Invalid schedule: both times must be HH:MM and differ",
-    "scope_hint": "Downloads run only inside the scheduled window. Shutdown-after-complete and dial-up modes are not supported.",
+    "scope_hint": "Downloads run only inside the scheduled window. If cancel exceeds 35s, the in-flight job stays active until it finishes. Shutdown-after-complete and dial-up modes are not supported.",
     "confirm_close": "Discard unsaved schedule changes?"
   },
   "onboarding": {

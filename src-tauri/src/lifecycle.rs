@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager,
+    AppHandle, Emitter, Manager,
 };
 use tauri_plugin_notification::NotificationExt;
 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
@@ -427,14 +427,45 @@ fn spawn_progress_poll(app_handle: tauri::AppHandle) {
     });
 }
 
-fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let show_i = MenuItem::with_id(app, "show", "Show Falcon DM", true, None::<&str>)?;
-    let pause_i = MenuItem::with_id(app, "pause", "Pause All", true, None::<&str>)?;
-    let resume_i = MenuItem::with_id(app, "resume", "Resume All", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_i, &pause_i, &resume_i, &quit_i])?;
+const TRAY_ID: &str = "main";
 
-    let _tray = TrayIconBuilder::new()
+fn locale_is_turkish(lang: &str) -> bool {
+    lang.trim().split(['-', '_', '.']).next().is_some_and(|tag| tag.eq_ignore_ascii_case("tr"))
+}
+
+fn tray_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
+    let tr = locale_is_turkish(lang);
+    let quit_i =
+        MenuItem::with_id(app, "quit", if tr { "Çıkış" } else { "Quit" }, true, None::<&str>)?;
+    let show_i = MenuItem::with_id(
+        app,
+        "show",
+        if tr { "Falcon DM'i Göster" } else { "Show Falcon DM" },
+        true,
+        None::<&str>,
+    )?;
+    let pause_i = MenuItem::with_id(
+        app,
+        "pause",
+        if tr { "Tümünü Duraklat" } else { "Pause All" },
+        true,
+        None::<&str>,
+    )?;
+    let resume_i = MenuItem::with_id(
+        app,
+        "resume",
+        if tr { "Tümünü Sürdür" } else { "Resume All" },
+        true,
+        None::<&str>,
+    )?;
+    Menu::with_items(app, &[&show_i, &pause_i, &resume_i, &quit_i])
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let handle = app.handle().clone();
+    let menu = tray_menu(&handle, &std::env::var("LANG").unwrap_or_default())?;
+
+    let _tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -663,7 +694,8 @@ pub fn run() {
             crate::commands::open_folder,
             crate::commands::open_file,
             crate::commands::install_native_host_manifests,
-            crate::commands::check_for_updates
+            crate::commands::check_for_updates,
+            set_ui_language
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -675,4 +707,27 @@ pub fn run() {
             log::info!("Shutting down Falcon DM, stopped aria2 engine.");
         }
     });
+}
+
+#[tauri::command]
+pub fn set_ui_language(app: AppHandle, lang: String) -> Result<(), String> {
+    let menu = tray_menu(&app, &lang).map_err(|e| e.to_string())?;
+    app.tray_by_id(TRAY_ID)
+        .ok_or_else(|| "tray icon missing".to_string())?
+        .set_menu(Some(menu))
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::locale_is_turkish;
+
+    #[test]
+    fn locale_is_turkish_matches_tr_tags() {
+        assert!(locale_is_turkish("tr"));
+        assert!(locale_is_turkish("tr-TR"));
+        assert!(locale_is_turkish("tr_TR.UTF-8"));
+        assert!(!locale_is_turkish("en"));
+        assert!(!locale_is_turkish("en_US"));
+    }
 }

@@ -94,6 +94,10 @@ function App() {
   }, [downloads, syncSelectedFromList]);
 
   useEffect(() => {
+    void api.setUiLanguage(i18n.language).catch(() => {});
+  }, [i18n.language]);
+
+  useEffect(() => {
     const onboardingComplete = localStorage.getItem('onboarding_complete');
     if (!onboardingComplete) setShowOnboarding(true);
 

@@ -24,6 +24,7 @@
   --space-xl: 16px;
   --space-2xl: 24px;
   --space-3xl: 32px;
+  --target: 44px;
 
   /* Shadow scale — hue-tinted, not generic black */
   --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
@@ -397,7 +398,7 @@ select {
   display: flex;
   align-items: center;
   gap: 9px;
-  height: 32px;
+  height: var(--target);
   padding: 0 9px;
   border-radius: var(--radius-sm);
   font-size: 13px;
@@ -492,7 +493,7 @@ select {
   background: color-mix(in srgb, var(--main-bg) 82%, var(--sidebar-bg));
 }
 .toolbar-row {
-  height: 52px;
+  height: 56px;
   padding: 0 16px;
   display: flex;
   align-items: center;
@@ -526,7 +527,7 @@ select {
 }
 .search-input {
   width: 100%;
-  height: 36px;
+  height: var(--target);
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -562,8 +563,8 @@ select {
 .btn-primary,
 .btn-secondary,
 .btn-ghost {
-  height: 36px;
-  min-height: 36px;
+  height: var(--target);
+  min-height: var(--target);
   padding: 0 14px;
   border-radius: var(--radius-sm);
   font-size: 13px;
@@ -628,10 +629,10 @@ select {
   color: var(--danger);
 }
 .icon-btn {
-  width: 36px;
-  height: 36px;
-  min-width: 36px;
-  min-height: 36px;
+  width: var(--target);
+  height: var(--target);
+  min-width: var(--target);
+  min-height: var(--target);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1281,10 +1282,10 @@ select {
   opacity: 1;
 }
 .dl-actions .icon-btn {
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
+  width: var(--target);
+  height: var(--target);
+  min-width: var(--target);
+  min-height: var(--target);
 }
 .dl-actions .icon-btn svg {
   width: 14px;
@@ -1336,7 +1337,8 @@ select {
   display: block;
   width: 100%;
   text-align: left;
-  padding: 8px 10px;
+  min-height: var(--target);
+  padding: 12px 10px;
   border: none;
   background: transparent;
   color: var(--text-1);
@@ -1644,7 +1646,7 @@ select {
 }
 .tab {
   flex: 1;
-  height: 30px;
+  height: var(--target);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1680,7 +1682,7 @@ select {
   color: var(--text-2);
 }
 .field-input {
-  height: 34px;
+  height: var(--target);
   background: var(--surface-1);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -1769,7 +1771,7 @@ select {
   color: var(--text-2);
   cursor: pointer;
   padding: 8px 0;
-  min-height: 36px;
+  min-height: var(--target);
   transition: color var(--trans);
 }
 .adv-toggle:hover {
@@ -2129,10 +2131,10 @@ select {
   min-width: 0;
 }
 .toast-dismiss {
-  width: 36px;
-  height: 36px;
-  min-width: 36px;
-  min-height: 36px;
+  width: var(--target);
+  height: var(--target);
+  min-width: var(--target);
+  min-height: var(--target);
   flex-shrink: 0;
   color: var(--text-3);
 }
@@ -2167,6 +2169,7 @@ select {
   align-items: center;
   gap: 10px;
   width: 100%;
+  min-height: var(--target);
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   font-size: 13px;

@@ -253,6 +253,10 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
   return invoke<UpdateCheckResult>('check_for_updates');
 }
 
+export async function setUiLanguage(lang: string): Promise<void> {
+  await invoke('set_ui_language', { lang });
+}
+
 /// Build a cURL command string from a download's URL + headers. For the "Copy as
 /// cURL" context-menu action — lets users replicate the request in a terminal.
 export function buildCurlCommand(dl: {
