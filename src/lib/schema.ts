@@ -44,7 +44,7 @@ export const DownloadSchema = z.object({
   archived: z.boolean().optional().default(false),
 });
 
-export const DownloadArraySchema = z.array(DownloadSchema);
+export const DownloadArraySchema = z.array(DownloadSchema).max(500);
 
 export const ProgressPayloadSchema = z.object({
   id: z.number(),
@@ -103,7 +103,7 @@ export const LogEntrySchema = z.object({
   message: z.string(),
 });
 
-export const LogArraySchema = z.array(LogEntrySchema);
+export const LogArraySchema = z.array(LogEntrySchema).max(1000);
 
 export const DownloadStatsSchema = z.object({
   active: z.number().int().nonnegative(),

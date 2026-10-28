@@ -75,6 +75,11 @@ describe('DownloadArraySchema', () => {
   it('rejects a non-array', () => {
     expect(() => DownloadArraySchema.parse(validDownload)).toThrow();
   });
+  it('rejects more than 500 rows', () => {
+    expect(() =>
+      DownloadArraySchema.parse(Array.from({ length: 501 }, () => validDownload)),
+    ).toThrow();
+  });
 });
 
 describe('ProgressPayloadSchema', () => {
