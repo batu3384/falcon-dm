@@ -8,7 +8,6 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use uuid::Uuid;
 
 const PREFIX: &str = "v1:";
 const KEY_LEN: usize = 32;
@@ -24,15 +23,42 @@ fn key_dir() -> PathBuf {
 
 fn random_bytes<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
-    let mut filled = 0;
-    while filled < N {
-        let chunk = Uuid::new_v4();
-        let bytes = chunk.as_bytes();
-        let n = (N - filled).min(bytes.len());
-        out[filled..filled + n].copy_from_slice(&bytes[..n]);
-        filled += n;
+    getrandom::fill(&mut out).expect("OS RNG is required for cookie keys");
+    if out.iter().all(|b| *b == 0) {
+        panic!("OS RNG returned an all-zero cookie key");
     }
     out
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn keychain_entry() -> Result<keyring::Entry, keyring::Error> {
+    keyring::Entry::new("falcon-dm", "cookie-key")
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn keychain_key() -> Option<[u8; KEY_LEN]> {
+    let entry = keychain_entry().ok()?;
+    match entry.get_password() {
+        Ok(stored) => {
+            let bytes = STANDARD.decode(stored).ok()?;
+            <[u8; KEY_LEN]>::try_from(bytes.as_slice()).ok()
+        }
+        Err(keyring::Error::NoEntry) => None,
+        Err(e) => {
+            log::warn!("cookie keychain read failed: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn store_keychain(key: &[u8; KEY_LEN]) {
+    let Ok(entry) = keychain_entry() else {
+        return;
+    };
+    if let Err(e) = entry.set_password(&STANDARD.encode(key)) {
+        log::warn!("cookie keychain write failed: {e}");
+    }
 }
 
 fn load_key() -> [u8; KEY_LEN] {
@@ -41,8 +67,14 @@ fn load_key() -> [u8; KEY_LEN] {
         let dir = key_dir();
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("cookie.key");
+        #[cfg(all(target_os = "macos", not(test)))]
+        if let Some(key) = keychain_key() {
+            return key;
+        }
         if let Ok(bytes) = fs::read(&path) {
             if let Ok(arr) = <[u8; KEY_LEN]>::try_from(bytes.as_slice()) {
+                #[cfg(all(target_os = "macos", not(test)))]
+                store_keychain(&arr);
                 return arr;
             }
         }
@@ -54,6 +86,8 @@ fn load_key() -> [u8; KEY_LEN] {
                 let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
             }
         }
+        #[cfg(all(target_os = "macos", not(test)))]
+        store_keychain(&key);
         key
     })
 }

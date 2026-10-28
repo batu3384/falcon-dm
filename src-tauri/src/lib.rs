@@ -51,10 +51,7 @@ pub(crate) fn token_matches(provided: &str, expected: &str) -> bool {
 pub(crate) const MAX_PENDING_PAIR_REQUESTS: usize = 32;
 
 pub(crate) fn extension_id_from_origin(origin: &str) -> Option<&str> {
-    origin
-        .strip_prefix("chrome-extension://")
-        .or_else(|| origin.strip_prefix("moz-extension://"))
-        .or_else(|| origin.strip_prefix("edge-extension://"))
+    origin.strip_prefix("chrome-extension://").or_else(|| origin.strip_prefix("edge-extension://"))
 }
 
 pub(crate) fn is_valid_extension_id(id: &str) -> bool {
@@ -501,6 +498,9 @@ mod tests {
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
         assert!(extension_id_from_origin("https://example.com").is_none());
+        assert!(
+            extension_id_from_origin("moz-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_none()
+        );
         assert!(!is_valid_extension_id("short"));
         assert!(!is_valid_extension_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
         assert!(parse_extension_id(" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ").is_ok());

@@ -20,6 +20,7 @@ use futures::FutureExt;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
@@ -172,7 +173,6 @@ fn spawn_local_api(app_handle: tauri::AppHandle) {
             .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
                 if let Ok(origin_str) = origin.to_str() {
                     origin_str.starts_with("chrome-extension://")
-                        || origin_str.starts_with("moz-extension://")
                         || origin_str.starts_with("edge-extension://")
                 } else {
                     false
@@ -621,7 +621,15 @@ pub fn run() {
         pair_proofs: Arc::new(PairProofStore::default()),
     };
 
-    let app = tauri::Builder::default()
+    #[cfg(desktop)]
+    let builder =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            crate::show_main_window(app);
+        }));
+    #[cfg(not(desktop))]
+    let builder = tauri::Builder::default();
+
+    let app = builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
@@ -701,12 +709,41 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
-        if let tauri::RunEvent::ExitRequested { .. } = event {
-            let state = app_handle.state::<AppState>();
-            let _ = state.engine.stop();
-            log::info!("Shutting down Falcon DM, stopped aria2 engine.");
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+            // Restart ignores prevent_exit. A second ExitRequested is the real exit.
+            if code == Some(tauri::RESTART_EXIT_CODE) {
+                return;
+            }
+            if start_shutdown(app_handle) {
+                api.prevent_exit();
+            }
         }
     });
+}
+
+fn start_shutdown(app_handle: &AppHandle) -> bool {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let app_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app_handle.state::<AppState>();
+        let ids = state.queue.active_stream_ids();
+        for id in &ids {
+            let _ = state.queue.cancel_stream(*id);
+        }
+        let _ = state.engine.stop();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline
+            && ids.iter().any(|id| state.queue.is_stream_active(*id))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        log::info!("Shutting down Falcon DM, stopped aria2 engine.");
+        app_handle.exit(0);
+    });
+    true
 }
 
 #[tauri::command]

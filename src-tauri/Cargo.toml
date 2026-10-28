@@ -73,6 +73,8 @@ tauri-plugin-deep-link = "2"
 window-vibrancy = "0.8.0"
 base64 = "0.22"
 chacha20poly1305 = "0.11.0"
+getrandom = "0.3"
+tauri-plugin-single-instance = "2.5.5"
 
 [profile.release]
 # ponytail: shrink release binary — LTO across crates, single codegen unit, strip debug symbols.
@@ -80,3 +82,6 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = "4.2.0"

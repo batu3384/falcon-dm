@@ -172,6 +172,10 @@ impl QueueManager {
         lock_or_recover(&self.active_stream_tasks).contains_key(&id)
     }
 
+    pub fn active_stream_ids(&self) -> Vec<i64> {
+        lock_or_recover(&self.active_stream_tasks).keys().copied().collect()
+    }
+
     fn stream_cancel_wait() -> std::time::Duration {
         if cfg!(test) {
             std::time::Duration::from_millis(120)
