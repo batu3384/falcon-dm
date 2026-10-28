@@ -57,7 +57,8 @@ pub async fn pause_download(
         }
     }
     // Cancels HLS and yt-dlp tasks (shared watch map). Timeout still writes
-    // Paused so the UI does not stay Downloading; finish_stream ignores Paused.
+    // Paused so the UI does not stay Downloading. A worker that then returns Ok
+    // completes the row (finish_stream includes Paused). Cancelled leaves Paused.
     if !state.queue.cancel_and_wait_stream(id).await {
         log::warn!("pause timed out for download {id}");
     }
@@ -273,6 +274,9 @@ pub async fn change_priority(
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     let mut settings = current_settings(&state);
+    if settings.load_corrupt {
+        return Err("settings.json is corrupt; rename or delete it before saving".into());
+    }
     settings.api_token.clear();
     for profile in &mut settings.download_profiles {
         if profile.cookies.as_deref().is_some_and(|c| !c.trim().is_empty()) {
@@ -491,8 +495,11 @@ pub fn approve_extension_pair(
 
 #[tauri::command]
 pub async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Result<(), String> {
-    let dir = app_data_dir();
     let current = current_settings(&state);
+    if current.load_corrupt {
+        return Err("settings.json is corrupt; rename or delete it before saving".into());
+    }
+    let dir = app_data_dir();
     let mut settings = settings;
     if settings.api_token.trim().is_empty() || settings.api_token == LEGACY_DEFAULT_API_TOKEN {
         settings.api_token = current.api_token.clone();

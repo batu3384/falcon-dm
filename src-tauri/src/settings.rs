@@ -94,6 +94,9 @@ pub struct Settings {
     /// subdir override the request defaults.
     #[serde(default)]
     pub download_profiles: Vec<DownloadProfile>,
+    /// Set when settings.json could not be parsed. Not written back.
+    #[serde(skip)]
+    pub load_corrupt: bool,
 }
 
 impl Default for Settings {
@@ -116,6 +119,7 @@ impl Default for Settings {
             ytdlp_path: String::new(),
             ytdlp_use_browser_cookies: false,
             download_profiles: Vec::new(),
+            load_corrupt: false,
         }
     }
 }
@@ -202,15 +206,30 @@ impl Settings {
 
     pub fn load(app_data_dir: &std::path::Path) -> Self {
         let settings_path = app_data_dir.join("settings.json");
+        let mut load_corrupt = false;
         let mut settings = if settings_path.exists() {
-            if let Ok(content) = fs::read_to_string(&settings_path) {
-                serde_json::from_str::<Settings>(&content).unwrap_or_default()
-            } else {
-                Self::default()
+            match fs::read_to_string(&settings_path) {
+                Ok(content) => match serde_json::from_str::<Settings>(&content) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        log::error!("settings.json is corrupt: {e}");
+                        load_corrupt = true;
+                        Self::default()
+                    }
+                },
+                Err(e) => {
+                    log::error!("settings.json unreadable: {e}");
+                    load_corrupt = true;
+                    Self::default()
+                }
             }
         } else {
             Self::default()
         };
+        if load_corrupt {
+            settings.load_corrupt = true;
+            return settings;
+        }
         let needs_cookie_reseal = settings.download_profiles.iter().any(|profile| {
             profile
                 .cookies
@@ -475,6 +494,18 @@ mod tests {
         assert!(json.contains("v1:"), "{json}");
         let loaded = Settings::load(&dir);
         assert_eq!(loaded.download_profiles[0].cookies.as_deref(), Some("sid=disk"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_settings_are_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("falcon-settings-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let raw = "{not json";
+        fs::write(dir.join("settings.json"), raw).unwrap();
+        let loaded = Settings::load(&dir);
+        assert!(loaded.load_corrupt);
+        assert_eq!(fs::read_to_string(dir.join("settings.json")).unwrap(), raw);
         let _ = fs::remove_dir_all(&dir);
     }
 }

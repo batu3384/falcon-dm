@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   CheckCircle2,
@@ -49,6 +49,15 @@ import { speedLimitFromSettings } from './lib/speedLimit';
 function App() {
   const { t, i18n } = useTranslation();
   const showToast = useToastStore((s) => s.showToast);
+  const statsBroken = useRef(false);
+  const toastBackgroundError = useCallback(
+    (error: unknown) => {
+      const msg = api.extractTauriError(error);
+      if (/invoke/i.test(msg) || /not connected|bağlı değil/.test(msg)) return;
+      showToast('error', msg);
+    },
+    [showToast],
+  );
 
   // Downloads store absorbs downloads/selection/loading state.
   const {
@@ -94,8 +103,8 @@ function App() {
   }, [downloads, syncSelectedFromList]);
 
   useEffect(() => {
-    void api.setUiLanguage(i18n.language).catch(() => {});
-  }, [i18n.language]);
+    void api.setUiLanguage(i18n.language).catch(toastBackgroundError);
+  }, [i18n.language, toastBackgroundError]);
 
   useEffect(() => {
     const onboardingComplete = localStorage.getItem('onboarding_complete');
@@ -104,15 +113,26 @@ function App() {
     api
       .getSettings()
       .then((s) => applyTheme(s.theme))
-      .catch(() => applyTheme('system'));
+      .catch((error) => {
+        applyTheme('system');
+        const msg = api.extractTauriError(error);
+        if (msg.includes('settings.json is corrupt')) showToast('error', msg);
+      });
     watchSystemTheme();
 
     fetchDownloads();
     const refreshLibraryCounts = () => {
       api
         .getStats()
-        .then((stats) => setLibraryCounts(libraryCountsFromStats(stats)))
-        .catch(() => {});
+        .then((stats) => {
+          statsBroken.current = false;
+          setLibraryCounts(libraryCountsFromStats(stats));
+        })
+        .catch((error) => {
+          if (statsBroken.current) return;
+          statsBroken.current = true;
+          toastBackgroundError(error);
+        });
     };
     refreshLibraryCounts();
 
@@ -140,7 +160,7 @@ function App() {
       unlistenPair.then((f) => f());
       clearInterval(refreshTimer);
     };
-  }, [fetchDownloads, applyProgress, addDownload, showToast, t]);
+  }, [fetchDownloads, applyProgress, addDownload, showToast, t, toastBackgroundError]);
 
   // ponytail: refetch with the right archived flag when the sidebar category
   // switches to/from "Archived" (archived rows are excluded by default).
@@ -148,9 +168,16 @@ function App() {
     fetchDownloads(activeCategory === 'Archived', undefined, activeCategory);
     api
       .getStats()
-      .then((stats) => setLibraryCounts(libraryCountsFromStats(stats)))
-      .catch(() => {});
-  }, [activeCategory, fetchDownloads]);
+      .then((stats) => {
+        statsBroken.current = false;
+        setLibraryCounts(libraryCountsFromStats(stats));
+      })
+      .catch((error) => {
+        if (statsBroken.current) return;
+        statsBroken.current = true;
+        toastBackgroundError(error);
+      });
+  }, [activeCategory, fetchDownloads, toastBackgroundError]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -190,8 +217,15 @@ function App() {
       await fetchDownloads();
       api
         .getStats()
-        .then((stats) => setLibraryCounts(libraryCountsFromStats(stats)))
-        .catch(() => {});
+        .then((stats) => {
+          statsBroken.current = false;
+          setLibraryCounts(libraryCountsFromStats(stats));
+        })
+        .catch((error) => {
+          if (statsBroken.current) return;
+          statsBroken.current = true;
+          toastBackgroundError(error);
+        });
       const failedNames = failures
         .map(({ download, error }) => `${download.filename} (${error})`)
         .join(', ');
@@ -204,7 +238,7 @@ function App() {
         }),
       );
     },
-    [fetchDownloads, showToast, t],
+    [fetchDownloads, showToast, t, toastBackgroundError],
   );
 
   const handlePauseAll = useCallback(async () => {
