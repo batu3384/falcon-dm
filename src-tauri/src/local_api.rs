@@ -192,8 +192,10 @@ pub(crate) async fn handle_api_upload(
     }
 }
 
+pub(crate) const API_PROTOCOL: u32 = 1;
+
 pub(crate) async fn handle_health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": true, "service": "falcon-dm" }))
+    Json(serde_json::json!({ "ok": true, "service": "falcon-dm", "protocol": API_PROTOCOL }))
 }
 
 /// Pair browser extension ↔ desktop. Requires native proof + user approval.
@@ -277,5 +279,6 @@ mod tests {
         let Json(body) = handle_health().await;
         assert_eq!(body["ok"], true);
         assert_eq!(body["service"], "falcon-dm");
+        assert_eq!(body["protocol"], 1);
     }
 }

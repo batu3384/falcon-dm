@@ -385,7 +385,7 @@ try {
   });
   if (health.ok) {
     const body = await health.json();
-    assert(body.ok === true && body.service === 'falcon-dm', 'health payload');
+    assert(body.ok === true && body.service === 'falcon-dm' && body.protocol === 1, 'health payload');
     live = true;
   }
 } catch (_) {}
