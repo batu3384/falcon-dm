@@ -593,13 +593,25 @@ mod tests {
     }
 
     #[test]
-    fn completed_transition_does_not_override_paused_state() {
+    fn late_success_completes_paused_row() {
         let db = Database::in_memory().unwrap();
         let mut download = create_test_download("stream.mp4");
         download.status = DownloadStatus::Paused;
         let id = db.insert_download(&download).unwrap();
+        assert!(db.finish_stream_if_active(id, 2048).unwrap());
+        let row = db.get_download(id).unwrap();
+        assert_eq!(row.status, DownloadStatus::Completed);
+        assert_eq!(row.downloaded_size, 2048);
+    }
+
+    #[test]
+    fn finish_stream_does_not_complete_failed() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("failed.mp4");
+        download.status = DownloadStatus::Failed;
+        let id = db.insert_download(&download).unwrap();
         assert!(!db.finish_stream_if_active(id, 100).unwrap());
-        assert_eq!(db.get_download(id).unwrap().status, DownloadStatus::Paused);
+        assert_eq!(db.get_download(id).unwrap().status, DownloadStatus::Failed);
     }
 
     #[test]

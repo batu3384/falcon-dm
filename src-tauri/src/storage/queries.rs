@@ -478,9 +478,9 @@ impl Database {
         Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
     }
 
-    /// Completes Downloading/Merging/Queued. Queued is only for orphan dest
-    /// (F-65): schedule/concurrency no longer demote while a worker is still
-    /// alive, so a live finish lands on Downloading/Merging.
+    /// Completes a worker that validated a full file. Includes Paused: user or
+    /// tray pause may land before a slow finalize returns Ok. Cancelled workers
+    /// never call this, so a real pause stays Paused. Failed stays Failed.
     pub fn finish_stream_if_active(&self, id: i64, size: u64) -> Result<bool> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let rows = conn.execute(
@@ -491,7 +491,7 @@ impl Database {
                  status = 'Completed',
                  completed_at = ?2,
                  error_message = NULL
-             WHERE id = ?3 AND status IN ('Downloading', 'Merging', 'Queued')",
+             WHERE id = ?3 AND status IN ('Downloading', 'Merging', 'Queued', 'Paused')",
             params![size as i64, Utc::now().to_rfc3339(), id],
         )?;
         Ok(rows == 1)
