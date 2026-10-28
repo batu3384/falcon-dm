@@ -24,18 +24,18 @@ jobs:
             arch: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: "npm"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: "src-tauri -> target"
 
@@ -130,7 +130,7 @@ jobs:
       # ponytail: Tauri notarization needs the signing identity + Apple ID creds.
       - name: Build + sign + notarize (Tauri)
         if: ${{ env.APPLE_SIGNING_CONFIGURED == 'true' }}
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -144,19 +144,11 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.target }}
 
-      - name: Build (unsigned fallback)
-        if: ${{ env.APPLE_SIGNING_CONFIGURED == 'false' }}
-        run: npx tauri build --target ${{ matrix.target }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload unsigned fallback artifacts
-        if: ${{ env.APPLE_SIGNING_CONFIGURED == 'false' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: falcon-dm-unsigned-${{ matrix.arch }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle
-          if-no-files-found: error
+      - name: Refuse unsigned release
+        if: ${{ env.APPLE_SIGNING_CONFIGURED != 'true' }}
+        run: |
+          echo "Apple signing secrets are required. Unsigned release builds are not published." >&2
+          exit 1
 
       - name: Compute checksum
         run: |
@@ -183,7 +175,7 @@ jobs:
             >> "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
 
       - name: Upload checksum artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: checksums-${{ matrix.arch }}
           path: checksums-${{ matrix.arch }}.txt
