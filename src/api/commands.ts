@@ -253,6 +253,10 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
   return invoke<UpdateCheckResult>('check_for_updates');
 }
 
+export async function readClipboard(): Promise<string> {
+  return invoke<string>('read_clipboard');
+}
+
 export async function setUiLanguage(lang: string): Promise<void> {
   await invoke('set_ui_language', { lang });
 }

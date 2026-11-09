@@ -703,6 +703,7 @@ pub fn run() {
             crate::commands::open_file,
             crate::commands::install_native_host_manifests,
             crate::commands::check_for_updates,
+            crate::commands::read_clipboard,
             set_ui_language
         ])
         .build(tauri::generate_context!())

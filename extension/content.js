@@ -160,7 +160,7 @@
       .fm-sub { margin: 4px 0 0; font-size: 12px; color: #9aa3b2; line-height: 1.45; }
       .fm-steps { margin: 6px 0 0; font-size: 11px; font-weight: 600; color: #93c5fd; letter-spacing: .01em; }
       .fm-close {
-        width: 36px; height: 36px; border-radius: 10px; border: 1px solid rgba(255,255,255,.1);
+        width: 44px; height: 44px; border-radius: 10px; border: 1px solid rgba(255,255,255,.1);
         background: transparent; color: #e4e4e7; cursor: pointer; font-size: 20px; line-height: 1;
         transition: background .15s, transform .12s, border-color .15s;
       }
@@ -201,10 +201,10 @@
       .fm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
       .fm-grab-bar { display: flex; gap: 8px; }
       .fm-btn {
-        min-height: 40px; padding: 8px 16px; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer; border: none;
+        min-height: 44px; padding: 8px 16px; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer; border: none;
         transition: filter .15s, transform .12s, box-shadow .15s;
       }
-      .fm-btn-sm { min-height: 32px; padding: 6px 10px; font-size: 12px; }
+      .fm-btn-sm { min-height: 44px; padding: 6px 10px; font-size: 12px; }
       .fm-btn-ghost { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.14); }
       .fm-btn-primary {
         background: linear-gradient(180deg, #e08a12, ${TOKENS.accent});
@@ -243,7 +243,7 @@
       .fm-fab-wrap.fm-dragging { cursor: grabbing; }
       .fm-fab-wrap.fm-dragging .fm-fab:hover { transform: none; box-shadow: 0 10px 28px rgba(0,0,0,.4), 0 0 0 1px rgba(255,255,255,.1); }
       .fm-fab-dismiss {
-        width: 36px; height: 36px; padding: 0; border-radius: 999px; cursor: pointer;
+        width: 44px; height: 44px; padding: 0; border-radius: 999px; cursor: pointer;
         border: 1px solid rgba(255,255,255,.14); background: rgba(30,36,48,.92); color: #9aa3b2;
         font-size: 17px; line-height: 1; display: inline-flex; align-items: center; justify-content: center;
         flex-shrink: 0; transition: background .15s, color .15s, border-color .15s, transform .12s;
@@ -263,6 +263,17 @@
         .fm-title { color: #111827; }
         .fm-sub, .fm-label, .fm-card-meta { color: #5b6575; }
         .fm-close { color: #111827; border-color: #e2e6ee; }
+        .fm-steps { color: #1d4ed8; }
+        .fm-input { color: #111827; }
+        .fm-info { color: #1e3a8a; background: rgba(37,99,235,.1); }
+        .fm-error { color: #991b1b; }
+        .fm-warn { color: #92400e; }
+        .fm-badge { color: #92400e; background: rgba(217,119,6,.16); }
+        .fm-badge.hls { color: #1d4ed8; background: rgba(37,99,235,.12); }
+        .fm-badge.dash { color: #6b21a8; background: rgba(168,85,247,.12); }
+        .fm-badge.blob { color: #166534; background: rgba(34,197,94,.14); }
+        .fm-close:hover { background: rgba(15,23,42,.06); border-color: #cfd5e0; }
+        .fm-card:hover { border-color: #cfd5e0; }
         .fm-card, .fm-input { background: #f5f7fb; border-color: #e2e6ee; }
         .fm-card.active { background: rgba(37,99,235,.1); }
         .fm-card-title { color: #111827; }

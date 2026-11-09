@@ -16,7 +16,8 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // ponytail: listen on 127.0.0.1 too — tools that hit 127.0.0.1:1420 were missing IPv6-only bind.
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",

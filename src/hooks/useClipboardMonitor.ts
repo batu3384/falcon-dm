@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { readClipboard } from '../api/commands';
 import { isPublicHttpUrl } from '../lib/publicHttpUrl';
 
 export const URL_RE = /^https?:\/\/\S+/i;
@@ -37,25 +38,46 @@ export function clipboardUrlConsumed(accepted: unknown): boolean {
   return accepted !== false;
 }
 
+async function readClipboardText(): Promise<string> {
+  const tauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  if (tauri) return (await readClipboard()).trim();
+  return (await navigator.clipboard.readText()).trim();
+}
+
 /** Poll clipboard for http(s) URLs while enabled. */
-export function useClipboardMonitor(enabled: boolean, onUrl: (url: string) => void | boolean) {
+export function useClipboardMonitor(
+  enabled: boolean,
+  onUrl: (url: string) => void | boolean,
+  onError?: (error: unknown) => void,
+) {
   const lastRef = useRef('');
   const onUrlRef = useRef(onUrl);
+  const onErrorRef = useRef(onError);
+  const readFailed = useRef(false);
+  const reading = useRef(false);
   useEffect(() => {
     onUrlRef.current = onUrl;
-  }, [onUrl]);
+    onErrorRef.current = onError;
+  }, [onUrl, onError]);
 
   useEffect(() => {
     if (!enabled) return;
     const timer = setInterval(async () => {
+      if (reading.current) return;
+      reading.current = true;
       try {
-        const text = (await navigator.clipboard.readText()).trim();
+        const text = await readClipboardText();
+        readFailed.current = false;
         if (!text || text === lastRef.current) return;
         if (!isQueueableClipboardUrl(text)) return;
         if (!clipboardUrlConsumed(onUrlRef.current(text))) return;
         lastRef.current = text;
-      } catch {
-        /* clipboard permission denied */
+      } catch (error) {
+        if (readFailed.current) return;
+        readFailed.current = true;
+        onErrorRef.current?.(error);
+      } finally {
+        reading.current = false;
       }
     }, 2000);
     return () => clearInterval(timer);

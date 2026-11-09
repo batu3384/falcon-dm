@@ -1,6 +1,20 @@
 import { useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, AlertTriangle, Inbox, SearchX } from 'lucide-react';
+import {
+  AlertCircle,
+  AlertTriangle,
+  Inbox,
+  SearchX,
+  Film,
+  Music,
+  FileText,
+  Package,
+  AppWindow,
+  Pause,
+  CheckCircle2,
+  Archive,
+  Activity,
+} from 'lucide-react';
 import { useVirtualizer, defaultRangeExtractor } from '@tanstack/react-virtual';
 import DownloadItem from './DownloadItem';
 import { downloadMatchesView } from '../lib/downloadView';
@@ -30,6 +44,21 @@ interface DownloadListProps {
 // ponytail: item height is fixed by the .dl-item layout. Used as the virtualizer
 // estimate; the actual rendered height matches so there's no drift.
 const ITEM_HEIGHT = 68;
+
+function emptyIcon(category: string, searching: boolean) {
+  if (searching) return SearchX;
+  if (category === 'Failed') return AlertTriangle;
+  if (category === 'Downloading') return Activity;
+  if (category === 'Paused') return Pause;
+  if (category === 'Completed') return CheckCircle2;
+  if (category === 'Archived') return Archive;
+  if (category === 'Video') return Film;
+  if (category === 'Music') return Music;
+  if (category === 'Documents') return FileText;
+  if (category === 'Compressed') return Package;
+  if (category === 'Programs') return AppWindow;
+  return Inbox;
+}
 
 export default function DownloadList({
   downloads,
@@ -128,6 +157,8 @@ export default function DownloadList({
     virtualizer.scrollToIndex(next);
   };
 
+  const EmptyIcon = emptyIcon(category, Boolean(searchQuery));
+
   return (
     <div className="download-view">
       <div className="view-head">
@@ -190,27 +221,27 @@ export default function DownloadList({
         ) : filtered.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon" aria-hidden="true">
-              {searchQuery ? (
-                <SearchX strokeWidth={1.5} />
-              ) : category === 'Failed' ? (
-                <AlertTriangle strokeWidth={1.5} />
-              ) : (
-                <Inbox strokeWidth={1.5} />
-              )}
+              <EmptyIcon strokeWidth={1.5} />
             </div>
             <div className="empty-title">
               {searchQuery
                 ? t('downloadList.no_search_results')
                 : category === 'Failed'
                   ? t('downloadList.empty_failed')
-                  : t('downloadList.no_downloads')}
+                  : category === 'All Downloads'
+                    ? t('downloadList.no_downloads')
+                    : t('downloadList.empty_category', {
+                        name: titleMap[category] || category,
+                      })}
             </div>
             <div className="empty-desc">
               {searchQuery
                 ? t('downloadList.no_search_desc')
                 : category === 'Failed'
                   ? t('downloadList.empty_failed_desc')
-                  : t('downloadList.no_downloads_desc')}
+                  : category === 'All Downloads'
+                    ? t('downloadList.no_downloads_desc')
+                    : t('downloadList.empty_category_desc')}
             </div>
             {!searchQuery && category !== 'Failed' && onAddClick && (
               <button type="button" className="btn-primary empty-cta" onClick={onAddClick}>

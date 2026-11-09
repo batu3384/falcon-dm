@@ -77,11 +77,15 @@
   "kindAudio": { "message": "Ses" },
   "kindVideoAudio": { "message": "Video+Ses" },
   "kindVideoOnly": { "message": "Sadece video" },
+  "kindFile": { "message": "Dosya" },
   "popupDownloadPage": { "message": "Bu sayfanın medyasını indir" },
   "popupDownloadUrl": { "message": "URL indir" },
   "popupReconnect": { "message": "Yeniden bağlan" },
-  "popupPause": { "message": "Duraklat" },
-  "popupResume": { "message": "Devam et" },
+  "popupPause": { "message": "Yakalamayı duraklat" },
+  "popupResume": { "message": "Yakalamaya devam" },
+  "popupPauseHint": {
+    "message": "Yeni tarayıcı yakalamalarını durdurur. Falcon'daki indirmeler sürer."
+  },
   "popupStateConnected": { "message": "Bağlı" },
   "popupStateOffline": { "message": "Çevrimdışı" },
   "popupStatePending": { "message": "Onay bekleniyor" },
@@ -89,6 +93,7 @@
   "popupQueueEmpty": { "message": "Yakın zamanda indirme yok" },
   "popupTimeNow": { "message": "az önce" },
   "popupTimeMin": { "message": "{n} dk önce" },
+  "popupTimeHour": { "message": "{n} sa önce" },
   "popupSettings": { "message": "Ayarlar" },
   "popupFailClosed": { "message": "Çevrimdışıyken tarayıcıya düş" },
   "popupFailClosedHint": {

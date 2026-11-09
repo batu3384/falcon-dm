@@ -249,7 +249,7 @@ button.secondary:hover {
 
 button.sm {
   width: auto;
-  min-height: 32px;
+  min-height: 44px;
   padding: 6px 10px;
   font-size: 12px;
   flex-shrink: 0;
@@ -533,7 +533,7 @@ button.sm {
   font-weight: 600;
   color: var(--muted);
   user-select: none;
-  min-height: 32px;
+  min-height: 44px;
   display: flex;
   align-items: center;
 }
@@ -572,7 +572,7 @@ footer a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 32px;
+  min-height: 44px;
   padding: 0 14px;
   border-radius: 999px;
   color: var(--color-primary);

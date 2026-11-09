@@ -50,7 +50,11 @@ function applyStaticI18n() {
   );
   dlUrlBtn.textContent = t('popupDownloadUrl', 'Download URL');
   reconnectBtn.textContent = t('popupReconnect', 'Reconnect');
-  pauseBtn.textContent = t('popupPause', 'Pause');
+  pauseBtn.textContent = t('popupPause', 'Pause capture');
+  pauseBtn.title = t(
+    'popupPauseHint',
+    'Stops new browser captures. Downloads already in Falcon keep going.',
+  );
   $('tab-label').textContent = t('popupCurrentTab', 'Current tab');
   $('queue-label').textContent = t('popupQueueTitle', 'Recent downloads');
   $('queue-empty').textContent = t('popupQueueEmpty', 'No recent downloads');
@@ -130,10 +134,22 @@ function setState(state) {
   }
 }
 
+function setPauseButton(isPaused) {
+  pauseBtn.textContent = isPaused
+    ? t('popupResume', 'Resume capture')
+    : t('popupPause', 'Pause capture');
+  pauseBtn.title = t(
+    'popupPauseHint',
+    'Stops new browser captures. Downloads already in Falcon keep going.',
+  );
+}
+
 function timeAgo(ts) {
   const s = Math.max(1, Math.round((Date.now() - ts) / 1000));
   if (s < 60) return t('popupTimeNow', 'just now');
-  return t('popupTimeMin', '{n}m ago').replace('{n}', String(Math.floor(s / 60)));
+  const minutes = Math.floor(s / 60);
+  if (minutes < 60) return t('popupTimeMin', '{n}m ago').replace('{n}', String(minutes));
+  return t('popupTimeHour', '{n}h ago').replace('{n}', String(Math.floor(minutes / 60)));
 }
 
 function renderQueue(recent) {
@@ -160,7 +176,7 @@ function renderQueue(recent) {
     main.appendChild(meta);
     const kind = document.createElement('span');
     kind.className = 'qkind';
-    kind.textContent = it.kind === 'media' ? t('kindVideoAudio', 'Video+Audio') : 'FILE';
+    kind.textContent = it.kind === 'media' ? t('kindVideoAudio', 'Video+Audio') : t('kindFile', 'File');
     li.appendChild(main);
     li.appendChild(kind);
     queueEl.appendChild(li);
@@ -185,7 +201,7 @@ function applyStatus(resp) {
   setState(resp.state || 'offline');
   paused = !!resp.paused;
   failClosed = !!resp.failClosed;
-  pauseBtn.textContent = paused ? t('popupResume', 'Resume') : t('popupPause', 'Pause');
+  setPauseButton(paused);
   // Checked = allow Chrome fallback = NOT fail-closed.
   if (failClosedEl) failClosedEl.checked = !failClosed;
   if (clipboardMonitorEl) clipboardMonitorEl.checked = !!resp.clipboardMonitor;

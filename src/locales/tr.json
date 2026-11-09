@@ -38,6 +38,8 @@
     "no_search_desc": "Farklı bir dosya adı veya URL dene.",
     "empty_failed": "Başarısız indirme yok",
     "empty_failed_desc": "Hata alan transferler burada görünür.",
+    "empty_category": "{{name}} boş",
+    "empty_category_desc": "Bu görünümde henüz bir şey yok.",
     "add_cta": "İndirme Ekle",
     "loading": "İndirmeler yükleniyor…",
     "load_error": "İndirmeler kullanılamıyor",

@@ -81,7 +81,9 @@ function App() {
   // Local UI state (not shared enough to deserve a store).
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [clipboardMonitor, setClipboardMonitor] = useState(false);
+  const [clipboardMonitor, setClipboardMonitor] = useState(
+    () => localStorage.getItem('falcon_clipboard_monitor') === '1',
+  );
   const [prefilledUrl, setPrefilledUrl] = useState('');
   const [activeCategory, setActiveCategory] = useState('All Downloads');
   const [searchQuery, setSearchQuery] = useState('');
@@ -187,12 +189,16 @@ function App() {
     return () => window.clearTimeout(handle);
   }, [searchQuery, fetchDownloads]);
 
-  useClipboardMonitor(clipboardMonitor, (text) => {
-    if (isForegroundDialogOpen()) return false;
-    setPrefilledUrl(text);
-    setIsModalOpen(true);
-    showToast('info', t('app.clipboard_url'));
-  });
+  useClipboardMonitor(
+    clipboardMonitor,
+    (text) => {
+      if (isForegroundDialogOpen()) return false;
+      setPrefilledUrl(text);
+      setIsModalOpen(true);
+      showToast('info', t('app.clipboard_url'));
+    },
+    toastBackgroundError,
+  );
 
   const runBatchAction = useCallback(
     async (
@@ -478,7 +484,13 @@ function App() {
             canPauseAll={(libraryCounts.pausable ?? 0) > 0}
             canResumeAll={(libraryCounts.resumable ?? 0) > 0}
             clipboardMonitor={clipboardMonitor}
-            onToggleClipboard={() => setClipboardMonitor((v) => !v)}
+            onToggleClipboard={() =>
+              setClipboardMonitor((v) => {
+                const next = !v;
+                localStorage.setItem('falcon_clipboard_monitor', next ? '1' : '0');
+                return next;
+              })
+            }
             onOpenSettings={() => setSettingsOpen(true)}
             onOpenScheduler={() => setSchedulerOpen(true)}
             onOpenLogs={() => setLogsOpen(true)}

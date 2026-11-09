@@ -77,11 +77,15 @@
   "kindAudio": { "message": "Audio" },
   "kindVideoAudio": { "message": "Video+Audio" },
   "kindVideoOnly": { "message": "Video only" },
+  "kindFile": { "message": "File" },
   "popupDownloadPage": { "message": "Download this page's media" },
   "popupDownloadUrl": { "message": "Download URL" },
   "popupReconnect": { "message": "Reconnect" },
-  "popupPause": { "message": "Pause" },
-  "popupResume": { "message": "Resume" },
+  "popupPause": { "message": "Pause capture" },
+  "popupResume": { "message": "Resume capture" },
+  "popupPauseHint": {
+    "message": "Stops new browser captures. Downloads already in Falcon keep going."
+  },
   "popupStateConnected": { "message": "Connected" },
   "popupStateOffline": { "message": "Offline" },
   "popupStatePending": { "message": "Pending" },
@@ -89,6 +93,7 @@
   "popupQueueEmpty": { "message": "No recent downloads" },
   "popupTimeNow": { "message": "just now" },
   "popupTimeMin": { "message": "{n}m ago" },
+  "popupTimeHour": { "message": "{n}h ago" },
   "popupSettings": { "message": "Settings" },
   "popupFailClosed": { "message": "Allow browser fallback when offline" },
   "popupFailClosedHint": {

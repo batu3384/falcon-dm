@@ -658,6 +658,58 @@ pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
     })
 }
 
+/// WKWebView blocks `navigator.clipboard.readText` outside a user gesture.
+/// `pbpaste` reads the pasteboard the toolbar monitor already asked for.
+#[tauri::command]
+pub async fn read_clipboard() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(read_clipboard_blocking)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn normalize_pasteboard_text(raw: &str) -> String {
+    raw.trim().chars().take(2048).collect()
+}
+
+fn read_clipboard_blocking() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("pbpaste").output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err("clipboard read failed".into());
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(normalize_pasteboard_text(&text))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("clipboard read is only available on macOS".into())
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::{normalize_pasteboard_text, read_clipboard_blocking};
+
+    #[test]
+    fn normalize_pasteboard_text_trims_and_caps_length() {
+        assert_eq!(normalize_pasteboard_text("  hi  "), "hi");
+        assert_eq!(normalize_pasteboard_text(&"x".repeat(3000)).len(), 2048);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn read_clipboard_reads_pasteboard_via_pbpaste() {
+        let marker = format!("falcon-clipboard-{}", std::process::id());
+        let script = format!("printf %s {} | pbcopy", marker);
+        let status =
+            std::process::Command::new("bash").args(["-lc", &script]).status().expect("pbcopy");
+        assert!(status.success(), "pbcopy failed");
+        let got = read_clipboard_blocking().expect("pbpaste");
+        assert_eq!(got, marker);
+    }
+}
+
 #[cfg(test)]
 mod update_tests {
     use super::{github_release_page_url, version_newer};

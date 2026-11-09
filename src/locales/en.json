@@ -38,6 +38,8 @@
     "no_search_desc": "Try a different filename or URL.",
     "empty_failed": "No failed downloads",
     "empty_failed_desc": "Failed transfers will show up here.",
+    "empty_category": "{{name}} is empty",
+    "empty_category_desc": "Nothing in this view yet.",
     "add_cta": "Add Download",
     "loading": "Loading downloads…",
     "load_error": "Downloads unavailable",

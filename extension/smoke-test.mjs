@@ -266,6 +266,10 @@ assert(
   'grabber batch limit raised',
 );
 assert(popup.includes('refresh();'), 'pause refreshes connection state');
+assert(popup.includes("t('popupPause'"), 'popup pause uses capture wording');
+assert(popup.includes("t('kindFile'"), 'popup queue labels non-media as file');
+const enMessages = JSON.parse(readFileSync(path.join(__dirname, '_locales/en/messages.json'), 'utf8'));
+assert(enMessages.popupPause.message === 'Pause capture', 'en pause is capture not download');
 const popupHtml = readFileSync(path.join(__dirname, 'popup.html'), 'utf8');
 assert(popupHtml.includes('aria-live="polite"'), 'popup status live region');
 assert(popupHtml.includes('role="alert"'), 'popup error is announced');
@@ -283,6 +287,7 @@ assert(content.includes('videoOnlyHint'), 'video-only audio warning');
 assert(content.includes('grabberSelectAll'), 'grabber select-all');
 assert(content.includes('fm-warn'), 'overlay warning style');
 assert(content.includes('prefers-color-scheme: light'), 'overlay light theme');
+assert(content.includes('.fm-input { color: #111827; }'), 'light overlay filename stays readable');
 assert(
   content.includes("tag === 'button'") && content.includes("node.type = 'button'"),
   'content buttons default to type=button',
