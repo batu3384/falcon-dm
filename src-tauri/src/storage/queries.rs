@@ -6,6 +6,11 @@ use rusqlite::OptionalExtension;
 use rusqlite::{params, Row, TransactionBehavior};
 use std::collections::HashSet;
 
+/// Column order `row_to_download` expects.
+const DOWNLOAD_COLUMNS: &str = "id, url, filename, save_path, total_size, downloaded_size, \
+     status, category, speed, segments, priority, created_at, completed_at, error_message, \
+     referrer, user_agent, cookies, archived, attempts, retry_at";
+
 fn like_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
@@ -52,8 +57,8 @@ impl Database {
             "INSERT INTO downloads (
                 url, filename, save_path, total_size, downloaded_size, status, category,
                 speed, segments, priority, created_at, completed_at, error_message,
-                referrer, user_agent, cookies, aria2_gid, archived
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                referrer, user_agent, cookies, archived
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 download.url,
                 download.filename,
@@ -71,7 +76,6 @@ impl Database {
                 download.referrer,
                 download.user_agent,
                 seal_cookies(download.cookies.as_deref()),
-                download.aria2_gid,
                 download.archived as i64,
             ],
         )?;
@@ -134,8 +138,8 @@ impl Database {
             "INSERT INTO downloads (
                 url, filename, save_path, total_size, downloaded_size, status, category,
                 speed, segments, priority, created_at, completed_at, error_message,
-                referrer, user_agent, cookies, aria2_gid, archived
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                referrer, user_agent, cookies, archived
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 download.url,
                 download.filename,
@@ -153,7 +157,6 @@ impl Database {
                 download.referrer,
                 download.user_agent,
                 seal_cookies(download.cookies.as_deref()),
-                download.aria2_gid,
                 download.archived as i64,
             ],
         )?;
@@ -208,9 +211,8 @@ impl Database {
                 referrer = ?14,
                 user_agent = ?15,
                 cookies = ?16,
-                aria2_gid = ?17,
-                archived = ?18
-            WHERE id = ?19",
+                archived = ?17
+            WHERE id = ?18",
             params![
                 download.url,
                 download.filename,
@@ -228,7 +230,6 @@ impl Database {
                 download.referrer,
                 download.user_agent,
                 seal_cookies(download.cookies.as_deref()),
-                download.aria2_gid,
                 download.archived as i64,
                 id,
             ],
@@ -303,48 +304,6 @@ impl Database {
         Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
     }
 
-    pub fn update_progress_if_current(
-        &self,
-        id: i64,
-        expected: &[DownloadStatus],
-        downloaded_size: u64,
-        total_size: u64,
-        speed: f64,
-        status: &DownloadStatus,
-        completed_at: Option<&str>,
-        error_message: Option<&str>,
-    ) -> Result<bool> {
-        if expected.is_empty() {
-            return Ok(false);
-        }
-        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
-        let placeholders =
-            (0..expected.len()).map(|index| format!("?{}", index + 8)).collect::<Vec<_>>();
-        let sql = format!(
-            "UPDATE downloads SET downloaded_size = ?1, total_size = ?2, speed = ?3,
-             status = ?4, completed_at = ?5, error_message = ?6
-             WHERE id = ?7 AND status IN ({})",
-            placeholders.join(", ")
-        );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-            Box::new(downloaded_size as i64),
-            Box::new(total_size as i64),
-            Box::new(speed),
-            Box::new(status.as_str().to_string()),
-            Box::new(completed_at.map(str::to_string)),
-            Box::new(error_message.map(str::to_string)),
-            Box::new(id),
-        ];
-        params.extend(
-            expected
-                .iter()
-                .map(|value| Box::new(value.as_str().to_string()) as Box<dyn rusqlite::ToSql>),
-        );
-        let params_ref: Vec<&dyn rusqlite::ToSql> =
-            params.iter().map(|value| value.as_ref()).collect();
-        Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
-    }
-
     pub fn resume_if_current(&self, id: i64, expected: &[DownloadStatus]) -> Result<bool> {
         if expected.is_empty() {
             return Ok(false);
@@ -354,10 +313,8 @@ impl Database {
             (0..expected.len()).map(|index| format!("?{}", index + 2)).collect::<Vec<_>>();
         let sql = format!(
             "UPDATE downloads
-             SET status = 'Queued', priority = priority + 1, aria2_gid = NULL,
-                 completed_at = NULL, error_message = NULL, speed = 0.0,
-                 downloaded_size = CASE WHEN status = 'Failed' THEN 0 ELSE downloaded_size END,
-                 total_size = CASE WHEN status = 'Failed' THEN 0 ELSE total_size END
+             SET status = 'Queued', priority = priority + 1, attempts = 0, retry_at = NULL,
+                 completed_at = NULL, error_message = NULL, speed = 0.0
              WHERE id = ?1 AND status IN ({})",
             placeholders.join(", ")
         );
@@ -430,17 +387,6 @@ impl Database {
         Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
     }
 
-    pub fn claim_aria2_download(&self, id: i64, gid: &str) -> Result<bool> {
-        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
-        let rows = conn.execute(
-            "UPDATE downloads
-             SET aria2_gid = ?1, status = 'Downloading', error_message = NULL
-             WHERE id = ?2 AND status = 'Queued' AND aria2_gid IS NULL",
-            params![gid, id],
-        )?;
-        Ok(rows == 1)
-    }
-
     pub fn adjust_priority(&self, id: i64, increase: bool) -> Result<bool> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let rows = conn.execute(
@@ -455,19 +401,34 @@ impl Database {
         Ok(rows == 1)
     }
 
-    pub fn clear_aria2_gid_if_current(&self, id: i64, expected: &[DownloadStatus]) -> Result<bool> {
+    /// Park a failed attempt back in the queue. `retry_at` (unix ms) keeps
+    /// `take_queued` from restarting it before the backoff elapses.
+    pub fn schedule_retry(
+        &self,
+        id: i64,
+        expected: &[DownloadStatus],
+        attempts: u32,
+        retry_at_ms: i64,
+        error_message: &str,
+    ) -> Result<bool> {
         if expected.is_empty() {
             return Ok(false);
         }
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let placeholders =
-            (0..expected.len()).map(|index| format!("?{}", index + 2)).collect::<Vec<_>>();
+            (0..expected.len()).map(|index| format!("?{}", index + 5)).collect::<Vec<_>>();
         let sql = format!(
-            "UPDATE downloads SET aria2_gid = NULL
-             WHERE id = ?1 AND status IN ({})",
+            "UPDATE downloads
+             SET status = 'Queued', attempts = ?1, retry_at = ?2, error_message = ?3, speed = 0.0
+             WHERE id = ?4 AND status IN ({})",
             placeholders.join(", ")
         );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(id)];
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(i64::from(attempts)),
+            Box::new(retry_at_ms),
+            Box::new(error_message.to_string()),
+            Box::new(id),
+        ];
         params.extend(
             expected
                 .iter()
@@ -476,6 +437,46 @@ impl Database {
         let params_ref: Vec<&dyn rusqlite::ToSql> =
             params.iter().map(|value| value.as_ref()).collect();
         Ok(conn.execute(&sql, params_ref.as_slice())? == 1)
+    }
+
+    /// "Resume" on a row waiting out a retry backoff: start it on the next tick.
+    pub fn clear_retry_backoff(&self, id: i64) -> Result<bool> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let rows = conn.execute(
+            "UPDATE downloads SET retry_at = NULL, attempts = 0
+             WHERE id = ?1 AND status = 'Queued' AND retry_at IS NOT NULL",
+            params![id],
+        )?;
+        Ok(rows == 1)
+    }
+
+    /// A worker that received real bytes is healthy again: forget earlier failures.
+    pub fn clear_retry_state(&self, id: i64) -> Result<bool> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let rows = conn.execute(
+            "UPDATE downloads SET attempts = 0, retry_at = NULL, error_message = NULL
+             WHERE id = ?1 AND status IN ('Downloading', 'Merging')
+               AND (attempts != 0 OR retry_at IS NOT NULL OR error_message IS NOT NULL)",
+            params![id],
+        )?;
+        Ok(rows == 1)
+    }
+
+    /// The server (Content-Disposition) or the muxer may decide the real name
+    /// after the row exists. Category follows the new extension.
+    pub fn rename_active_download(
+        &self,
+        id: i64,
+        filename: &str,
+        category: &DownloadCategory,
+    ) -> Result<bool> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let rows = conn.execute(
+            "UPDATE downloads SET filename = ?1, category = ?2
+             WHERE id = ?3 AND status IN ('Queued', 'Downloading', 'Merging', 'Paused')",
+            params![filename, category.as_str(), id],
+        )?;
+        Ok(rows == 1)
     }
 
     /// Completes a worker that validated a full file. Includes Paused: user or
@@ -490,7 +491,9 @@ impl Database {
                  speed = 0.0,
                  status = 'Completed',
                  completed_at = ?2,
-                 error_message = NULL
+                 error_message = NULL,
+                 attempts = 0,
+                 retry_at = NULL
              WHERE id = ?3 AND status IN ('Downloading', 'Merging', 'Queued', 'Paused')",
             params![size as i64, Utc::now().to_rfc3339(), id],
         )?;
@@ -530,6 +533,8 @@ impl Database {
         Ok(())
     }
 
+    /// Written by the single progress reporter of a live download, which always
+    /// holds the true counts (they may shrink when a transfer restarts).
     pub fn update_download_progress(
         &self,
         id: i64,
@@ -539,37 +544,49 @@ impl Database {
         status: &DownloadStatus,
     ) -> Result<bool> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
-        let rows = if let Some(total) = total_size {
-            conn.execute(
-                "UPDATE downloads SET
-                 downloaded_size = CASE WHEN ?1 > downloaded_size THEN ?1 ELSE downloaded_size END,
-                 total_size = CASE WHEN ?2 > total_size THEN ?2 ELSE total_size END,
-                 speed = ?3, status = ?4
-                 WHERE id = ?5 AND status IN ('Downloading', 'Merging')",
-                params![downloaded_size as i64, total as i64, speed, status.as_str(), id],
-            )?
-        } else {
-            conn.execute(
-                "UPDATE downloads SET
-                 downloaded_size = CASE WHEN ?1 > downloaded_size THEN ?1 ELSE downloaded_size END,
-                 speed = ?2, status = ?3
-                 WHERE id = ?4 AND status IN ('Downloading', 'Merging')",
-                params![downloaded_size as i64, speed, status.as_str(), id],
-            )?
-        };
+        let rows = conn.execute(
+            "UPDATE downloads SET
+             downloaded_size = ?1, total_size = COALESCE(?2, total_size), speed = ?3, status = ?4
+             WHERE id = ?5 AND status IN ('Downloading', 'Merging')",
+            params![
+                downloaded_size as i64,
+                total_size.map(|total| total as i64),
+                speed,
+                status.as_str(),
+                id
+            ],
+        )?;
         Ok(rows == 1)
     }
 
-    pub fn take_queued(&self, limit: i64) -> Result<Vec<Download>> {
+    /// Next rows to start, skipping those still inside a retry backoff.
+    pub fn take_queued(&self, limit: i64, now_ms: i64) -> Result<Vec<Download>> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, url, filename, save_path, total_size, downloaded_size, status, \
-             category, speed, segments, priority, created_at, completed_at, error_message, \
-             referrer, user_agent, cookies, aria2_gid, archived FROM downloads \
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {DOWNLOAD_COLUMNS} FROM downloads \
              WHERE status = 'Queued' AND (archived = 0 OR archived IS NULL) \
-             ORDER BY priority DESC, id ASC LIMIT ?",
-        )?;
-        let rows = stmt.query_map(params![limit.max(0)], row_to_download)?;
+               AND (retry_at IS NULL OR retry_at <= ?1) \
+             ORDER BY priority DESC, id ASC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![now_ms, limit.max(0)], row_to_download)?;
+        let mut downloads = Vec::new();
+        for download in rows {
+            downloads.push(download?);
+        }
+        Ok(downloads)
+    }
+
+    /// Rows the extension popup shows: everything live, then the newest finished ones.
+    pub fn recent_activity(&self, limit: i64) -> Result<Vec<Download>> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {DOWNLOAD_COLUMNS} FROM downloads \
+             WHERE (archived = 0 OR archived IS NULL) \
+             ORDER BY CASE WHEN status IN ('Downloading', 'Merging') THEN 0 \
+                           WHEN status = 'Queued' THEN 1 \
+                           WHEN status = 'Paused' THEN 2 ELSE 3 END, id DESC LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![limit.clamp(1, 50)], row_to_download)?;
         let mut downloads = Vec::new();
         for download in rows {
             downloads.push(download?);
@@ -643,11 +660,7 @@ impl Database {
 
     pub fn get_downloads(&self, filter: &DownloadFilter) -> Result<Vec<Download>> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
-        let mut sql = String::from(
-            "SELECT id, url, filename, save_path, total_size, downloaded_size, status, \
-             category, speed, segments, priority, created_at, completed_at, error_message, \
-             referrer, user_agent, cookies, aria2_gid, archived FROM downloads WHERE 1=1",
-        );
+        let mut sql = format!("SELECT {DOWNLOAD_COLUMNS} FROM downloads WHERE 1=1");
 
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -739,11 +752,8 @@ impl Database {
 
     pub fn get_download(&self, id: i64) -> Result<Download> {
         let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, url, filename, save_path, total_size, downloaded_size, status, \
-             category, speed, segments, priority, created_at, completed_at, error_message, \
-             referrer, user_agent, cookies, aria2_gid, archived FROM downloads WHERE id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare(&format!("SELECT {DOWNLOAD_COLUMNS} FROM downloads WHERE id = ?1"))?;
 
         stmt.query_row(params![id], row_to_download).map_err(|err| match err {
             rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound(id),
@@ -786,8 +796,9 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
     let referrer: Option<String> = row.get(14)?;
     let user_agent: Option<String> = row.get(15)?;
     let cookies: Option<String> = row.get(16)?;
-    let aria2_gid: Option<String> = row.get(17)?;
-    let archived: bool = row.get::<_, i64>(18)? != 0;
+    let archived: bool = row.get::<_, i64>(17)? != 0;
+    let attempts: i64 = row.get(18)?;
+    let retry_at: Option<i64> = row.get(19)?;
 
     Ok(Download {
         id: Some(id),
@@ -813,7 +824,8 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
         referrer,
         user_agent,
         cookies: open_cookies(cookies.as_deref()),
-        aria2_gid,
         archived,
+        attempts: attempts.clamp(0, i64::from(u32::MAX)) as u32,
+        retry_at,
     })
 }

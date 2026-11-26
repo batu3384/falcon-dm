@@ -107,7 +107,7 @@ impl Default for Settings {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "~/Downloads".to_string()),
             max_concurrent_downloads: 3,
-            max_connections_per_server: 16,
+            max_connections_per_server: 8,
             proxy: None,
             api_token: Uuid::new_v4().to_string(),
             speed_limit_kbps: 0,

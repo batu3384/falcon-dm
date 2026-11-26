@@ -73,15 +73,20 @@ impl DownloadCategory {
         let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
 
         match ext.as_str() {
-            "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" => {
-                DownloadCategory::Video
+            "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "ts" | "mpg"
+            | "mpeg" | "3gp" => DownloadCategory::Video,
+            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" | "opus" => {
+                DownloadCategory::Music
             }
-            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" => DownloadCategory::Music,
             "pdf" | "doc" | "docx" | "txt" | "epub" | "xls" | "xlsx" | "ppt" | "pptx" => {
                 DownloadCategory::Document
             }
-            "zip" | "tar" | "gz" | "7z" | "rar" | "bz2" | "xz" | "tgz" => DownloadCategory::Archive,
-            "dmg" | "pkg" | "exe" | "msi" | "app" | "deb" | "rpm" => DownloadCategory::Program,
+            "zip" | "tar" | "gz" | "7z" | "rar" | "bz2" | "xz" | "tgz" | "zst" => {
+                DownloadCategory::Archive
+            }
+            "dmg" | "pkg" | "exe" | "msi" | "app" | "deb" | "rpm" | "iso" => {
+                DownloadCategory::Program
+            }
             _ => DownloadCategory::Other,
         }
     }
@@ -129,11 +134,16 @@ pub struct Download {
     pub user_agent: Option<String>,
     #[serde(skip_serializing)]
     pub cookies: Option<String>,
-    pub aria2_gid: Option<String>,
     /// ponytail: archived flag — completed downloads can be hidden from the
     /// active list without deletion. Defaults to false (visible).
     #[serde(default)]
     pub archived: bool,
+    /// Consecutive automatic retries since the last user start or resume.
+    #[serde(default)]
+    pub attempts: u32,
+    /// Unix ms before which the queue must not restart this row (retry backoff).
+    #[serde(default)]
+    pub retry_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

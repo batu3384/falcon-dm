@@ -1,6 +1,6 @@
-# ponytail: release pipeline — triggered by a `v*` tag. Provisions both macOS
-# architectures' sidecar binaries, builds a signed + notarized .dmg, and uploads
-# it to the GitHub Release. Falls back to an unsigned build if Apple signing
+# ponytail: release pipeline — triggered by a `v*` tag. Provisions the ffmpeg
+# sidecar for both macOS architectures, builds a signed + notarized .dmg, and
+# uploads it to the GitHub Release. Falls back to an unsigned build if Apple signing
 # secrets are absent (so forks/dev can still cut builds).
 name: Release
 
@@ -39,47 +39,17 @@ jobs:
         with:
           workspaces: "src-tauri -> target"
 
-      # ponytail: provision aria2c + ffmpeg sidecars for THIS architecture. aria2
-      # has no official macOS binary, so we install it via Homebrew (available on
-      # GitHub macOS runners) and copy it in. ffmpeg x86_64 comes from evermeet.
+      # ponytail: provision the ffmpeg sidecar for THIS architecture (arm64 from
+      # Homebrew on the runner, x86_64 from a pinned static build).
       - name: Provision sidecars (${{ matrix.arch }})
         run: ./scripts/provision-sidecars.sh
         env:
           ARCH: ${{ matrix.arch }}
           RELEASE_MODE: "1"
-          ARIA2_SHA256: ${{ vars.ARIA2_SHA256 }}
           FFMPEG_URL: ${{ vars.FFMPEG_URL }}
           FFMPEG_SHA256: ${{ vars.FFMPEG_SHA256 }}
 
       - run: npm ci
-
-      - name: Build native messaging host
-        working-directory: src-tauri
-        run: cargo build -p falcon-dm-native-host --target ${{ matrix.target }} --release
-
-      - name: Bundle native messaging host
-        run: |
-          cp "src-tauri/target/${{ matrix.target }}/release/falcon-dm-native-host" \
-            "src-tauri/binaries/falcon-dm-native-host-${{ matrix.target }}"
-          chmod +x "src-tauri/binaries/falcon-dm-native-host-${{ matrix.target }}"
-          host_info="$(file "src-tauri/binaries/falcon-dm-native-host-${{ matrix.target }}")"
-          [[ "$host_info" == *"Mach-O"* ]]
-          if [[ "${{ matrix.arch }}" == "aarch64" ]]; then
-            [[ "$host_info" == *"arm64"* ]]
-          else
-            [[ "$host_info" == *"x86_64"* ]]
-          fi
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path("src-tauri/tauri.conf.json")
-          config = json.loads(path.read_text())
-          bins = config["bundle"]["externalBin"]
-          if "binaries/falcon-dm-native-host" not in bins:
-              bins.append("binaries/falcon-dm-native-host")
-          path.write_text(json.dumps(config, indent=2) + "\n")
-          PY
 
       - name: Validate Apple signing configuration
         env:
@@ -153,10 +123,7 @@ jobs:
       - name: Compute checksum
         run: |
           set -euo pipefail
-          test -x "src-tauri/binaries/aria2c-${{ matrix.target }}"
           test -x "src-tauri/binaries/ffmpeg-${{ matrix.target }}"
-          test -x "src-tauri/binaries/falcon-dm-native-host-${{ matrix.target }}"
-          test -x "src-tauri/target/${{ matrix.target }}/release/falcon-dm-native-host"
           : > "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
           bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
           dmg_count="$(find "$bundle" -type f -name "*.dmg" | wc -l | tr -d ' ')"
@@ -169,9 +136,6 @@ jobs:
           done < <(find "$bundle" -type d -name "*.app" -print)
           find src-tauri/binaries -type f -name "*-${{ matrix.target }}" \
             -exec shasum -a 256 {} \; \
-            >> "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
-          shasum -a 256 \
-            "src-tauri/target/${{ matrix.target }}/release/falcon-dm-native-host" \
             >> "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
 
       - name: Upload checksum artifact

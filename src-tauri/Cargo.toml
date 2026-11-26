@@ -1,18 +1,11 @@
 [package]
 name = "falcon-dm"
 version = "0.1.0"
-description = "A Tauri App"
+description = "Falcon DM — download manager for macOS"
 authors = ["Falcon DM contributors"]
 edition = "2021"
 license = "MIT"
 default-run = "falcon-dm"
-
-# Slim native-host crate must stay a workspace member so it does not link
-# Tauri/AppKit. Chrome-spawned AppKit hosts hang on sendNativeMessage.
-[workspace]
-resolver = "2"
-members = ["crates/falcon-native-host"]
-default-members = [".", "crates/falcon-native-host"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -34,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # ponytail: trim tokio feature set — "full" bloats binary/build time. We need
 # rt-multi-thread+macros (runtime), time (intervals), sync (watch/mutex helpers),
-# net (tcp listener), fs (hls writes), process (ytdlp/aria reclaim), io-util.
+# net (tcp listener), fs (hls writes), process (yt-dlp, ffmpeg), io-util.
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
@@ -68,13 +61,17 @@ url = "2.5.8"
 futures = "0.3.33"
 tauri-plugin-notification = "2.3.3"
 tower-http = { version = "0.7.0", features = ["cors"] }
-tauri-plugin-shell = "2.3.5"
 tauri-plugin-deep-link = "2"
 window-vibrancy = "0.8.0"
 base64 = "0.22"
 chacha20poly1305 = "0.11.0"
 getrandom = "0.3"
 tauri-plugin-single-instance = "2.5.5"
+libc = "0.2"
+percent-encoding = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 # ponytail: shrink release binary — LTO across crates, single codegen unit, strip debug symbols.

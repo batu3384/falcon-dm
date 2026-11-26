@@ -2,51 +2,15 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
     "opener:default",
     "notification:default",
     "dialog:default",
-    "deep-link:default",
-    "shell:allow-kill",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        {
-          "name": "binaries/aria2c",
-          "sidecar": true,
-          "args": [
-            { "validator": "^--conf-path=" },
-            { "validator": "^--max-concurrent-downloads=" },
-            { "validator": "^--max-connection-per-server=" },
-            { "validator": "^--split=" },
-            { "validator": "^--min-split-size=" },
-            { "validator": "^--continue=" },
-            { "validator": "^--auto-file-renaming=" },
-            { "validator": "^--allow-overwrite=" },
-            { "validator": "^--quiet=" },
-            { "validator": "^--daemon=" },
-            { "validator": "^--max-overall-download-limit=" }
-          ]
-        },
-        {
-          "name": "binaries/ffmpeg",
-          "sidecar": true,
-          "args": [
-            { "validator": "^-f$" },
-            { "validator": "^-safe$" },
-            { "validator": "^-i$" },
-            { "validator": "^-c$" },
-            { "validator": "^-bsf:a$" },
-            { "validator": "^-y$" },
-            { "validator": "^(concat|0|copy|aac_adtstoasc)$" },
-            { "validator": "^/.*\\.falcondm-temp/list\\.txt$" },
-            { "validator": "^/.*\\.falcondm-temp/.*\\.(mp4|mkv|m4a|ts|webm|txt)$" }
-          ]
-        }
-      ]
-    }
+    "deep-link:default"
   ]
 }

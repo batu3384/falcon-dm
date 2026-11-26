@@ -1,15 +1,11 @@
-use crate::download::engine::Aria2Engine;
-use crate::download::queue::{validate_schedule, QueueManager, ScheduleOptions};
+use crate::download::queue::{validate_schedule, QueueManager, ScheduleOptions, StopReason};
 use crate::log_buffer;
-use crate::native_messaging::{self, PairProofStore};
+use crate::pairing::PairingState;
 use crate::settings::Settings;
 use crate::storage::models::{DownloadFilter, DownloadStatus};
 use crate::storage::Database;
-use crate::util::{self, app_data_dir, is_hls_url};
-use crate::{
-    clear_failed_retry_artifacts, emit_download_status, fail_invalid_download,
-    finalize_completed_download, handle_deep_link_url, AppState,
-};
+use crate::util::{self, app_data_dir};
+use crate::{handle_deep_link_url, AppState};
 use axum::{
     http::{header, HeaderName, Method},
     middleware::from_fn_with_state,
@@ -17,166 +13,166 @@ use axum::{
     Router,
 };
 use futures::FutureExt;
-use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager,
+    AppHandle, Manager,
 };
-use tauri_plugin_notification::NotificationExt;
 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
-#[derive(Clone, Serialize)]
-struct ProgressPayload {
-    id: i64,
-    downloaded_size: u64,
-    total_size: u64,
-    speed: f64,
-    status: String,
-    connections: u32,
-    error_message: Option<String>,
-}
-
+/// Rows that were live when the app last exited go back to the queue.
 fn restore_orphan_downloads(db: &Database) {
-    for status in [DownloadStatus::Downloading, DownloadStatus::Merging] {
-        let Ok(active) = db
-            .get_downloads(&DownloadFilter { status: Some(status.clone()), ..Default::default() })
-        else {
-            continue;
-        };
-        for dl in active {
-            let Some(id) = dl.id else {
-                continue;
-            };
-            if let Err(e) = db.clear_aria2_gid_if_current(id, std::slice::from_ref(&status)) {
-                log::warn!("restore: orphan {id} gid clear failed: {e}");
-            }
-            if let Err(e) = db.set_status_error_if_current(
-                id,
-                std::slice::from_ref(&status),
-                &DownloadStatus::Queued,
-                None,
-                Some(0.0),
-            ) {
-                log::warn!("restore: orphan {id} status update failed: {e}");
+    let live = [DownloadStatus::Downloading, DownloadStatus::Merging];
+    if let Ok(rows) =
+        db.get_downloads(&DownloadFilter { statuses: Some(live.to_vec()), ..Default::default() })
+    {
+        for id in rows.into_iter().filter_map(|row| row.id) {
+            if let Err(e) =
+                db.set_status_error_if_current(id, &live, &DownloadStatus::Queued, None, Some(0.0))
+            {
+                log::warn!("restore: download {id} could not be requeued: {e}");
             }
         }
     }
-    for status in [DownloadStatus::Completed, DownloadStatus::Failed] {
-        if let Ok(done) =
-            db.get_downloads(&DownloadFilter { status: Some(status), ..Default::default() })
-        {
-            for dl in done {
-                if let Some(id) = dl.id {
-                    if let Err(e) = db.clear_session_cookies(id) {
-                        log::warn!("restore: cookie wipe {id} DB update failed: {e}");
-                    }
-                }
-            }
+    let done = [DownloadStatus::Completed, DownloadStatus::Failed];
+    if let Ok(rows) =
+        db.get_downloads(&DownloadFilter { statuses: Some(done.to_vec()), ..Default::default() })
+    {
+        for id in rows.into_iter().filter_map(|row| row.id) {
+            let _ = db.clear_session_cookies(id);
         }
     }
 }
 
-fn cleanup_stale_http_parts(db: &Database) {
-    let Ok(completed) = db.get_downloads(&DownloadFilter {
-        status: Some(DownloadStatus::Completed),
-        archived: None,
-        ..Default::default()
-    }) else {
-        return;
-    };
-    let Ok(archived) = db.get_downloads(&DownloadFilter {
-        status: Some(DownloadStatus::Completed),
-        archived: Some(true),
-        ..Default::default()
-    }) else {
-        return;
-    };
-    for download in completed.into_iter().chain(archived) {
-        let Some(id) = download.id else {
-            continue;
-        };
-        if let Some(temp) =
-            crate::download::http::part_path_for(&download.save_path, &download.filename, id)
-        {
-            let _ = std::fs::remove_file(temp);
+/// Ids whose partial data must survive a restart (anything not finished).
+fn resumable_ids(db: &Database) -> HashSet<i64> {
+    let statuses = vec![
+        DownloadStatus::Queued,
+        DownloadStatus::Downloading,
+        DownloadStatus::Merging,
+        DownloadStatus::Paused,
+        DownloadStatus::Failed,
+    ];
+    let mut ids = HashSet::new();
+    for archived in [None, Some(true)] {
+        if let Ok(rows) = db.get_downloads(&DownloadFilter {
+            statuses: Some(statuses.clone()),
+            archived,
+            ..Default::default()
+        }) {
+            ids.extend(rows.into_iter().filter_map(|row| row.id));
         }
     }
+    ids
 }
 
-/// Remove leftover `*.falcondm-temp` dirs (crash recovery) under `root`.
-/// ponytail: HLS temp dirs now live under `<data_dir>/downloads_temp/`, so this
-/// sweep actually finds crash leftovers (previously it scanned the data_dir root
-/// while HLS wrote temp dirs under the Downloads folder → never matched).
-fn cleanup_stale_temp_dirs(root: &std::path::Path) {
-    let temp_root = root.join("downloads_temp");
-    let Ok(entries) = std::fs::read_dir(&temp_root) else {
+/// `hls-<id>.falcondm-temp` → id.
+fn hls_dir_id(name: &str) -> Option<i64> {
+    name.strip_prefix("hls-")?.strip_suffix(".falcondm-temp")?.parse().ok()
+}
+
+/// `.<name>.<id>.falcon.part|state` → id.
+fn http_temp_id(name: &str) -> Option<i64> {
+    let stem = name
+        .strip_suffix(".falcon.part")
+        .or_else(|| name.strip_suffix(".falcon.state"))
+        .or_else(|| name.strip_suffix(".falcon.segments"))?;
+    if !name.starts_with('.') {
+        return None;
+    }
+    stem.rsplit('.').next()?.parse().ok()
+}
+
+/// Delete HLS segment caches that no unfinished download owns.
+fn cleanup_stale_hls_dirs(root: &std::path::Path, keep: &HashSet<i64>) {
+    let Ok(entries) = std::fs::read_dir(root.join("downloads_temp")) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.ends_with(".falcondm-temp")
-                    || name.strip_prefix("hls-").is_some_and(|rest| {
-                        !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
-                    })
-                {
-                    let _ = std::fs::remove_dir_all(&path);
-                }
-            }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let stale = match hls_dir_id(&name) {
+            Some(id) => !keep.contains(&id),
+            // Legacy layouts: `hls-<id>` and `<anything>.falcondm-temp`.
+            None => name.ends_with(".falcondm-temp") || name.starts_with("hls-"),
+        };
+        if stale && path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
         }
     }
 }
 
-fn cleanup_stale_ytdlp_dirs(root: &std::path::Path) {
-    let mut candidates = vec![(root.to_path_buf(), 0usize)];
-    while let Some((parent, depth)) = candidates.pop() {
-        let Ok(entries) = std::fs::read_dir(parent) else {
+/// Delete orphaned partial files and yt-dlp work dirs under the download
+/// folders. Only names this app generates are touched.
+fn cleanup_stale_download_temps(roots: &[std::path::PathBuf], keep: &HashSet<i64>) {
+    let mut pending: Vec<(std::path::PathBuf, usize)> =
+        roots.iter().map(|root| (root.clone(), 0)).collect();
+    let mut seen = HashSet::new();
+    while let Some((dir, depth)) = pending.pop() {
+        if !seen.insert(dir.clone()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let is_stale = path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-                name.strip_prefix(".falcon-dm-ytdlp-")
-                    .and_then(|suffix| suffix.split_once('-'))
-                    .and_then(|(id, run)| {
-                        id.parse::<i64>().ok().and_then(|_| uuid::Uuid::parse_str(run).ok())
-                    })
-                    .is_some()
-            });
-            if is_stale {
-                let _ = std::fs::remove_dir_all(path);
-            } else if depth < 8 {
-                // ponytail: bound startup filesystem work; deeper custom roots
-                // need explicit cleanup rather than an unbounded recursive walk.
-                candidates.push((path, depth + 1));
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            if let Some(id) = crate::download::ytdlp::parse_run_dir_name(&name) {
+                // Old builds used `-<uuid>` suffixed dirs that nothing can resume.
+                let current = name == format!(".falcon-dm-ytdlp-{id}");
+                if is_dir && (!current || !keep.contains(&id)) {
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+            } else if let Some(id) = http_temp_id(&name) {
+                if !keep.contains(&id) || name.ends_with(".falcon.segments") {
+                    if is_dir {
+                        let _ = std::fs::remove_dir_all(&path);
+                    } else {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            } else if is_dir && depth < 2 && !name.starts_with('.') {
+                // Bounded walk: category and profile subfolders, not the whole tree.
+                pending.push((path, depth + 1));
             }
         }
     }
 }
 
+fn download_roots(settings: &Settings) -> Vec<std::path::PathBuf> {
+    let mut roots = vec![util::default_download_dir()];
+    let custom = settings.default_download_path.trim();
+    if !custom.is_empty() {
+        roots.push(util::expand_tilde(custom));
+    }
+    roots.extend(
+        settings
+            .category_paths
+            .values()
+            .filter(|p| !p.trim().is_empty())
+            .map(|p| util::expand_tilde(p)),
+    );
+    roots.retain(|root| !util::is_unsafe_download_root(root));
+    roots
+}
+
 fn spawn_local_api(app_handle: tauri::AppHandle) {
-    let axum_app_handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         use tauri::http::HeaderValue;
         use tower_http::cors::{AllowOrigin, CorsLayer};
 
         let cors = CorsLayer::new()
             .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
-                if let Ok(origin_str) = origin.to_str() {
-                    origin_str.starts_with("chrome-extension://")
-                        || origin_str.starts_with("edge-extension://")
-                } else {
-                    false
-                }
+                origin.to_str().is_ok_and(|origin| {
+                    origin.starts_with("chrome-extension://")
+                        || origin.starts_with("edge-extension://")
+                })
             }))
             // Health is GET; browsers may OPTIONS-preflight localhost (private network).
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
@@ -187,241 +183,49 @@ fn spawn_local_api(app_handle: tauri::AppHandle) {
             .route("/api/health", get(crate::local_api::handle_health))
             .route("/api/pair", post(crate::local_api::handle_pair))
             .route("/api/ping", post(crate::local_api::handle_ping))
+            .route("/api/downloads", get(crate::local_api::handle_downloads))
             .route("/api/add", post(crate::local_api::handle_api_add))
             .route("/api/intercept", post(crate::local_api::handle_intercept))
             .route("/api/upload", post(crate::local_api::handle_api_upload))
-            .layer(from_fn_with_state(
-                axum_app_handle.clone(),
-                crate::local_api::rate_limit_middleware,
-            ))
+            // Blob uploads are capped at 32 MB (≈43 MB as base64 JSON).
+            .layer(axum::extract::DefaultBodyLimit::max(48 * 1024 * 1024))
+            .layer(from_fn_with_state(app_handle.clone(), crate::local_api::rate_limit_middleware))
             .layer(cors)
-            .with_state(axum_app_handle);
+            .with_state(app_handle);
 
         match tokio::net::TcpListener::bind("127.0.0.1:14201").await {
             Ok(listener) => {
-                log::info!("Axum HTTP server listening on {}", listener.local_addr().unwrap());
+                log::info!("Local API listening on 127.0.0.1:14201");
                 if let Err(e) = axum::serve(listener, app).await {
-                    log::error!("Axum server error: {}", e);
+                    log::error!("Local API server error: {e}");
                 }
             }
             Err(e) => {
                 log::error!(
-                    "Failed to bind Axum server on port 14201: {}. Is another instance running?",
-                    e
+                    "Could not bind 127.0.0.1:14201 ({e}); the browser extension cannot connect"
                 );
             }
         }
     });
 }
 
-fn spawn_progress_poll(app_handle: tauri::AppHandle) {
+fn spawn_queue_loop(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            // ponytail: panic-guard each loop body — one panic must not freeze download management.
-            if let Err(p) = AssertUnwindSafe(async {
-                let st = app_handle.state::<AppState>();
-                st.queue.tick(&st.db, &st.engine, app_handle.clone()).await
-            })
-            .catch_unwind()
-            .await
-            {
-                log::error!("queue tick panicked, continuing: {:?}", p);
-            }
-
-            if let Err(p) = AssertUnwindSafe(async {
+            // One panic must not freeze download management.
+            let tick = AssertUnwindSafe(async {
                 let state = app_handle.state::<AppState>();
-                if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
-                    status: Some(DownloadStatus::Downloading),
-                    ..Default::default()
-                }) {
-                    // Batch all active aria2 statuses in one RPC; fall back to per-gid tellStatus
-                    // only for gids not present (complete/error/paused don't appear in tellActive).
-                    let active_map: HashMap<String, serde_json::Value> =
-                        if state.engine.is_running() {
-                            match state.engine.get_active_statuses().await {
-                                Ok(arr) => arr
-                                    .into_iter()
-                                    .filter_map(|s| {
-                                        // extract gid as owned String first so we can move `s` next
-                                        let gid = s
-                                            .get("gid")
-                                            .and_then(|g| g.as_str())
-                                            .map(ToString::to_string)?;
-                                        Some((gid, s))
-                                    })
-                                    .collect(),
-                                Err(e) => {
-                                    let msg = e.to_string().to_lowercase();
-                                    if !(msg.contains("not running")
-                                        || msg.contains("network")
-                                        || msg.contains("timed out")
-                                        || msg.contains("connection"))
-                                    {
-                                        log::warn!("tellActive failed: {}", e);
-                                    }
-                                    HashMap::new()
-                                }
-                            }
-                        } else {
-                            HashMap::new()
-                        };
-                    for mut dl in downloads {
-                        let mut speed = 0.0;
-                        let mut status_str = "Downloading".to_string();
-                        let mut connections = 8u32;
-
-                        if let Some(gid) = &dl.aria2_gid {
-                            let status_result = if let Some(s) = active_map.get(gid) {
-                                Ok(s.clone())
-                            } else {
-                                state.engine.get_status(gid).await
-                            };
-                            match status_result {
-                                Ok(status) => {
-                                    if let Some(v) =
-                                        status.get("completedLength").and_then(|v| v.as_str())
-                                    {
-                                        dl.downloaded_size =
-                                            v.parse().unwrap_or(dl.downloaded_size);
-                                    }
-                                    if let Some(v) =
-                                        status.get("totalLength").and_then(|v| v.as_str())
-                                    {
-                                        dl.total_size = v.parse().unwrap_or(dl.total_size);
-                                    }
-                                    if let Some(v) =
-                                        status.get("downloadSpeed").and_then(|v| v.as_str())
-                                    {
-                                        speed = v.parse().unwrap_or(0.0);
-                                    }
-                                    if let Some(v) =
-                                        status.get("connections").and_then(|v| v.as_str())
-                                    {
-                                        connections = v.parse().unwrap_or(8);
-                                    }
-                                    if let Some(s) = status.get("status").and_then(|v| v.as_str()) {
-                                        match s {
-                                            "complete" => {
-                                                if let Err(e) = finalize_completed_download(&mut dl)
-                                                {
-                                                    fail_invalid_download(&mut dl, e);
-                                                    status_str = "Failed".into();
-                                                } else {
-                                                    status_str = "Completed".into();
-                                                }
-                                            }
-                                            "paused" => {
-                                                dl.status = DownloadStatus::Paused;
-                                                status_str = "Paused".into();
-                                            }
-                                            "error" => {
-                                                dl.status = DownloadStatus::Failed;
-                                                dl.error_message = status
-                                                    .get("errorMessage")
-                                                    .and_then(|v| v.as_str())
-                                                    .map(|s| s.to_string());
-                                                status_str = "Failed".into();
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    let msg = e.to_string().to_lowercase();
-                                    // Transient: aria2 restarting / RPC blip — skip this tick
-                                    if msg.contains("not running")
-                                        || msg.contains("network")
-                                        || msg.contains("timed out")
-                                        || msg.contains("connection")
-                                    {
-                                        continue;
-                                    }
-                                    dl.status = DownloadStatus::Failed;
-                                    dl.error_message = Some(e.to_string());
-                                    status_str = "Failed".into();
-                                    speed = 0.0;
-                                }
-                            }
-                        } else if is_hls_url(&dl.url) {
-                            // HLS progress is emitted by the HLS task itself
-                            continue;
-                        } else {
-                            // Non-HLS downloading without GID: wait a tick for queue to assign
-                            continue;
-                        }
-
-                        if dl.downloaded_size >= dl.total_size
-                            && dl.total_size > 0
-                            && status_str == "Downloading"
-                        {
-                            if let Err(e) = finalize_completed_download(&mut dl) {
-                                fail_invalid_download(&mut dl, e);
-                                status_str = "Failed".into();
-                            } else {
-                                status_str = "Completed".into();
-                            }
-                            speed = 0.0;
-                        }
-
-                        let Some(poll_id) = dl.id else { continue };
-                        let committed = match state.db.update_progress_if_current(
-                            poll_id,
-                            &[DownloadStatus::Downloading],
-                            dl.downloaded_size,
-                            dl.total_size.max(dl.downloaded_size),
-                            speed,
-                            &dl.status,
-                            dl.completed_at.as_deref(),
-                            dl.error_message.as_deref(),
-                        ) {
-                            Ok(value) => value,
-                            Err(e) => {
-                                log::warn!("progress poll: {poll_id} DB update failed: {e}");
-                                false
-                            }
-                        };
-                        if !committed {
-                            continue;
-                        }
-
-                        if matches!(status_str.as_str(), "Completed" | "Failed") {
-                            let _ = state.db.clear_session_cookies(poll_id);
-                        }
-
-                        if status_str == "Completed" {
-                            let _ = app_handle
-                                .notification()
-                                .builder()
-                                .title("Download Complete")
-                                .body(&dl.filename)
-                                .show();
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                let _ = window.request_user_attention(Some(
-                                    tauri::UserAttentionType::Informational,
-                                ));
-                            }
-                        }
-
-                        let payload = ProgressPayload {
-                            id: poll_id,
-                            downloaded_size: dl.downloaded_size,
-                            // ponytail: guard stale/underreported total so the UI never shows >100%.
-                            total_size: dl.total_size.max(dl.downloaded_size),
-                            speed,
-                            status: status_str,
-                            connections,
-                            error_message: dl.error_message.clone(),
-                        };
-                        let _ = app_handle.emit("download-progress", payload);
-                    }
-                }
+                state.queue.tick(&state.db, &app_handle)
             })
             .catch_unwind()
-            .await
-            {
-                log::error!("progress poll panicked, continuing: {:?}", p);
+            .await;
+            match tick {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => log::warn!("queue tick failed: {e}"),
+                Err(panic) => log::error!("queue tick panicked, continuing: {panic:?}"),
             }
         }
     });
@@ -435,123 +239,33 @@ fn locale_is_turkish(lang: &str) -> bool {
 
 fn tray_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
     let tr = locale_is_turkish(lang);
-    let quit_i =
-        MenuItem::with_id(app, "quit", if tr { "Çıkış" } else { "Quit" }, true, None::<&str>)?;
-    let show_i = MenuItem::with_id(
-        app,
-        "show",
-        if tr { "Falcon DM'i Göster" } else { "Show Falcon DM" },
-        true,
-        None::<&str>,
-    )?;
-    let pause_i = MenuItem::with_id(
-        app,
-        "pause",
-        if tr { "Tümünü Duraklat" } else { "Pause All" },
-        true,
-        None::<&str>,
-    )?;
-    let resume_i = MenuItem::with_id(
-        app,
-        "resume",
-        if tr { "Tümünü Sürdür" } else { "Resume All" },
-        true,
-        None::<&str>,
-    )?;
+    let item = |id: &str, en: &str, turkish: &str| {
+        MenuItem::with_id(app, id, if tr { turkish } else { en }, true, None::<&str>)
+    };
+    let show_i = item("show", "Show Falcon DM", "Falcon DM'i Göster")?;
+    let pause_i = item("pause", "Pause All", "Tümünü Duraklat")?;
+    let resume_i = item("resume", "Resume All", "Tümünü Sürdür")?;
+    let quit_i = item("quit", "Quit", "Çıkış")?;
     Menu::with_items(app, &[&show_i, &pause_i, &resume_i, &quit_i])
 }
 
-fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+fn setup_tray(app: &tauri::App, lang: &str) -> tauri::Result<()> {
     let handle = app.handle().clone();
-    let menu = tray_menu(&handle, &std::env::var("LANG").unwrap_or_default())?;
-
-    let _tray = TrayIconBuilder::with_id(TRAY_ID)
-        .icon(app.default_window_icon().unwrap().clone())
+    let menu = tray_menu(&handle, lang)?;
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "quit" => app.exit(0),
-            "show" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
+            "show" => crate::show_main_window(app),
             "pause" => {
-                let app_h = app.clone();
+                let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let state = app_h.state::<AppState>();
-                    let downloads = state.db.get_downloads(&DownloadFilter {
-                        statuses: Some(vec![
-                            DownloadStatus::Queued,
-                            DownloadStatus::Downloading,
-                            DownloadStatus::Merging,
-                        ]),
-                        ..Default::default()
-                    });
-                    if let Ok(downloads) = downloads {
-                        for dl in downloads {
-                            if let Some(gid) = &dl.aria2_gid {
-                                let _ = state.engine.pause(gid).await;
-                            }
-                            let Some(id) = dl.id else { continue };
-                            if !state.queue.cancel_and_wait_stream(id).await {
-                                log::warn!("tray pause timed out for download {id}");
-                            }
-                            match state.db.set_status_error_if_current(
-                                id,
-                                &[
-                                    DownloadStatus::Queued,
-                                    DownloadStatus::Downloading,
-                                    DownloadStatus::Merging,
-                                ],
-                                &DownloadStatus::Paused,
-                                None,
-                                Some(0.0),
-                            ) {
-                                Ok(true) => emit_download_status(&app_h, &state.db, id, "Paused"),
-                                Ok(false) => {}
-                                Err(e) => {
-                                    log::warn!("tray pause-all: {id} DB update failed: {e}");
-                                }
-                            }
-                        }
-                    }
+                    crate::pause_all(&app).await;
                 });
             }
             "resume" => {
-                let app_h = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let state = app_h.state::<AppState>();
-                    if let Ok(downloads) = state.db.get_downloads(&DownloadFilter {
-                        statuses: Some(vec![DownloadStatus::Paused, DownloadStatus::Failed]),
-                        ..Default::default()
-                    }) {
-                        for dl in downloads {
-                            let Some(id) = dl.id else { continue };
-                            let was_failed = dl.status == DownloadStatus::Failed;
-                            match state.db.resume_if_current(
-                                id,
-                                &[DownloadStatus::Paused, DownloadStatus::Failed],
-                            ) {
-                                Ok(true) => {
-                                    if was_failed {
-                                        clear_failed_retry_artifacts(
-                                            &dl.save_path,
-                                            &dl.filename,
-                                            id,
-                                        );
-                                    }
-                                    emit_download_status(&app_h, &state.db, id, "Queued");
-                                }
-                                Ok(false) => {}
-                                Err(e) => {
-                                    log::warn!("tray resume-all: {id} DB update failed: {e}");
-                                }
-                            }
-                        }
-                    }
-                });
+                crate::resume_all(app);
             }
             _ => {}
         })
@@ -562,43 +276,35 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 ..
             } = event
             {
-                let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                crate::show_main_window(tray.app_handle());
             }
-        })
-        .build(app)?;
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
     Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // ponytail: install the fan-out logger: records go to stderr (RUST_LOG-aware,
-    // env_logger formatted) AND into the in-memory ring buffer that the frontend
-    // "Logs" panel reads via get_logs. Replaces the bare env_logger init.
+    // Records go to stderr (RUST_LOG-aware) and into the ring buffer behind the Logs panel.
     log_buffer::install();
 
     let data_dir = app_data_dir();
     let _ = std::fs::create_dir_all(&data_dir);
-    cleanup_stale_temp_dirs(&data_dir);
     let db = Database::init(&data_dir).expect("Failed to init DB");
     restore_orphan_downloads(&db);
-    cleanup_stale_http_parts(&db);
 
     let settings = Settings::load(&data_dir);
-    let download_root = if settings.default_download_path.trim().is_empty() {
-        util::default_download_dir()
-    } else {
-        util::expand_tilde(&settings.default_download_path)
-    };
-    cleanup_stale_ytdlp_dirs(&download_root);
-    let engine = Aria2Engine::new();
+    // Partial data of unfinished downloads is what makes resume possible: only
+    // temp files nobody owns any more are removed.
+    let keep = resumable_ids(&db);
+    cleanup_stale_hls_dirs(&data_dir, &keep);
+    cleanup_stale_download_temps(&download_roots(&settings), &keep);
+
     let queue = QueueManager::new();
-    queue.set_concurrent_downloads(settings.max_concurrent_downloads as usize);
-    queue.set_max_connections(settings.max_connections_per_server as usize);
-    queue.set_http_options(settings.proxy.clone(), settings.speed_limit_kbps);
+    queue.apply_settings(&settings);
     let initial_schedule = ScheduleOptions {
         start_time: settings.schedule_start.clone(),
         stop_time: settings.schedule_stop.clone(),
@@ -610,15 +316,15 @@ pub fn run() {
         log::warn!("Ignoring invalid persisted scheduler configuration");
     }
 
+    let system_lang = std::env::var("LANG").unwrap_or_default();
     let app_state = AppState {
         db,
-        engine,
         queue,
         api_token: Arc::new(Mutex::new(settings.api_token.clone())),
-        settings: Arc::new(Mutex::new(settings.clone())),
+        settings: Arc::new(Mutex::new(settings)),
         rate_bucket: Arc::new(Mutex::new(VecDeque::new())),
-        pending_pair_ids: Arc::new(Mutex::new(VecDeque::new())),
-        pair_proofs: Arc::new(PairProofStore::default()),
+        pairing: Arc::new(Mutex::new(PairingState::default())),
+        ui_lang: Arc::new(Mutex::new(system_lang.clone())),
     };
 
     #[cfg(desktop)]
@@ -631,20 +337,11 @@ pub fn run() {
 
     let app = builder
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .setup(move |app| {
             let app_handle = app.handle().clone();
-            let state = app_handle.state::<AppState>();
-            let data_dir = app_data_dir();
-
-            if let Err(error) =
-                native_messaging::start_pairing_server(&data_dir, state.pair_proofs.clone())
-            {
-                log::error!("failed to start native pairing server: {error}");
-            }
 
             #[cfg(desktop)]
             {
@@ -659,20 +356,12 @@ pub fn run() {
 
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
-                let _ = apply_vibrancy(
-                    &window,
-                    NSVisualEffectMaterial::UnderWindowBackground,
-                    None,
-                    None,
-                );
+                let _ = apply_vibrancy(&window, NSVisualEffectMaterial::Sidebar, None, None);
             }
 
-            log::info!("aria2 stays idle until a legacy GID needs recovery");
-
-            setup_tray(app)?;
-
+            setup_tray(app, &system_lang)?;
             spawn_local_api(app_handle.clone());
-            spawn_progress_poll(app_handle.clone());
+            spawn_queue_loop(app_handle);
             Ok(())
         })
         .manage(app_state)
@@ -680,20 +369,21 @@ pub fn run() {
             crate::commands::add_download,
             crate::commands::pause_download,
             crate::commands::resume_download,
+            crate::commands::pause_all_downloads,
+            crate::commands::resume_all_downloads,
             crate::commands::remove_download,
             crate::commands::get_downloads,
             crate::commands::get_download,
-            crate::commands::get_download_status,
             crate::commands::set_schedule,
             crate::commands::get_schedule,
             crate::commands::change_priority,
             crate::commands::get_settings,
             crate::commands::save_settings,
             crate::commands::get_extension_status,
-            crate::commands::reset_extension_pin,
-            crate::commands::get_pending_pair,
-            crate::commands::get_pending_pairs,
             crate::commands::approve_extension_pair,
+            crate::commands::reject_extension_pair,
+            crate::commands::revoke_extension,
+            crate::commands::get_tool_status,
             crate::commands::get_logs,
             crate::commands::clear_logs,
             crate::commands::get_stats,
@@ -701,7 +391,6 @@ pub fn run() {
             crate::commands::archive_download,
             crate::commands::open_folder,
             crate::commands::open_file,
-            crate::commands::install_native_host_manifests,
             crate::commands::check_for_updates,
             crate::commands::read_clipboard,
             set_ui_language
@@ -722,6 +411,7 @@ pub fn run() {
     });
 }
 
+/// Stop every worker and give them a moment to persist resume state.
 fn start_shutdown(app_handle: &AppHandle) -> bool {
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::SeqCst) {
@@ -730,18 +420,17 @@ fn start_shutdown(app_handle: &AppHandle) -> bool {
     let app_handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let state = app_handle.state::<AppState>();
-        let ids = state.queue.active_stream_ids();
+        let ids = state.queue.active_ids();
         for id in &ids {
-            let _ = state.queue.cancel_stream(*id);
+            state.queue.request_stop(*id, StopReason::Shutdown);
         }
-        let _ = state.engine.stop();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         while tokio::time::Instant::now() < deadline
-            && ids.iter().any(|id| state.queue.is_stream_active(*id))
+            && ids.iter().any(|id| state.queue.is_active(*id))
         {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        log::info!("Shutting down Falcon DM, stopped aria2 engine.");
+        log::info!("Falcon DM shutting down ({} active downloads stopped)", ids.len());
         app_handle.exit(0);
     });
     true
@@ -749,6 +438,7 @@ fn start_shutdown(app_handle: &AppHandle) -> bool {
 
 #[tauri::command]
 pub fn set_ui_language(app: AppHandle, lang: String) -> Result<(), String> {
+    *util::lock_or_recover(&app.state::<AppState>().ui_lang) = lang.clone();
     let menu = tray_menu(&app, &lang).map_err(|e| e.to_string())?;
     app.tray_by_id(TRAY_ID)
         .ok_or_else(|| "tray icon missing".to_string())?
@@ -758,7 +448,7 @@ pub fn set_ui_language(app: AppHandle, lang: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::locale_is_turkish;
+    use super::*;
 
     #[test]
     fn locale_is_turkish_matches_tr_tags() {
@@ -767,5 +457,53 @@ mod tests {
         assert!(locale_is_turkish("tr_TR.UTF-8"));
         assert!(!locale_is_turkish("en"));
         assert!(!locale_is_turkish("en_US"));
+    }
+
+    #[test]
+    fn temp_names_map_back_to_download_ids() {
+        assert_eq!(hls_dir_id("hls-42.falcondm-temp"), Some(42));
+        assert_eq!(hls_dir_id("hls-42"), None);
+        assert_eq!(http_temp_id(".movie.mp4.7.falcon.part"), Some(7));
+        assert_eq!(http_temp_id(".a.b.c.123.falcon.state"), Some(123));
+        assert_eq!(http_temp_id("movie.mp4.7.falcon.part"), None, "must be a hidden file");
+        assert_eq!(http_temp_id(".movie.mp4.falcon.part"), None);
+        assert_eq!(http_temp_id("notes.part"), None);
+    }
+
+    #[test]
+    fn startup_cleanup_keeps_resumable_data_and_user_files() {
+        let root = std::env::temp_dir().join(format!("falcon-cleanup-{}", uuid::Uuid::new_v4()));
+        let sub = root.join("Videos");
+        std::fs::create_dir_all(&sub).unwrap();
+        let keep: HashSet<i64> = [7].into_iter().collect();
+
+        let kept_part = root.join(".big.iso.7.falcon.part");
+        let kept_state = root.join(".big.iso.7.falcon.state");
+        let stale_part = sub.join(".old.zip.3.falcon.part");
+        let user_file = root.join("holiday.part");
+        let user_hidden = root.join(".DS_Store");
+        for file in [&kept_part, &kept_state, &stale_part, &user_file, &user_hidden] {
+            std::fs::write(file, b"x").unwrap();
+        }
+        let kept_run = root.join(".falcon-dm-ytdlp-7");
+        let stale_run = root.join(".falcon-dm-ytdlp-3");
+        let legacy_run = root.join(".falcon-dm-ytdlp-7-123e4567-e89b-12d3-a456-426614174000");
+        for dir in [&kept_run, &stale_run, &legacy_run] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+
+        cleanup_stale_download_temps(std::slice::from_ref(&root), &keep);
+        assert!(kept_part.exists() && kept_state.exists() && kept_run.exists());
+        assert!(!stale_part.exists() && !stale_run.exists() && !legacy_run.exists());
+        assert!(user_file.exists() && user_hidden.exists(), "foreign files are never touched");
+
+        let data = root.join("data");
+        let temp = data.join("downloads_temp");
+        std::fs::create_dir_all(temp.join("hls-7.falcondm-temp")).unwrap();
+        std::fs::create_dir_all(temp.join("hls-3.falcondm-temp")).unwrap();
+        cleanup_stale_hls_dirs(&data, &keep);
+        assert!(temp.join("hls-7.falcondm-temp").exists());
+        assert!(!temp.join("hls-3.falcondm-temp").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

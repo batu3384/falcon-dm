@@ -1,42 +1,45 @@
-use crate::download::queue::{validate_schedule, ScheduleOptions};
+use crate::download::queue::{validate_schedule, ScheduleOptions, StopReason};
 use crate::log_buffer;
+use crate::pairing::PendingPair;
 use crate::settings::Settings;
 use crate::storage::models::{Download, DownloadFilter, DownloadStatus};
 use crate::util::{
-    app_data_dir, copy_file_exclusive, lock_or_recover, resolve_download_target, sanitize_filename,
-    validate_open_path, LEGACY_DEFAULT_API_TOKEN,
+    app_data_dir, free_disk_space, lock_or_recover, move_file_exclusive, resolve_download_target,
+    sanitize_filename, validate_open_path, LEGACY_DEFAULT_API_TOKEN,
 };
 use crate::{
-    current_settings, enqueue_download, parse_extension_id, resolve_download_save_path, AppState,
-    ExternalDownloadPayload,
+    current_settings, emit_row, enqueue_download, parse_extension_id, remove_download_artifacts,
+    resolve_download_save_path, AppState, ExternalDownloadPayload,
 };
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn add_download(
     app: AppHandle,
     url: String,
-    filename: String,
-    save_path: String,
+    filename: Option<String>,
+    save_path: Option<String>,
     referrer: Option<String>,
     user_agent: Option<String>,
     cookies: Option<String>,
     cookie_url: Option<String>,
+    format: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Download, String> {
+    let blank = |value: Option<String>| value.filter(|v| !v.trim().is_empty());
     let id = enqueue_download(
         &app,
         ExternalDownloadPayload {
             url,
-            filename: Some(filename),
-            referrer,
-            user_agent,
-            cookies,
-            cookie_url,
+            filename: blank(filename),
+            referrer: blank(referrer),
+            user_agent: blank(user_agent),
+            cookies: blank(cookies),
+            cookie_url: blank(cookie_url),
             title: None,
-            format: None,
-            save_path: Some(save_path),
+            format: blank(format),
+            save_path: blank(save_path),
         },
     )
     .await?;
@@ -49,39 +52,15 @@ pub async fn pause_download(
     id: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-    if let Some(gid) = &dl.aria2_gid {
-        // Tray Pause All already ignores aria2 errors so HLS/HTTP still pause.
-        if let Err(e) = state.engine.pause(gid).await {
-            log::warn!("aria2 pause {id}: {e}");
-        }
+    let row = state.db.get_download(id).map_err(|e| e.to_string())?;
+    if row.status == DownloadStatus::Paused {
+        return Ok(());
     }
-    // Cancels HLS and yt-dlp tasks (shared watch map). Timeout still writes
-    // Paused so the UI does not stay Downloading. A worker that then returns Ok
-    // completes the row (finish_stream includes Paused). Cancelled leaves Paused.
-    if !state.queue.cancel_and_wait_stream(id).await {
-        log::warn!("pause timed out for download {id}");
+    if state.queue.pause(&state.db, &app, id).await {
+        Ok(())
+    } else {
+        Err("Download state changed before pause".into())
     }
-    if !state
-        .db
-        .set_status_error_if_current(
-            id,
-            &[
-                DownloadStatus::Queued,
-                DownloadStatus::Downloading,
-                DownloadStatus::Merging,
-                DownloadStatus::Paused,
-            ],
-            &DownloadStatus::Paused,
-            None,
-            Some(0.0),
-        )
-        .map_err(|e| e.to_string())?
-    {
-        return Err("Download state changed before pause".into());
-    }
-    crate::emit_download_status(&app, &state.db, id, "Paused");
-    Ok(())
 }
 
 #[tauri::command]
@@ -91,16 +70,18 @@ pub async fn resume_download(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-    if matches!(
-        dl.status,
-        DownloadStatus::Completed | DownloadStatus::Downloading | DownloadStatus::Merging
-    ) {
-        return Err("Download is already active or completed".into());
+    match dl.status {
+        DownloadStatus::Completed => return Err("Download is already completed".into()),
+        // Already on its way (or waiting out a retry backoff: start it now).
+        DownloadStatus::Downloading | DownloadStatus::Merging => return Ok(()),
+        DownloadStatus::Queued => {
+            let _ = state.db.clear_retry_backoff(id);
+            emit_row(&app, &state.db, id);
+            return Ok(());
+        }
+        DownloadStatus::Paused | DownloadStatus::Failed => {}
     }
-    if dl.status == DownloadStatus::Queued {
-        return Ok(());
-    }
-    let was_failed = dl.status == DownloadStatus::Failed;
+    // Partial data stays on disk: a failed download continues where it stopped.
     if !state
         .db
         .resume_if_current(id, &[DownloadStatus::Paused, DownloadStatus::Failed])
@@ -108,47 +89,43 @@ pub async fn resume_download(
     {
         return Err("Download state changed before resume".into());
     }
-    if was_failed {
-        crate::clear_failed_retry_artifacts(&dl.save_path, &dl.filename, id);
-    }
-    crate::emit_download_status(&app, &state.db, id, "Queued");
+    emit_row(&app, &state.db, id);
     Ok(())
 }
 
 #[tauri::command]
+pub async fn pause_all_downloads(app: AppHandle) -> Result<usize, String> {
+    Ok(crate::pause_all(&app).await)
+}
+
+#[tauri::command]
+pub async fn resume_all_downloads(app: AppHandle) -> Result<usize, String> {
+    Ok(crate::resume_all(&app))
+}
+
+#[tauri::command]
 pub async fn remove_download(
+    app: AppHandle,
     id: i64,
     delete_file: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-    if let Some(gid) = &dl.aria2_gid {
-        let _ = state.engine.remove(gid).await;
-    }
-    if !state.queue.cancel_and_wait_stream(id).await {
+    state.db.get_download(id).map_err(|e| e.to_string())?;
+    if !state.queue.stop_and_wait(id, StopReason::Remove).await {
         return Err("Download is still stopping; try removing it again shortly".into());
     }
-    if delete_file.unwrap_or(false) {
+    // Read again: the worker may have renamed the file while finishing.
+    let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
+    if delete_file.unwrap_or(false) && dl.status == DownloadStatus::Completed {
         let file_path = resolve_download_target(&dl.save_path, &dl.filename)?;
         if file_path.exists() {
             std::fs::remove_file(&file_path)
                 .map_err(|e| format!("Could not delete file from disk: {e}"))?;
         }
     }
-    if let Some(id) = dl.id {
-        if let Some(part) = crate::download::http::part_path_for(&dl.save_path, &dl.filename, id) {
-            let _ = std::fs::remove_file(part);
-        }
-        if let Some(dir) = crate::download::http::segment_dir_for(&dl.save_path, &dl.filename, id) {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-        let hls = crate::download::hls::hls_session_dir(id);
-        let _ = std::fs::remove_dir_all(&hls);
-        if let Some(parent) = hls.parent() {
-            let _ = std::fs::remove_dir_all(parent.join(format!("hls-{id}")));
-        }
-    }
+    remove_download_artifacts(&dl.save_path, &dl.filename, id);
     state.db.delete_download(id).map_err(|e| e.to_string())?;
+    let _ = app.emit("download-removed", id);
     Ok(())
 }
 
@@ -175,25 +152,6 @@ pub async fn get_downloads(
 #[tauri::command]
 pub async fn get_download(id: i64, state: State<'_, AppState>) -> Result<Download, String> {
     state.db.get_download(id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_download_status(
-    id: i64,
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-    if let Some(gid) = dl.aria2_gid {
-        if state.engine.is_running() {
-            return state.engine.get_status(&gid).await.map_err(|e| e.to_string());
-        }
-    }
-    Ok(serde_json::json!({
-        "status": dl.status.as_str(),
-        "completedLength": dl.downloaded_size.to_string(),
-        "totalLength": dl.total_size.to_string(),
-        "downloadSpeed": dl.speed.to_string(),
-    }))
 }
 
 #[tauri::command]
@@ -226,17 +184,21 @@ pub async fn open_folder(path: String) -> Result<(), String> {
     let safe = validate_open_path(&path)?;
     #[cfg(target_os = "macos")]
     {
-        let status = std::process::Command::new("open").arg("-R").arg(&safe).spawn();
-        if let Err(e) = status {
-            return Err(format!("Failed to open folder: {e}"));
+        // Reveal the file when it exists, else open the folder it will land in.
+        let mut command = std::process::Command::new("open");
+        if safe.is_file() {
+            command.arg("-R").arg(&safe);
+        } else if safe.is_dir() {
+            command.arg(&safe);
+        } else {
+            command.arg(safe.parent().ok_or_else(|| "Path does not exist".to_string())?);
         }
+        command.spawn().map_err(|e| format!("Failed to open folder: {e}"))?;
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        // ponytail: previously a silent no-op on non-macOS (returned Ok(()) but
-        // did nothing). Falcon DM is macOS-only; surface an explicit error so the
-        // UI doesn't mislead the user into thinking it worked.
+        let _ = safe;
         Err("Opening folders is only supported on macOS.".into())
     }
 }
@@ -244,12 +206,15 @@ pub async fn open_folder(path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn open_file(path: String) -> Result<(), String> {
     let safe = validate_open_path(&path)?;
+    if !safe.is_file() {
+        return Err("ERR_FILE_MISSING".into());
+    }
     #[cfg(target_os = "macos")]
     {
-        let status = std::process::Command::new("open").arg(&safe).spawn();
-        if let Err(e) = status {
-            return Err(format!("Failed to open file: {e}"));
-        }
+        std::process::Command::new("open")
+            .arg(&safe)
+            .spawn()
+            .map_err(|e| format!("Failed to open file: {e}"))?;
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
@@ -260,11 +225,13 @@ pub async fn open_file(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn change_priority(
+    app: AppHandle,
     id: i64,
     increase: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     if state.db.adjust_priority(id, increase).map_err(|e| e.to_string())? {
+        emit_row(&app, &state.db, id);
         Ok(())
     } else {
         Err("Download not found".into())
@@ -277,6 +244,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     if settings.load_corrupt {
         return Err("settings.json is corrupt; rename or delete it before saving".into());
     }
+    // Secrets never reach the webview.
     settings.api_token.clear();
     for profile in &mut settings.download_profiles {
         if profile.cookies.as_deref().is_some_and(|c| !c.trim().is_empty()) {
@@ -286,47 +254,114 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     Ok(settings)
 }
 
-/// Extension pairing status — exposes NO secret token to the frontend.
-/// The frontend uses this to render onboarding/settings UI; the token only
-/// ever leaves the app via the authenticated `/api/pair` HTTP flow after the
-/// user explicitly approves a specific extension ID.
+/// Extension pairing status. The API token is never part of it: it only leaves
+/// the app through `/api/pair` after the user approved that extension.
 #[derive(serde::Serialize)]
 pub(crate) struct ExtensionStatus {
-    has_token: bool,
     approved_extension_ids: Vec<String>,
-    pending_pair_id: Option<String>,
+    pending: Vec<PendingPair>,
 }
 
 #[tauri::command]
 pub fn get_extension_status(state: State<'_, AppState>) -> Result<ExtensionStatus, String> {
-    let token = lock_or_recover(&state.api_token).clone();
-    let has_token = !token.trim().is_empty() && token != LEGACY_DEFAULT_API_TOKEN;
-    let approved = lock_or_recover(&state.settings).allowed_extension_ids.clone();
     Ok(ExtensionStatus {
-        has_token,
-        approved_extension_ids: approved,
-        pending_pair_id: lock_or_recover(&state.pending_pair_ids).front().cloned(),
+        approved_extension_ids: lock_or_recover(&state.settings).allowed_extension_ids.clone(),
+        pending: lock_or_recover(&state.pairing).pending(),
     })
 }
 
 #[tauri::command]
-pub fn reset_extension_pin(state: State<'_, AppState>) -> Result<(), String> {
+pub fn approve_extension_pair(
+    extension_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let id = parse_extension_id(&extension_id)?;
+    // Only a request the user is looking at can be approved: no blind allowlisting.
+    if !lock_or_recover(&state.pairing).pending().iter().any(|p| p.extension_id == id) {
+        return Err("No pending pairing request for this extension".into());
+    }
     let mut settings = current_settings(&state);
-    settings.allowed_extension_ids.clear();
-    lock_or_recover(&state.pending_pair_ids).clear();
+    if !settings.allowed_extension_ids.iter().any(|x| x == id) {
+        settings.allowed_extension_ids.push(id.to_string());
+    }
     settings.save(&app_data_dir())?;
     *lock_or_recover(&state.settings) = settings;
+    lock_or_recover(&state.pairing).resolve(id);
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_pending_pair(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    Ok(lock_or_recover(&state.pending_pair_ids).front().cloned())
+pub fn reject_extension_pair(
+    extension_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let id = parse_extension_id(&extension_id)?;
+    lock_or_recover(&state.pairing).reject(id);
+    Ok(())
+}
+
+/// Disconnect one extension. The token is rotated so its cached copy is dead;
+/// extensions that stay approved pick up the new one on their next request.
+#[tauri::command]
+pub fn revoke_extension(extension_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let id = parse_extension_id(&extension_id)?;
+    let mut settings = current_settings(&state);
+    settings.allowed_extension_ids.retain(|x| x != id);
+    settings.api_token = uuid::Uuid::new_v4().to_string();
+    settings.save(&app_data_dir())?;
+    *lock_or_recover(&state.api_token) = settings.api_token.clone();
+    *lock_or_recover(&state.settings) = settings;
+    Ok(())
+}
+
+/// Which external tools the engines will use. Shown in Settings and onboarding.
+#[derive(serde::Serialize)]
+pub(crate) struct ToolStatus {
+    ytdlp_path: Option<String>,
+    ytdlp_version: Option<String>,
+    /// Error code when yt-dlp is unusable (`ERR_YTDLP_MISSING`, `ERR_YTDLP_PATH_INVALID: …`).
+    ytdlp_error: Option<String>,
+    ffmpeg_path: Option<String>,
 }
 
 #[tauri::command]
-pub fn get_pending_pairs(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    Ok(lock_or_recover(&state.pending_pair_ids).iter().cloned().collect())
+pub async fn get_tool_status(state: State<'_, AppState>) -> Result<ToolStatus, String> {
+    use crate::download::tools::{augmented_path, find_ffmpeg, find_ytdlp};
+    let preferred = lock_or_recover(&state.settings).ytdlp_path.clone();
+    let (ytdlp, ffmpeg) =
+        tokio::task::spawn_blocking(move || (find_ytdlp(Some(&preferred)), find_ffmpeg()))
+            .await
+            .map_err(|e| e.to_string())?;
+    let mut status = ToolStatus {
+        ytdlp_path: None,
+        ytdlp_version: None,
+        ytdlp_error: None,
+        ffmpeg_path: ffmpeg.ok().map(|p| p.to_string_lossy().to_string()),
+    };
+    match ytdlp {
+        Ok(path) => {
+            let version = tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                tokio::process::Command::new(&path)
+                    .arg("--version")
+                    .env("PATH", augmented_path())
+                    .stdin(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await;
+            if let Ok(Ok(output)) = version {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    status.ytdlp_version =
+                        (!text.is_empty()).then(|| text.chars().take(40).collect());
+                }
+            }
+            status.ytdlp_path = Some(path.to_string_lossy().to_string());
+        }
+        Err(error) => status.ytdlp_error = Some(error),
+    }
+    Ok(status)
 }
 
 /// ponytail: surface the in-memory log ring buffer to the frontend "Logs" panel.
@@ -348,9 +383,8 @@ pub fn clear_logs() -> Result<(), String> {
     Ok(())
 }
 
-/// ponytail: aggregate statistics for the Stats panel — counts by status, total
-/// downloaded bytes, current aggregate speed. Computed on-demand from the DB so
-/// it's always consistent with the list (no separate stats table to sync).
+/// Aggregates for the sidebar, status bar and Stats panel. Computed from the DB
+/// on demand so they always agree with the list.
 #[derive(serde::Serialize)]
 pub(crate) struct DownloadStats {
     active: u64,
@@ -367,11 +401,22 @@ pub(crate) struct DownloadStats {
     document: u64,
     archive: u64,
     program: u64,
+    /// Free bytes on the default download volume.
+    free_disk_bytes: Option<u64>,
+    speed_limit_kbps: u32,
 }
 
 #[tauri::command]
 pub async fn get_stats(state: State<'_, AppState>) -> Result<DownloadStats, String> {
     let stats = state.db.download_stats().map_err(|e| e.to_string())?;
+    let root = {
+        let settings = lock_or_recover(&state.settings);
+        if settings.default_download_path.trim().is_empty() {
+            crate::util::default_download_dir()
+        } else {
+            crate::util::expand_tilde(&settings.default_download_path)
+        }
+    };
     Ok(DownloadStats {
         active: stats.active,
         queued: stats.queued,
@@ -387,23 +432,24 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<DownloadStats, Stri
         document: stats.document,
         archive: stats.archive,
         program: stats.program,
+        free_disk_bytes: free_disk_space(&root),
+        speed_limit_kbps: state.queue.speed_limit_kbps(),
     })
 }
 
-/// ponytail: rename and/or move a completed download's file. The new filename is
-/// sanitized; the destination folder is validated against path traversal. Runs
-/// the fs op on a blocking thread so the async runtime isn't stalled. DB row is
-/// updated only after a successful move so it never points at a missing file.
+/// Rename and/or move a finished download. The DB row changes only after the
+/// file landed, so it never points at a missing file.
 #[tauri::command]
 pub async fn move_download(
+    app: AppHandle,
     id: i64,
     new_filename: Option<String>,
     new_save_path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let mut dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-    if !matches!(dl.status, DownloadStatus::Completed | DownloadStatus::Failed) {
-        return Err("Only completed or failed downloads can be moved".into());
+    if dl.status != DownloadStatus::Completed {
+        return Err("Only completed downloads can be moved".into());
     }
 
     let filename = match new_filename.as_deref().filter(|f| !f.trim().is_empty()) {
@@ -418,14 +464,14 @@ pub async fn move_download(
     };
     let requested_dir =
         new_save_path.as_deref().filter(|path| !path.trim().is_empty()).unwrap_or(&dl.save_path);
-    let dest_dir = resolve_download_save_path(Some(requested_dir), &dl.category)?;
+    let dest_dir = resolve_download_save_path(&state, Some(requested_dir), &dl.category)?;
     let dest_path = resolve_download_target(&dest_dir, &filename)?;
     let src = resolve_download_target(&dl.save_path, &dl.filename)?;
 
-    if std::fs::symlink_metadata(&src).map_err(|e| e.to_string())?.file_type().is_symlink() {
+    let meta = std::fs::symlink_metadata(&src).map_err(|_| "ERR_FILE_MISSING".to_string())?;
+    if meta.file_type().is_symlink() {
         return Err("Source file cannot be a symlink".into());
     }
-
     if src == dest_path {
         return Ok(()); // nothing to do
     }
@@ -435,28 +481,22 @@ pub async fn move_download(
         .to_string_lossy()
         .to_string();
 
-    // ponytail: blocking fs move on a pool thread.
-    let src_for_copy = src.clone();
-    let dest_for_copy = dest_path.clone();
-    let result =
-        tokio::task::spawn_blocking(move || copy_file_exclusive(&src_for_copy, &dest_for_copy))
-            .await
-            .map_err(|e| format!("move task failed: {e}"))?;
+    let (from, to) = (src.clone(), dest_path.clone());
+    tokio::task::spawn_blocking(move || move_file_exclusive(&from, &to))
+        .await
+        .map_err(|e| format!("move task failed: {e}"))?
+        .map_err(|e| format!("failed to move file: {e}"))?;
 
-    result.map_err(|e| format!("failed to move file: {e}"))?;
-
-    // Update DB only after the file landed. If that write fails, put the bytes back
-    // so retry still finds the source the row points at.
+    dl.category = crate::storage::models::DownloadCategory::from_filename(&filename);
     dl.filename = filename;
     dl.save_path = dest_save_path;
     if let Err(error) = state.db.update_download(id, &dl) {
-        let src_restore = src.clone();
-        let dest_restore = dest_path.clone();
-        let _ =
-            tokio::task::spawn_blocking(move || copy_file_exclusive(&dest_restore, &src_restore))
-                .await;
+        // Put the bytes back so the row still points at a real file.
+        let (from, to) = (dest_path.clone(), src.clone());
+        let _ = tokio::task::spawn_blocking(move || move_file_exclusive(&from, &to)).await;
         return Err(error.to_string());
     }
+    emit_row(&app, &state.db, id);
     Ok(())
 }
 
@@ -465,32 +505,18 @@ pub async fn move_download(
 /// remain in the DB and on disk. Unarchiving restores them.
 #[tauri::command]
 pub async fn archive_download(
+    app: AppHandle,
     id: i64,
     archived: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let terminal = [DownloadStatus::Completed, DownloadStatus::Failed];
     if state.db.set_archived_if_status(id, archived, &terminal).map_err(|e| e.to_string())? {
+        emit_row(&app, &state.db, id);
         Ok(())
     } else {
         Err("Only completed or failed downloads can be archived".into())
     }
-}
-
-#[tauri::command]
-pub fn approve_extension_pair(
-    extension_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let id = parse_extension_id(&extension_id)?;
-    let mut settings = current_settings(&state);
-    if !settings.allowed_extension_ids.iter().any(|x| x == id) {
-        settings.allowed_extension_ids.push(id.to_string());
-    }
-    settings.save(&app_data_dir())?;
-    *lock_or_recover(&state.settings) = settings;
-    lock_or_recover(&state.pending_pair_ids).retain(|pending| pending != id);
-    Ok(())
 }
 
 #[tauri::command]
@@ -499,63 +525,23 @@ pub async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Re
     if current.load_corrupt {
         return Err("settings.json is corrupt; rename or delete it before saving".into());
     }
-    let dir = app_data_dir();
     let mut settings = settings;
+    // The UI never sees or edits these: token, allowlist, schedule.
+    settings.api_token = current.api_token.clone();
     if settings.api_token.trim().is_empty() || settings.api_token == LEGACY_DEFAULT_API_TOKEN {
-        settings.api_token = current.api_token.clone();
+        settings.api_token = uuid::Uuid::new_v4().to_string();
     }
     settings.restore_blank_profile_cookies(&current.download_profiles);
-    // UI never edits the allowlist or scheduler; pairing / set_schedule own them.
     settings.preserve_command_owned_fields(&current);
     let live = state.queue.get_schedule();
     settings.apply_live_schedule(live.active, live.start_time.clone(), live.stop_time.clone());
     settings.clamp_runtime_bounds();
-    settings.save(&dir)?;
+    settings.save(&app_data_dir())?;
 
-    state.queue.set_concurrent_downloads(settings.max_concurrent_downloads as usize);
-    state.queue.set_max_connections(settings.max_connections_per_server as usize);
-    state.queue.set_http_options(settings.proxy.clone(), settings.speed_limit_kbps);
-    *lock_or_recover(&state.api_token) = {
-        let t = settings.api_token.trim();
-        if t.is_empty() || t == LEGACY_DEFAULT_API_TOKEN {
-            let fresh = uuid::Uuid::new_v4().to_string();
-            let mut s = settings.clone();
-            s.api_token = fresh.clone();
-            let _ = s.save(&dir);
-            *lock_or_recover(&state.settings) = s;
-            fresh
-        } else {
-            *lock_or_recover(&state.settings) = settings.clone();
-            settings.api_token.clone()
-        }
-    };
-
-    if state.engine.is_running() {
-        let _ = state.engine.apply_speed_limit(settings.speed_limit_kbps).await;
-        let _ = state.engine.apply_proxy(settings.proxy.as_deref()).await;
-    }
-
+    state.queue.apply_settings(&settings);
+    *lock_or_recover(&state.api_token) = settings.api_token.clone();
+    *lock_or_recover(&state.settings) = settings;
     Ok(())
-}
-
-#[tauri::command]
-pub fn install_native_host_manifests(
-    chrome_extension_id: String,
-    edge_extension_id: Option<String>,
-) -> Result<(), String> {
-    if !crate::extension_host::native_host_install_supported() {
-        return Err("Native host install is not supported on this platform".to_string());
-    }
-    let chrome = parse_extension_id(&chrome_extension_id)?.to_string();
-    let edge = match edge_extension_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
-        Some(id) => parse_extension_id(id)?.to_string(),
-        None => chrome.clone(),
-    };
-    let executable = crate::extension_host::resolve_native_host_binary().ok_or_else(|| {
-        "Native host binary not found. Build it with: cargo build -p falcon-dm-native-host"
-            .to_string()
-    })?;
-    crate::extension_host::install_native_host_manifests(&executable, &chrome, &edge)
 }
 
 #[derive(serde::Serialize)]
@@ -697,16 +683,14 @@ mod clipboard_tests {
         assert_eq!(normalize_pasteboard_text(&"x".repeat(3000)).len(), 2048);
     }
 
+    /// Reads whatever is on the pasteboard. Never writes to it: a test must not
+    /// replace what the developer copied.
     #[cfg(target_os = "macos")]
     #[test]
-    fn read_clipboard_reads_pasteboard_via_pbpaste() {
-        let marker = format!("falcon-clipboard-{}", std::process::id());
-        let script = format!("printf %s {} | pbcopy", marker);
-        let status =
-            std::process::Command::new("bash").args(["-lc", &script]).status().expect("pbcopy");
-        assert!(status.success(), "pbcopy failed");
+    fn read_clipboard_reads_pasteboard_without_modifying_it() {
         let got = read_clipboard_blocking().expect("pbpaste");
-        assert_eq!(got, marker);
+        assert!(got.chars().count() <= 2048);
+        assert_eq!(got, got.trim());
     }
 }
 

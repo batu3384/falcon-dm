@@ -178,6 +178,33 @@ pub fn validate_download_url(url: &str) -> Result<(), String> {
     }
 }
 
+/// Enqueue-time check: syntax, scheme and literal private hosts only.
+///
+/// DNS is deliberately not consulted: a download added while offline must
+/// queue (and retry), not be rejected as "invalid". Every network hop
+/// re-validates with pinned DNS, so SSRF protection does not depend on this.
+pub fn validate_enqueue_url(raw: &str) -> Result<url::Url, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("URL is empty".into());
+    }
+    if trimmed.len() > 8192 {
+        return Err("URL is too long".into());
+    }
+    if trimmed.to_lowercase().starts_with("magnet:") {
+        return Err("ERR_UNSUPPORTED_MAGNET".into());
+    }
+    let parsed = url::Url::parse(trimmed).map_err(|e| format!("Invalid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
+    }
+    let host = parsed.host_str().ok_or_else(|| "URL has no host".to_string())?;
+    if is_blocked_download_host(host) {
+        return Err("Private/loopback hosts are not allowed".into());
+    }
+    Ok(parsed)
+}
+
 /// Validate an HTTP(S) URL before every HLS network hop.
 pub fn validate_fetch_url(raw: &str) -> Result<url::Url, String> {
     let parsed = url::Url::parse(raw.trim()).map_err(|e| format!("Invalid URL: {e}"))?;
@@ -476,9 +503,11 @@ pub fn infer_filename_from_url(url: &str) -> Option<String> {
             }
         }
     }
-    let segment = parsed.path().rsplit('/').next().unwrap_or("").split('?').next().unwrap_or("");
-    if !segment.is_empty() && segment != "/" && segment.contains('.') {
-        return Some(segment.to_string());
+    let segment = parsed.path().rsplit('/').next().unwrap_or("");
+    // `My%20File.pdf` → `My File.pdf`
+    let segment = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+    if !segment.is_empty() && segment.contains('.') {
+        return Some(segment.into_owned());
     }
     None
 }
@@ -810,6 +839,30 @@ mod tests {
         );
         assert!(name.contains("My_Video_Title") || name.contains("My Video Title"));
         assert!(!name.starts_with("videoplayback"));
+    }
+
+    #[test]
+    fn enqueue_validation_does_not_need_dns() {
+        // `.invalid` never resolves: adding it must still succeed (retry happens later).
+        assert!(validate_enqueue_url("https://nonexistent-falcon-12345.invalid/file.zip").is_ok());
+        assert!(validate_enqueue_url("http://127.0.0.1/secret").is_err());
+        assert!(validate_enqueue_url("http://192.168.1.1/a").is_err());
+        assert!(validate_enqueue_url("http://localhost/x").is_err());
+        assert!(validate_enqueue_url("file:///etc/passwd").is_err());
+        assert_eq!(
+            validate_enqueue_url("magnet:?xt=urn:btih:abc").unwrap_err(),
+            "ERR_UNSUPPORTED_MAGNET"
+        );
+        assert!(validate_enqueue_url("   ").is_err());
+    }
+
+    #[test]
+    fn url_filenames_are_percent_decoded() {
+        assert_eq!(
+            infer_filename_from_url("https://x.com/files/My%20Report%20%C3%B6zet.pdf"),
+            Some("My Report özet.pdf".into())
+        );
+        assert_eq!(infer_filename_from_url("https://x.com/watch?v=abc"), None);
     }
 
     #[test]

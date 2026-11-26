@@ -6,7 +6,19 @@
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 unmaintained = "workspace"
-ignore = []
+ignore = [
+  # SQLite CVE-2026-119375: exploitation requires the victim to open an
+  # attacker-crafted db+wal file pair. Falcon DM only ever opens its own
+  # database inside its app-data directory, so there is no attacker-controlled
+  # file path. The fix (libsqlite3-sys 0.39) ships with rusqlite 0.41, but no
+  # r2d2_sqlite release supports rusqlite 0.41 yet — the upgrade is blocked by
+  # the ecosystem, not by us. Revisit when r2d2_sqlite catches up.
+  { id = "RUSTSEC-2026-0459", reason = "No attacker-controlled db+wal open path; rusqlite 0.41 upgrade blocked by r2d2_sqlite" },
+  # chrono flagged unmaintained with no patched release and no security
+  # vulnerability attached. Our usage is timestamps plus HH:MM schedule
+  # parsing. Migration to jiff is a roadmap item, not a hotfix.
+  { id = "RUSTSEC-2026-0543", reason = "Unmaintained-only advisory, no fix exists; usage is timestamps and schedule parsing" },
+]
 
 [licenses]
 # Allow permissive licenses only. Copyleft (GPL) is denied.

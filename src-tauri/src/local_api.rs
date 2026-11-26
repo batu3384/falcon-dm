@@ -1,9 +1,9 @@
-use crate::native_messaging::PairRequest;
+use crate::pairing::{is_valid_pair_code, PairRequestOutcome};
+use crate::storage::models::{Download, DownloadStatus};
 use crate::util::{lock_or_recover, LEGACY_DEFAULT_API_TOKEN};
 use crate::{
     check_api_token, enqueue_download, extension_id_from_origin, ingest_uploaded_file,
     is_valid_extension_id, validate_upload_b64_len, AppState, ExternalDownloadPayload,
-    MAX_PENDING_PAIR_REQUESTS,
 };
 use axum::{
     body::Body,
@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
+/// Requests per minute. A 100-link grab plus popup polling stays well below.
+const RATE_LIMIT_PER_MINUTE: usize = 600;
+
 fn check_rate_limit(state: &AppState) -> Result<(), StatusCode> {
     let mut bucket = lock_or_recover(&state.rate_bucket);
     let now = Instant::now();
@@ -24,7 +27,7 @@ fn check_rate_limit(state: &AppState) -> Result<(), StatusCode> {
     while bucket.front().is_some_and(|t| now.duration_since(*t) > window) {
         bucket.pop_front();
     }
-    if bucket.len() >= 120 {
+    if bucket.len() >= RATE_LIMIT_PER_MINUTE {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     bucket.push_back(now);
@@ -42,6 +45,22 @@ pub(crate) async fn rate_limit_middleware(
     let state = app.state::<AppState>();
     check_rate_limit(&state)?;
     Ok(next.run(req).await)
+}
+
+fn origin_of(headers: &HeaderMap) -> Option<&str> {
+    headers.get("origin").and_then(|v| v.to_str().ok())
+}
+
+fn enqueue_response(result: Result<i64, String>) -> Response {
+    match result {
+        Ok(id) => {
+            (StatusCode::OK, Json(serde_json::json!({ "success": true, "id": id }))).into_response()
+        }
+        Err(e) => {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "success": false, "error": e })))
+                .into_response()
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -62,40 +81,32 @@ pub(crate) async fn handle_api_add(
     Json(payload): Json<AddDownloadRequest>,
 ) -> Response {
     let state = app.state::<AppState>();
-    if let Err(status) =
-        check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))
-    {
+    if let Err(status) = check_api_token(&headers, &state, origin_of(&headers)) {
         return status.into_response();
     }
-
-    let ext = ExternalDownloadPayload {
-        url: payload.url,
-        filename: Some(payload.filename),
-        referrer: payload.referrer,
-        user_agent: payload.user_agent,
-        cookies: payload.cookies,
-        cookie_url: payload.cookie_url,
-        title: payload.title,
-        format: payload.format,
-        save_path: None,
-    };
-
-    match enqueue_download(&app, ext).await {
-        Ok(id) => {
-            (StatusCode::OK, Json(serde_json::json!({ "success": true, "id": id }))).into_response()
-        }
-        Err(e) => {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "success": false, "error": e })))
-                .into_response()
-        }
-    }
+    enqueue_response(
+        enqueue_download(
+            &app,
+            ExternalDownloadPayload {
+                url: payload.url,
+                filename: Some(payload.filename),
+                referrer: payload.referrer,
+                user_agent: payload.user_agent,
+                cookies: payload.cookies,
+                cookie_url: payload.cookie_url,
+                title: payload.title,
+                format: payload.format,
+                save_path: None,
+            },
+        )
+        .await,
+    )
 }
 
-#[derive(Deserialize, Clone, Serialize)]
+#[derive(Deserialize)]
 pub(crate) struct InterceptRequest {
     pub url: String,
     pub page_url: Option<String>,
-    pub media_type: Option<String>,
     pub title: Option<String>,
     pub cookies: Option<String>,
     pub cookie_url: Option<String>,
@@ -111,33 +122,26 @@ pub(crate) async fn handle_intercept(
     Json(payload): Json<InterceptRequest>,
 ) -> Response {
     let state = app.state::<AppState>();
-    if let Err(status) =
-        check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))
-    {
+    if let Err(status) = check_api_token(&headers, &state, origin_of(&headers)) {
         return status.into_response();
     }
-
-    let ext = ExternalDownloadPayload {
-        url: payload.url,
-        filename: payload.filename,
-        referrer: payload.referer.or(payload.page_url.clone()),
-        user_agent: payload.user_agent,
-        cookies: payload.cookies,
-        cookie_url: payload.cookie_url,
-        title: payload.title,
-        format: payload.format,
-        save_path: None,
-    };
-
-    match enqueue_download(&app, ext).await {
-        Ok(id) => {
-            (StatusCode::OK, Json(serde_json::json!({ "success": true, "id": id }))).into_response()
-        }
-        Err(e) => {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "success": false, "error": e })))
-                .into_response()
-        }
-    }
+    enqueue_response(
+        enqueue_download(
+            &app,
+            ExternalDownloadPayload {
+                url: payload.url,
+                filename: payload.filename,
+                referrer: payload.referer.or(payload.page_url),
+                user_agent: payload.user_agent,
+                cookies: payload.cookies,
+                cookie_url: payload.cookie_url,
+                title: payload.title,
+                format: payload.format,
+                save_path: None,
+            },
+        )
+        .await,
+    )
 }
 
 #[derive(Deserialize)]
@@ -153,112 +157,91 @@ pub(crate) async fn handle_api_upload(
     Json(payload): Json<UploadRequest>,
 ) -> Response {
     let state = app.state::<AppState>();
-    if let Err(status) =
-        check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))
-    {
+    if let Err(status) = check_api_token(&headers, &state, origin_of(&headers)) {
         return status.into_response();
     }
-
     if let Err(e) = validate_upload_b64_len(payload.data_base64.len()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "success": false, "error": e })),
-        )
-            .into_response();
+        return enqueue_response(Err(e));
     }
-
     let bytes = match base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
         payload.data_base64.trim(),
     ) {
         Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "success": false, "error": format!("invalid upload data: {e}") })),
-            )
-                .into_response();
-        }
+        Err(e) => return enqueue_response(Err(format!("invalid upload data: {e}"))),
     };
-
-    match ingest_uploaded_file(&app, &payload.filename, bytes, payload.page_url).await {
-        Ok(id) => {
-            (StatusCode::OK, Json(serde_json::json!({ "success": true, "id": id }))).into_response()
-        }
-        Err(e) => {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "success": false, "error": e })))
-                .into_response()
-        }
-    }
+    enqueue_response(ingest_uploaded_file(&app, &payload.filename, bytes, payload.page_url).await)
 }
 
-pub(crate) const API_PROTOCOL: u32 = 1;
+/// 2 = code pairing + `/api/downloads`.
+pub(crate) const API_PROTOCOL: u32 = 2;
 
 pub(crate) async fn handle_health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": true, "service": "falcon-dm", "protocol": API_PROTOCOL }))
+    Json(serde_json::json!({
+        "ok": true,
+        "service": "falcon-dm",
+        "protocol": API_PROTOCOL,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
-/// Pair browser extension ↔ desktop. Requires native proof + user approval.
+#[derive(Deserialize)]
+pub(crate) struct PairRequest {
+    pub extension_id: String,
+    /// Six digits the extension shows to the user.
+    pub code: String,
+}
+
+/// Pair browser extension ↔ desktop.
+///
+/// The browser sets `Origin` for extension requests and web pages cannot forge
+/// a `chrome-extension://` origin. An unknown extension gets nothing until the
+/// user compares the code in both windows and approves.
 pub(crate) async fn handle_pair(
     AxumState(app): AxumState<AppHandle>,
     headers: HeaderMap,
     Json(payload): Json<PairRequest>,
 ) -> Response {
-    let origin = headers.get("origin").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let Some(id) = extension_id_from_origin(origin) else {
+    let Some(id) = origin_of(&headers).and_then(extension_id_from_origin) else {
         return StatusCode::FORBIDDEN.into_response();
     };
     if id != payload.extension_id
         || !is_valid_extension_id(id)
-        || payload.challenge.is_empty()
-        || payload.challenge.len() > 256
-        || payload.proof.is_empty()
-        || payload.proof.len() > 128
+        || !is_valid_pair_code(&payload.code)
     {
         return StatusCode::FORBIDDEN.into_response();
     }
 
     let state = app.state::<AppState>();
-    if !state.pair_proofs.consume(&payload.challenge, id, &payload.proof) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
     let token = lock_or_recover(&state.api_token).clone();
     if token.trim().is_empty() || token == LEGACY_DEFAULT_API_TOKEN {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-
-    let allowed = lock_or_recover(&state.settings).allowed_extension_ids.clone();
-    if allowed.iter().any(|x| x == id) {
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "ok": true,
-                "token": token,
-                "extension_id": id,
-            })),
-        )
+    if lock_or_recover(&state.settings).allowed_extension_ids.iter().any(|x| x == id) {
+        return Json(serde_json::json!({ "ok": true, "token": token, "extension_id": id }))
             .into_response();
     }
 
-    // Pending consent — UI must approve
-    let mut pending = lock_or_recover(&state.pending_pair_ids);
-    if !pending.iter().any(|pending_id| pending_id == id) {
-        if pending.len() >= MAX_PENDING_PAIR_REQUESTS {
-            return StatusCode::TOO_MANY_REQUESTS.into_response();
+    let outcome = lock_or_recover(&state.pairing).request(id, &payload.code);
+    match outcome {
+        PairRequestOutcome::Rejected => StatusCode::FORBIDDEN.into_response(),
+        PairRequestOutcome::TooMany => StatusCode::TOO_MANY_REQUESTS.into_response(),
+        PairRequestOutcome::Pending { is_new } => {
+            if is_new {
+                let _ = app.emit(
+                    "pair-request",
+                    serde_json::json!({ "extension_id": id, "code": payload.code }),
+                );
+                // The prompt is useless behind other windows.
+                crate::show_main_window(&app);
+            }
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({ "ok": false, "pending": true, "extension_id": id })),
+            )
+                .into_response()
         }
-        pending.push_back(id.to_string());
     }
-    let _ = app.emit("pair-request", serde_json::json!({ "extension_id": id }));
-
-    (
-        StatusCode::ACCEPTED,
-        Json(serde_json::json!({
-            "ok": false,
-            "pending": true,
-            "extension_id": id,
-        })),
-    )
-        .into_response()
 }
 
 pub(crate) async fn handle_ping(
@@ -266,19 +249,100 @@ pub(crate) async fn handle_ping(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let state = app.state::<AppState>();
-    check_api_token(&headers, &state, headers.get("origin").and_then(|v| v.to_str().ok()))?;
+    check_api_token(&headers, &state, origin_of(&headers))?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// What the popup shows per row. No URL, headers or paths leave the app.
+#[derive(Serialize)]
+struct ApiDownload {
+    id: i64,
+    filename: String,
+    status: &'static str,
+    downloaded_size: u64,
+    total_size: u64,
+    speed: f64,
+    error_message: Option<String>,
+}
+
+impl From<Download> for ApiDownload {
+    fn from(row: Download) -> Self {
+        let live = matches!(row.status, DownloadStatus::Downloading | DownloadStatus::Merging);
+        Self {
+            id: row.id.unwrap_or_default(),
+            filename: row.filename,
+            status: row.status.as_str(),
+            downloaded_size: row.downloaded_size,
+            total_size: row.total_size,
+            speed: if live { row.speed } else { 0.0 },
+            error_message: (row.status == DownloadStatus::Failed)
+                .then_some(row.error_message)
+                .flatten(),
+        }
+    }
+}
+
+/// Live and recent downloads for the extension popup.
+pub(crate) async fn handle_downloads(
+    AxumState(app): AxumState<AppHandle>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let state = app.state::<AppState>();
+    check_api_token(&headers, &state, origin_of(&headers))?;
+    let rows = state.db.recent_activity(8).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let stats = state.db.download_stats().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let downloads: Vec<ApiDownload> = rows.into_iter().map(ApiDownload::from).collect();
+    Ok(Json(serde_json::json!({
+        "downloads": downloads,
+        "active": stats.active,
+        "queued": stats.queued,
+        "speed": stats.current_speed,
+    })))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::models::DownloadCategory;
 
     #[tokio::test]
     async fn health_is_unauthenticated_ok() {
         let Json(body) = handle_health().await;
         assert_eq!(body["ok"], true);
         assert_eq!(body["service"], "falcon-dm");
-        assert_eq!(body["protocol"], 1);
+        assert_eq!(body["protocol"], 2);
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn popup_rows_carry_no_url_cookies_or_paths() {
+        let row = Download {
+            id: Some(5),
+            url: "https://secret.example/token=abc".into(),
+            filename: "movie.mp4".into(),
+            save_path: "/Users/me/Downloads".into(),
+            total_size: 100,
+            downloaded_size: 40,
+            status: DownloadStatus::Paused,
+            category: DownloadCategory::Video,
+            speed: 99.0,
+            segments: 4,
+            priority: 1,
+            created_at: "t".into(),
+            completed_at: None,
+            error_message: Some("old error".into()),
+            referrer: Some("https://secret.example/page".into()),
+            user_agent: None,
+            cookies: Some("sid=1".into()),
+            archived: false,
+            attempts: 0,
+            retry_at: None,
+        };
+        let json = serde_json::to_string(&ApiDownload::from(row)).unwrap();
+        assert!(!json.contains("secret.example"), "{json}");
+        assert!(!json.contains("sid=1"), "{json}");
+        assert!(!json.contains("/Users/me"), "{json}");
+        assert!(json.contains("\"speed\":0.0"), "a paused row has no speed: {json}");
+        assert!(json.contains("\"error_message\":null"), "{json}");
     }
 }

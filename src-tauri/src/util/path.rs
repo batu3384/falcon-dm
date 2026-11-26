@@ -168,6 +168,24 @@ pub fn resolve_download_target(save_dir: &str, filename: &str) -> Result<PathBuf
     Ok(dir.join(sanitize_filename(&raw)))
 }
 
+/// Move a file without overwriting an existing destination.
+///
+/// Same volume: `hard_link` + `unlink` (atomic, O(1), fails if destination exists).
+/// Other volume or no hard-link support (exFAT): exclusive byte copy, then remove source.
+pub fn move_file_exclusive(source: &Path, destination: &Path) -> Result<(), String> {
+    match std::fs::hard_link(source, destination) {
+        Ok(()) => {
+            // Destination now owns the data. A leftover source name is only clutter.
+            let _ = std::fs::remove_file(source);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err("Destination file already exists".into())
+        }
+        Err(_) => copy_file_exclusive(source, destination),
+    }
+}
+
 /// Copy a file without overwriting an existing destination, then remove source.
 pub fn copy_file_exclusive(source: &Path, destination: &Path) -> Result<(), String> {
     if destination.exists() {
@@ -200,8 +218,102 @@ pub fn copy_file_exclusive(source: &Path, destination: &Path) -> Result<(), Stri
     Ok(())
 }
 
-/// Reject completed downloads that are obvious error pages — any file type allowed.
+/// Move into `destination`, or the next free `name (n).ext` if it got taken meanwhile.
+pub fn move_file_unique(
+    source: &Path,
+    destination: &Path,
+    reserved: &HashSet<String>,
+) -> Result<PathBuf, String> {
+    let dir = destination.parent().ok_or_else(|| "Invalid output path".to_string())?;
+    let name = destination
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid output filename".to_string())?;
+    let dir_str = dir.to_str().ok_or_else(|| "Save path is not valid UTF-8".to_string())?;
+    // Two workers may race for the same free name; the exclusive move decides the winner.
+    for _ in 0..4 {
+        let target = unique_download_target_reserved(dir_str, name, reserved)?;
+        match move_file_exclusive(source, &target) {
+            Ok(()) => return Ok(target),
+            Err(error) if error == "Destination file already exists" => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err("Could not pick a unique filename".into())
+}
+
+/// Free bytes on the volume holding `path` (or its nearest existing ancestor).
+pub fn free_disk_space(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut probe = path;
+        while !probe.exists() {
+            probe = probe.parent()?;
+        }
+        let c_path = std::ffi::CString::new(probe.as_os_str().as_bytes()).ok()?;
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: c_path is NUL-terminated and stat points to writable memory of the right size.
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+        if rc != 0 {
+            return None;
+        }
+        // SAFETY: statvfs returned 0, so the struct is initialized.
+        let stat = unsafe { stat.assume_init() };
+        // Field widths differ per platform (u32 blocks on macOS, u64 on Linux).
+        #[allow(clippy::unnecessary_cast)]
+        let free = (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
+        Some(free)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// File types whose real content legitimately starts with `<` or `{`.
+fn is_text_like_extension(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).is_some_and(|ext| {
+        matches!(
+            ext.as_str(),
+            "html"
+                | "htm"
+                | "xhtml"
+                | "xml"
+                | "svg"
+                | "json"
+                | "txt"
+                | "csv"
+                | "md"
+                | "js"
+                | "css"
+                | "plist"
+                | "rss"
+                | "atom"
+                | "opml"
+                | "gpx"
+                | "kml"
+                | "srt"
+                | "vtt"
+                | "m3u"
+                | "m3u8"
+                | "mpd"
+        )
+    })
+}
+
+/// Reject completed downloads that are obvious error pages.
+///
+/// Only tiny files are sniffed, and only when the name promises a binary type:
+/// a 200-byte `config.json` or `icon.svg` is a valid download.
 pub fn validate_completed_file(path: &Path) -> Result<u64, String> {
+    validate_completed_file_named(path, path)
+}
+
+/// Like `validate_completed_file`, but the type hint comes from `named`
+/// (a `.part` file is validated against the final destination name).
+pub fn validate_completed_file_named(path: &Path, named: &Path) -> Result<u64, String> {
     if !path.exists() {
         return Err("Downloaded file not found".into());
     }
@@ -210,8 +322,7 @@ pub fn validate_completed_file(path: &Path) -> Result<u64, String> {
     if size == 0 {
         return Err("Downloaded file is empty".into());
     }
-    // Only sniff tiny payloads — likely HTML/JSON/protobuf error responses
-    if size < 512 {
+    if size < 512 && !is_text_like_extension(named) {
         let mut head = [0u8; 64];
         let read = {
             use std::io::Read;
@@ -426,6 +537,69 @@ mod tests {
     }
 
     #[test]
+    fn move_file_exclusive_renames_without_overwriting() {
+        let root = std::env::temp_dir().join(format!("falcon-dm-move-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join(".a.part");
+        let destination = root.join("a.bin");
+        std::fs::write(&source, b"payload").unwrap();
+        move_file_exclusive(&source, &destination).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"payload");
+
+        let second = root.join(".b.part");
+        std::fs::write(&second, b"other").unwrap();
+        assert_eq!(
+            move_file_exclusive(&second, &destination).unwrap_err(),
+            "Destination file already exists"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"payload");
+        assert!(second.exists(), "a refused move must keep the source");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn move_file_unique_picks_next_free_name() {
+        let root = std::env::temp_dir().join(format!("falcon-dm-moveu-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("clip.mp4"), b"existing").unwrap();
+        let source = root.join(".clip.part");
+        std::fs::write(&source, b"new").unwrap();
+        let landed = move_file_unique(&source, &root.join("clip.mp4"), &HashSet::new()).unwrap();
+        assert_eq!(landed.file_name().unwrap(), "clip (1).mp4");
+        assert_eq!(std::fs::read(root.join("clip.mp4")).unwrap(), b"existing");
+        assert_eq!(std::fs::read(&landed).unwrap(), b"new");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tiny_text_downloads_are_valid_but_tiny_binary_error_pages_are_not() {
+        let root = std::env::temp_dir().join(format!("falcon-dm-tiny-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let json = root.join("config.json");
+        std::fs::write(&json, b"{\"ok\":true}").unwrap();
+        assert!(validate_completed_file(&json).is_ok());
+        let svg = root.join("icon.svg");
+        std::fs::write(&svg, b"<svg></svg>").unwrap();
+        assert!(validate_completed_file(&svg).is_ok());
+        let zip = root.join("archive.zip");
+        std::fs::write(&zip, b"<html>403</html>").unwrap();
+        assert!(validate_completed_file(&zip).is_err());
+        // A part file is judged by the name it will get.
+        let part = root.join(".config.json.7.falcon.part");
+        std::fs::write(&part, b"{\"ok\":true}").unwrap();
+        assert!(validate_completed_file_named(&part, &json).is_ok());
+        assert!(validate_completed_file_named(&part, &zip).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn free_disk_space_reports_for_missing_child_path() {
+        let missing = std::env::temp_dir().join("falcon-dm-free-space-missing/child/file.bin");
+        assert!(free_disk_space(&missing).is_some_and(|bytes| bytes > 0));
+    }
+
+    #[test]
     fn test_validate_open_path_rejects_etc() {
         let res = validate_open_path("/etc/passwd");
         assert!(res.is_err());
@@ -447,7 +621,7 @@ mod tests {
     fn test_validate_completed_file_rejects_tiny() {
         let dir = std::env::temp_dir().join("falcon_test_tiny");
         let _ = std::fs::create_dir_all(&dir);
-        let p = dir.join("error.html");
+        let p = dir.join("error.mp4");
         std::fs::write(&p, b"<html>error</html>").unwrap();
         assert!(validate_completed_file(&p).is_err());
         assert_eq!(inspect_download_dest(&p), ExistingDownloadDest::Occupied);

@@ -16,7 +16,7 @@ if verify_sha256 "$tmp/fixture" "00000000000000000000000000000000000000000000000
   exit 1
 fi
 
-if (cd "$ROOT" && RELEASE_MODE=1 ARCH=aarch64 ARIA2_SHA256="$expected" main); then
+if (cd "$ROOT" && RELEASE_MODE=1 ARCH=aarch64 main); then
   echo "release mode accepted missing ffmpeg variables" >&2
   exit 1
 fi
@@ -31,11 +31,13 @@ required = (
     "APPLE_CERTIFICATE_PASSWORD",
     "APPLE_SIGNING_CONFIGURED",
     'RELEASE_MODE: "1"',
-    'test -x "src-tauri/binaries/aria2c-${{ matrix.target }}"',
+    'test -x "src-tauri/binaries/ffmpeg-${{ matrix.target }}"',
 )
 missing = [needle for needle in required if needle not in workflow]
 if missing:
     raise SystemExit(f"release workflow contract missing: {missing}")
+if "aria2" in workflow.lower():
+    raise SystemExit("release workflow still references aria2")
 if "if: ${{ secrets.APPLE_CERTIFICATE" in workflow:
     raise SystemExit("release workflow must not use secrets directly in if conditions")
 PY

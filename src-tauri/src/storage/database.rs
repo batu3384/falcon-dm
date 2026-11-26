@@ -166,6 +166,13 @@ impl Database {
                    WHERE status IN ('Queued', 'Downloading', 'Paused', 'Merging')
                      AND archived = 0;",
             ),
+            // v4 — the aria2 engine is gone; automatic retries get a counter and
+            // a backoff deadline so a dead host cannot loop forever.
+            M::up(
+                "ALTER TABLE downloads DROP COLUMN aria2_gid;
+                 ALTER TABLE downloads ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE downloads ADD COLUMN retry_at INTEGER;",
+            ),
         ]);
         migrations.to_latest(&mut conn).map_err(|e| {
             DatabaseError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
@@ -197,8 +204,9 @@ mod tests {
             referrer: Some("https://example.com".to_string()),
             user_agent: Some("FalconDM/1.0".to_string()),
             cookies: None,
-            aria2_gid: None,
             archived: false,
+            attempts: 0,
+            retry_at: None,
         }
     }
 
@@ -491,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_paused_keeps_progress_failed_resets() {
+    fn resume_keeps_progress_for_paused_and_failed_rows() {
         let db = Database::in_memory().unwrap();
         let mut paused = create_test_download("paused.bin");
         paused.status = DownloadStatus::Paused;
@@ -514,21 +522,115 @@ mod tests {
         assert!(db
             .resume_if_current(failed_id, &[DownloadStatus::Paused, DownloadStatus::Failed])
             .unwrap());
+        // Partial data stays on disk, so a retried row keeps its byte counts.
         let row = db.get_download(failed_id).unwrap();
         assert_eq!(row.status, DownloadStatus::Queued);
-        assert_eq!(row.downloaded_size, 0);
-        assert_eq!(row.total_size, 0);
+        assert_eq!(row.downloaded_size, 100);
+        assert_eq!(row.total_size, 1000);
+        assert_eq!(row.error_message, None);
     }
 
     #[test]
-    fn legacy_aria2_gid_can_be_cleared_atomically() {
+    fn progress_writes_are_authoritative_and_ignore_stopped_rows() {
         let db = Database::in_memory().unwrap();
-        let mut download = create_test_download("legacy.mp4");
-        download.aria2_gid = Some("gid-1".into());
-        let id = db.insert_download(&download).unwrap();
+        let mut live = create_test_download("live.bin");
+        live.status = DownloadStatus::Downloading;
+        live.downloaded_size = 900;
+        live.total_size = 1000;
+        let id = db.insert_download(&live).unwrap();
+        // A transfer that restarted from zero must be able to lower the count.
+        assert!(db
+            .update_download_progress(id, 10, Some(2000), 5.0, &DownloadStatus::Downloading)
+            .unwrap());
+        let row = db.get_download(id).unwrap();
+        assert_eq!((row.downloaded_size, row.total_size), (10, 2000));
+        // Unknown total keeps the stored one.
+        db.update_download_progress(id, 20, None, 5.0, &DownloadStatus::Downloading).unwrap();
+        assert_eq!(db.get_download(id).unwrap().total_size, 2000);
+        // A late tick cannot revive a paused row.
+        db.set_status_if_current(id, &[DownloadStatus::Downloading], &DownloadStatus::Paused)
+            .unwrap();
+        assert!(!db
+            .update_download_progress(id, 999, None, 5.0, &DownloadStatus::Downloading)
+            .unwrap());
+        let row = db.get_download(id).unwrap();
+        assert_eq!((row.status, row.downloaded_size), (DownloadStatus::Paused, 20));
+    }
 
-        assert!(db.clear_aria2_gid_if_current(id, &[DownloadStatus::Queued]).unwrap());
-        assert!(db.get_download(id).unwrap().aria2_gid.is_none());
+    #[test]
+    fn v3_database_migrates_without_losing_rows() {
+        let temp_dir = std::env::temp_dir().join(format!("falcon_v3_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        {
+            // Schema as shipped before v4 (aria2_gid present, no retry columns).
+            let conn = rusqlite::Connection::open(temp_dir.join("falcon_dm.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE downloads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL,
+                    filename TEXT NOT NULL, save_path TEXT NOT NULL,
+                    total_size INTEGER DEFAULT 0, downloaded_size INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'Queued', category TEXT DEFAULT 'Other',
+                    speed REAL DEFAULT 0.0, segments INTEGER DEFAULT 8,
+                    priority INTEGER DEFAULT 1, created_at TEXT NOT NULL,
+                    completed_at TEXT, error_message TEXT, referrer TEXT,
+                    user_agent TEXT, cookies TEXT, aria2_gid TEXT,
+                    archived INTEGER NOT NULL DEFAULT 0);
+                 CREATE INDEX idx_downloads_status ON downloads(status);
+                 CREATE INDEX idx_downloads_category ON downloads(category);
+                 CREATE INDEX idx_downloads_archived ON downloads(archived);
+                 CREATE UNIQUE INDEX idx_downloads_active_url_unique ON downloads(url)
+                   WHERE status IN ('Queued', 'Downloading', 'Paused', 'Merging')
+                     AND archived = 0;
+                 INSERT INTO downloads (url, filename, save_path, status, created_at, aria2_gid)
+                   VALUES ('https://example.com/old.zip', 'old.zip', '/tmp', 'Completed',
+                           '2026-07-30T13:00:00Z', 'gid-legacy');
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+        let db = Database::init(&temp_dir).expect("v3 → v4 migration");
+        let rows = db.get_downloads(&DownloadFilter::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, "old.zip");
+        assert_eq!(rows[0].attempts, 0);
+        assert_eq!(rows[0].retry_at, None);
+        let conn = db.conn.get().unwrap();
+        let has_gid: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'aria2_gid'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_gid, 0, "aria2_gid column must be dropped");
+        drop(conn);
+        drop(db);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn retry_backoff_hides_row_from_queue_until_due() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("retry.bin");
+        download.status = DownloadStatus::Downloading;
+        let id = db.insert_download(&download).unwrap();
+        let now = 1_000_000i64;
+        assert!(db
+            .schedule_retry(id, &[DownloadStatus::Downloading], 2, now + 5_000, "HTTP 503")
+            .unwrap());
+        let row = db.get_download(id).unwrap();
+        assert_eq!(row.status, DownloadStatus::Queued);
+        assert_eq!(row.attempts, 2);
+        assert_eq!(row.error_message.as_deref(), Some("HTTP 503"));
+        assert!(db.take_queued(5, now).unwrap().is_empty(), "backoff not elapsed");
+        assert_eq!(db.take_queued(5, now + 5_000).unwrap().len(), 1);
+
+        // A manual resume clears the counter and the deadline.
+        db.set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Paused).unwrap();
+        assert!(db.resume_if_current(id, &[DownloadStatus::Paused]).unwrap());
+        let row = db.get_download(id).unwrap();
+        assert_eq!((row.attempts, row.retry_at), (0, None));
+        assert_eq!(db.take_queued(5, now).unwrap().len(), 1);
     }
 
     #[test]
@@ -580,16 +682,6 @@ mod tests {
         };
         assert!(raw.starts_with("v1:"), "{raw}");
         assert!(!raw.contains("sid=legacy"));
-    }
-
-    #[test]
-    fn aria2_claim_is_single_winner() {
-        let db = Database::in_memory().unwrap();
-        let download = create_test_download("claim.bin");
-        let id = db.insert_download(&download).unwrap();
-        assert!(db.claim_aria2_download(id, "gid-1").unwrap());
-        assert!(!db.claim_aria2_download(id, "gid-2").unwrap());
-        assert_eq!(db.get_download(id).unwrap().aria2_gid.as_deref(), Some("gid-1"));
     }
 
     #[test]
@@ -683,7 +775,7 @@ mod tests {
         let mut high = create_test_download("high.bin");
         high.priority = 9;
         db.insert_download(&high).unwrap();
-        let rows = db.take_queued(1).unwrap();
+        let rows = db.take_queued(1, 0).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].filename, "high.bin");
     }

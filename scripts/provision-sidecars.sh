@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# ponytail: provision aria2c + ffmpeg sidecar binaries for both macOS architectures.
+# ponytail: provision the ffmpeg sidecar binary for both macOS architectures.
 #
-# The repo ships arm64 (Apple Silicon) binaries. Intel Macs need x86_64 builds.
-# aria2 has no official macOS binary release, so we build/copy from Homebrew.
-# ffmpeg x86_64 comes from evermeet.cx (static).
+# arm64 (Apple Silicon) is copied from Homebrew. Intel x86_64 is a static build
+# downloaded from FFMPEG_URL and pinned by FFMPEG_SHA256.
 #
 # Usage:
 #   ./scripts/provision-sidecars.sh            # provision whatever's missing
 #   ARCH=x86_64 ./scripts/provision-sidecars.sh # force a specific arch
 #
-# CI (Faz 3) runs this before `tauri build` on a macOS-13 (x86_64) runner to
-# produce Intel artifacts, and on macOS-14 (arm64) for Apple Silicon.
+# release.yml runs this before `tauri build` on a macOS-13 (x86_64) runner for
+# Intel artifacts and on macOS-14 (arm64) for Apple Silicon.
 #
 # This script is idempotent — it skips binaries that already exist.
 set -euo pipefail
@@ -109,16 +108,11 @@ main() {
     arch="aarch64"
   fi
   local target_triple="${arch}-apple-darwin"
-  local aria2_sha256="${ARIA2_SHA256:-}"
   local ffmpeg_url="${FFMPEG_URL:-}"
   local ffmpeg_sha256="${FFMPEG_SHA256:-}"
   local release_mode="${RELEASE_MODE:-0}"
 
   if [[ "$release_mode" == "1" ]]; then
-    [[ -n "$aria2_sha256" ]] || {
-      echo "  ERROR: ARIA2_SHA256 is required in release mode" >&2
-      exit 1
-    }
     [[ -n "$ffmpeg_url" ]] || {
       echo "  ERROR: FFMPEG_URL is required in release mode" >&2
       exit 1
@@ -133,40 +127,6 @@ main() {
 
   echo "Provisioning sidecars for $target_triple in $binary_dir"
 
-  # ----- aria2c -----
-  local aria2_bin="$binary_dir/aria2c-$target_triple"
-  if [[ -x "$aria2_bin" ]] && sidecar_runs "$aria2_bin" --version; then
-    if [[ -n "$aria2_sha256" ]]; then
-      verify_sha256 "$aria2_bin" "$aria2_sha256"
-    fi
-    echo "  aria2c already present, skipping"
-  else
-    if [[ -x "$aria2_bin" ]]; then
-      echo "  aria2c present but broken — re-provisioning"
-      rm -f "$aria2_bin"
-    fi
-    echo "  aria2c missing — provisioning from Homebrew"
-    local brew_bin
-    if [[ "$arch" == "aarch64" ]]; then
-      brew_bin="/opt/homebrew/bin/aria2c"
-    else
-      brew_bin="/usr/local/bin/aria2c"
-    fi
-    if [[ -x "$brew_bin" ]]; then
-      # Homebrew verifies its bottle; optionally pin the copied binary too.
-      local real
-      real="$(real_path "$brew_bin")"
-      copy_verified "$real" "$aria2_bin" "$aria2_sha256"
-      echo "  aria2c copied from $real"
-    else
-      echo "  ERROR: aria2c not found at $brew_bin" >&2
-      echo "  Install it: brew install aria2" >&2
-      echo "  (for x86_64 on Apple Silicon, install Rosetta + x86 Homebrew first)" >&2
-      exit 1
-    fi
-  fi
-  verify_binary_arch "$aria2_bin" "$arch" "$release_mode"
- 
   # ----- ffmpeg -----
   local ffmpeg_bin="$binary_dir/ffmpeg-$target_triple"
   if [[ -x "$ffmpeg_bin" ]] && sidecar_runs "$ffmpeg_bin" -version; then

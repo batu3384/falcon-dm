@@ -1,10 +1,9 @@
 mod commands;
 pub mod download;
-pub mod extension_host;
 mod lifecycle;
 mod local_api;
 pub mod log_buffer;
-pub mod native_messaging;
+pub mod pairing;
 pub mod settings;
 pub mod storage;
 pub mod util;
@@ -12,21 +11,20 @@ pub mod util;
 pub use lifecycle::run;
 
 use chrono::Utc;
-use download::engine::Aria2Engine;
-use download::queue::QueueManager;
-use native_messaging::PairProofStore;
+use download::queue::{QueueManager, StopReason};
+use pairing::PairingState;
 use serde::Deserialize;
 use settings::Settings;
-use storage::models::{Download, DownloadCategory, DownloadStatus};
+use storage::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
 use storage::Database;
 use storage::InsertDownloadResult;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 use util::{
-    app_data_dir, default_download_dir, full_file_path, inspect_download_dest, is_googlevideo_url,
-    is_hls_url, is_junk_media_url, is_youtube_host, lock_or_recover, normalize_media_url,
-    resolve_download_filename, resolve_download_target, resolve_save_dir, sanitize_filename,
-    sanitize_header_value, unique_download_filename, validate_completed_file,
-    validate_fetch_url_async, write_file_exclusive, ExistingDownloadDest, LEGACY_DEFAULT_API_TOKEN,
+    default_download_dir, is_googlevideo_url, is_hls_url, is_junk_media_url, is_youtube_host,
+    lock_or_recover, normalize_media_url, resolve_download_filename, resolve_download_target,
+    resolve_save_dir, sanitize_filename, sanitize_header_value, unique_download_filename,
+    validate_enqueue_url, write_file_exclusive, LEGACY_DEFAULT_API_TOKEN,
 };
 
 use axum::http::{HeaderMap, StatusCode};
@@ -47,8 +45,6 @@ pub(crate) fn token_matches(provided: &str, expected: &str) -> bool {
     }
     p.ct_eq(e).into()
 }
-
-pub(crate) const MAX_PENDING_PAIR_REQUESTS: usize = 32;
 
 pub(crate) fn extension_id_from_origin(origin: &str) -> Option<&str> {
     origin.strip_prefix("chrome-extension://").or_else(|| origin.strip_prefix("edge-extension://"))
@@ -99,56 +95,58 @@ pub(crate) fn cookie_url_matches_download(download_url: &str, cookie_url: Option
     false
 }
 
-/// Pause/resume (IPC + tray) must notify the UI — the 5s list poll and
-/// sticky Paused ticks otherwise leave the row looking paused while it runs.
-pub(crate) fn emit_download_status(app: &AppHandle, db: &Database, id: i64, status: &str) {
+/// Push the authoritative row to the UI after any status or metadata change.
+/// Progress events only carry bytes; this is what moves a row between states.
+pub(crate) fn emit_row(app: &AppHandle, db: &Database, id: i64) {
+    if let Ok(row) = db.get_download(id) {
+        let _ = app.emit("download-updated", &row);
+    }
+}
+
+fn is_turkish(lang: &str) -> bool {
+    lang.trim().split(['-', '_', '.']).next().is_some_and(|tag| tag.eq_ignore_ascii_case("tr"))
+}
+
+/// OS notification for a finished or failed download. Skipped while the window
+/// is focused: the list already shows it.
+pub(crate) fn notify_download(app: &AppHandle, db: &Database, id: i64, success: bool) {
+    let window = app.get_webview_window("main");
+    if window.as_ref().is_some_and(|w| w.is_focused().unwrap_or(false)) {
+        return;
+    }
     let Ok(row) = db.get_download(id) else {
         return;
     };
-    let _ = app.emit(
-        "download-progress",
-        serde_json::json!({
-            "id": id,
-            "downloaded_size": row.downloaded_size,
-            "total_size": row.total_size.max(row.downloaded_size),
-            "speed": 0.0,
-            "status": status,
-            "connections": 0,
-            "error_message": row.error_message,
-        }),
-    );
+    let turkish = is_turkish(&lock_or_recover(&app.state::<AppState>().ui_lang));
+    let title = match (success, turkish) {
+        (true, true) => "İndirme tamamlandı",
+        (true, false) => "Download complete",
+        (false, true) => "İndirme başarısız",
+        (false, false) => "Download failed",
+    };
+    let _ = app.notification().builder().title(title).body(&row.filename).show();
+    if let Some(window) = window {
+        let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
+    }
 }
 
-/// `resume_if_current` zeros Failed bytes. Leftover `.part` / HLS / error-page dest
-/// would resume corrupt data or block with "already exists".
-pub(crate) fn clear_failed_retry_artifacts(save_path: &str, filename: &str, id: i64) {
-    if let Some(part) = download::http::part_path_for(save_path, filename, id) {
-        let _ = std::fs::remove_file(part);
-    }
-    if let Some(dir) = download::http::segment_dir_for(save_path, filename, id) {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-    let hls = download::hls::hls_session_dir(id);
-    let _ = std::fs::remove_dir_all(&hls);
-    if let Some(parent) = hls.parent() {
-        let _ = std::fs::remove_dir_all(parent.join(format!("hls-{id}")));
-    }
-    let dest = full_file_path(save_path, filename);
-    if inspect_download_dest(&dest) == ExistingDownloadDest::Occupied {
-        let _ = std::fs::remove_file(&dest);
-    }
+/// Remove every temp artifact a download may have left, whichever engine ran it.
+pub(crate) fn remove_download_artifacts(save_path: &str, filename: &str, id: i64) {
+    download::http::remove_artifacts(save_path, filename, id);
+    download::hls::remove_artifacts(id);
+    download::ytdlp::remove_artifacts(save_path, id);
 }
 
 pub struct AppState {
     pub db: Database,
-    pub engine: Aria2Engine,
     pub queue: QueueManager,
     pub api_token: Arc<Mutex<String>>,
     pub settings: Arc<Mutex<Settings>>,
     pub rate_bucket: Arc<Mutex<VecDeque<Instant>>>,
-    /// Extension IDs waiting for user approval (pair consent).
-    pub pending_pair_ids: Arc<Mutex<VecDeque<String>>>,
-    pub pair_proofs: Arc<PairProofStore>,
+    /// Extensions waiting for the user to compare codes and approve.
+    pub pairing: Arc<Mutex<PairingState>>,
+    /// UI language, for notifications and the tray menu.
+    pub ui_lang: Arc<Mutex<String>>,
 }
 
 pub(crate) fn show_main_window(app: &AppHandle) {
@@ -159,61 +157,86 @@ pub(crate) fn show_main_window(app: &AppHandle) {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Default)]
 pub(crate) struct ExternalDownloadPayload {
-    url: String,
-    filename: Option<String>,
-    referrer: Option<String>,
-    user_agent: Option<String>,
-    cookies: Option<String>,
-    cookie_url: Option<String>,
-    title: Option<String>,
+    pub url: String,
+    pub filename: Option<String>,
+    pub referrer: Option<String>,
+    pub user_agent: Option<String>,
+    pub cookies: Option<String>,
+    pub cookie_url: Option<String>,
+    pub title: Option<String>,
     /// yt-dlp `-f` selector (preferred over `#falconfmt=` fragment).
-    format: Option<String>,
-    save_path: Option<String>,
+    pub format: Option<String>,
+    pub save_path: Option<String>,
+}
+
+/// A selector with no video stream (`bestaudio[ext=m4a]/bestaudio`).
+pub(crate) fn is_audio_only_format(format: &str) -> bool {
+    let format = format.trim().to_ascii_lowercase();
+    !format.is_empty()
+        && format.split('/').all(|alt| {
+            let alt = alt.trim();
+            (alt.starts_with("bestaudio") || alt.starts_with("ba")) && !alt.contains('+')
+        })
+}
+
+fn with_extension(filename: &str, ext: &str) -> String {
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("download");
+    format!("{stem}.{ext}")
 }
 
 pub(crate) async fn enqueue_download(
     app: &AppHandle,
     payload: ExternalDownloadPayload,
 ) -> Result<i64, String> {
-    if payload.url.trim().to_lowercase().starts_with("magnet:") {
-        return Err("ERR_UNSUPPORTED_MAGNET".into());
-    }
-    if validate_fetch_url_async(&payload.url).await.is_err() {
-        return Err("invalid url".into());
+    // No DNS here: a URL added while offline must queue and retry later.
+    if let Err(reason) = validate_enqueue_url(&payload.url) {
+        return Err(if reason == "ERR_UNSUPPORTED_MAGNET" { reason } else { "invalid url".into() });
     }
     if is_junk_media_url(&payload.url) {
         return Err("not a real media url".into());
     }
 
-    const DEFAULT_YTDLP_FORMAT: &str =
-        "bestvideo[height<=1080]+bestaudio/best[height<=1080]/bv*+ba/b";
     let watch_url = util::youtube_page_url_for_download(&payload.url, payload.referrer.as_deref());
-    let base = watch_url.clone().unwrap_or_else(|| normalize_media_url(&payload.url));
+    let base = watch_url.clone().unwrap_or_else(|| normalize_media_url(payload.url.trim()));
     let format = payload.format.as_deref().or(if watch_url.is_some() {
-        Some(DEFAULT_YTDLP_FORMAT)
+        Some(download::ytdlp::DEFAULT_VIDEO_FORMAT)
     } else {
         None
     });
     let url = util::attach_falcon_format(&base, format);
     let force_hls = is_hls_url(&url);
-    let filename = resolve_download_filename(
+    let mut filename = resolve_download_filename(
         &url,
         payload.filename.as_deref(),
         payload.title.as_deref(),
         force_hls,
     );
+    // yt-dlp decides the container. Give the row the extension it will end up with.
+    let via_ytdlp = download::queue::route_queued_download(&url, payload.referrer.as_deref())
+        == download::queue::DownloadRoute::YtDlp;
+    if via_ytdlp {
+        let (_, selector) = util::split_falcon_format(&url);
+        let audio = selector.as_deref().is_some_and(is_audio_only_format);
+        let current = filename.rsplit('.').next().unwrap_or("");
+        if audio && !download::ytdlp::is_audio_extension(current) {
+            filename = with_extension(&filename, "m4a");
+        } else if !audio && !filename.to_lowercase().ends_with(".mp4") {
+            filename = with_extension(&filename, "mp4");
+        }
+    }
     let category = DownloadCategory::from_filename(&filename);
 
     // ponytail: apply a per-site profile if one matches. Profile fields only fill
     // GAPS — an explicit value from the payload (the user/extension's choice)
     // always wins. save_subdir overrides the category folder when set.
-    let settings = {
-        let state = app.state::<AppState>();
-        let cached = lock_or_recover(&state.settings).clone();
-        cached
-    };
+    let state = app.state::<AppState>();
+    let settings = current_settings(&state);
     let profile = settings.profile_for_url(&url);
     let save_subdir = profile.and_then(|p| p.save_subdir.clone());
     let requested_save = payload
@@ -228,13 +251,12 @@ pub(crate) async fn enqueue_download(
     let prof_referrer = profile.and_then(|p| p.referrer.clone());
     let prof_ua = profile.and_then(|p| p.user_agent.clone());
     let prof_cookies = profile.and_then(|p| p.cookies.clone());
-
-    let state = app.state::<AppState>();
+    let referrer = payload.referrer.as_deref().or(prof_referrer.as_deref());
 
     let mut dl = Download {
         id: None,
         url: url.clone(),
-        filename: filename.clone(),
+        filename,
         save_path,
         total_size: 0,
         downloaded_size: 0,
@@ -246,19 +268,17 @@ pub(crate) async fn enqueue_download(
         created_at: Utc::now().to_rfc3339(),
         completed_at: None,
         error_message: None,
-        referrer: resolve_media_referer(
-            &url,
-            payload.referrer.as_deref().or(prof_referrer.as_deref()),
-            payload.referrer.as_deref().or(prof_referrer.as_deref()),
-        ),
+        referrer: resolve_media_referer(&url, referrer),
         user_agent: payload.user_agent.clone().or(prof_ua).map(|s| sanitize_header_value(&s)),
         cookies: payload
             .cookies
+            .filter(|c| !c.trim().is_empty())
             .filter(|_| cookie_url_matches_download(&url, payload.cookie_url.as_deref()))
             .or(prof_cookies)
             .map(|s| sanitize_header_value(&s)),
-        aria2_gid: None,
         archived: false,
+        attempts: 0,
+        retry_at: None,
     };
 
     let insert_result = state.db.insert_download_deduped(&mut dl).map_err(|e| e.to_string())?;
@@ -310,15 +330,11 @@ pub(crate) async fn ingest_uploaded_file(
     validate_upload_file(filename, bytes.len())?;
     let safe = sanitize_filename(filename.trim());
     let category = DownloadCategory::from_filename(&safe);
-    let settings = {
-        let state = app.state::<AppState>();
-        let cached = lock_or_recover(&state.settings).clone();
-        cached
-    };
+    let state = app.state::<AppState>();
+    let settings = current_settings(&state);
     let save_path = resolve_download_save_path_with(&settings, None, &category)?;
     let size = bytes.len() as u64;
     let now = Utc::now().to_rfc3339();
-    let state = app.state::<AppState>();
     let mut dl = Download {
         id: None,
         url: source_page.unwrap_or_else(|| "blob:".into()),
@@ -337,8 +353,9 @@ pub(crate) async fn ingest_uploaded_file(
         referrer: None,
         user_agent: None,
         cookies: None,
-        aria2_gid: None,
         archived: false,
+        attempts: 0,
+        retry_at: None,
     };
     let insert_result = state.db.insert_download_deduped(&mut dl).map_err(|e| e.to_string())?;
     let id = insert_result.id();
@@ -346,14 +363,73 @@ pub(crate) async fn ingest_uploaded_file(
         return Ok(id);
     }
     let dest = resolve_download_target(&save_path, &dl.filename)?;
-    if let Err(e) = write_file_exclusive(&dest, &bytes) {
+    let write = tokio::task::spawn_blocking(move || write_file_exclusive(&dest, &bytes))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|inner| inner);
+    if let Err(e) = write {
         let _ = state.db.delete_download(id);
         return Err(format!("Could not save upload: {e}"));
     }
     dl.id = Some(id);
     let _ = app.emit("download-added", &dl);
-    let _ = app.emit("download-completed", &dl);
     Ok(id)
+}
+
+/// Pause every running or queued download (toolbar, tray, command palette).
+pub(crate) async fn pause_all(app: &AppHandle) -> usize {
+    let state = app.state::<AppState>();
+    let rows = state
+        .db
+        .get_downloads(&DownloadFilter {
+            statuses: Some(vec![
+                DownloadStatus::Queued,
+                DownloadStatus::Downloading,
+                DownloadStatus::Merging,
+            ]),
+            ..Default::default()
+        })
+        .unwrap_or_default();
+    // Signal all workers first so they stop in parallel, then settle each row.
+    for row in &rows {
+        if let Some(id) = row.id {
+            state.queue.request_stop(id, StopReason::Pause);
+        }
+    }
+    let mut paused = 0;
+    for row in rows {
+        if let Some(id) = row.id {
+            if state.queue.pause(&state.db, app, id).await {
+                paused += 1;
+            }
+        }
+    }
+    paused
+}
+
+/// Requeue every paused or failed download.
+pub(crate) fn resume_all(app: &AppHandle) -> usize {
+    let state = app.state::<AppState>();
+    let rows = state
+        .db
+        .get_downloads(&DownloadFilter {
+            statuses: Some(vec![DownloadStatus::Paused, DownloadStatus::Failed]),
+            ..Default::default()
+        })
+        .unwrap_or_default();
+    let mut resumed = 0;
+    for row in rows {
+        let Some(id) = row.id else { continue };
+        if state
+            .db
+            .resume_if_current(id, &[DownloadStatus::Paused, DownloadStatus::Failed])
+            .unwrap_or(false)
+        {
+            emit_row(app, &state.db, id);
+            resumed += 1;
+        }
+    }
+    resumed
 }
 
 pub(crate) fn handle_deep_link_url(app: &AppHandle, raw: &str) {
@@ -375,10 +451,11 @@ pub(crate) fn current_settings(state: &AppState) -> Settings {
 }
 
 pub(crate) fn resolve_download_save_path(
+    state: &AppState,
     requested: Option<&str>,
     category: &DownloadCategory,
 ) -> Result<String, String> {
-    resolve_download_save_path_with(&Settings::load(&app_data_dir()), requested, category)
+    resolve_download_save_path_with(&current_settings(state), requested, category)
 }
 
 fn resolve_download_save_path_with(
@@ -405,7 +482,7 @@ fn resolve_download_save_path_with(
     let preferred = requested
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| settings.path_for_category(category.as_str()))
+        .or_else(|| settings.path_for_category(category.as_str()).filter(|p| !p.trim().is_empty()))
         .unwrap_or_else(|| root.to_string_lossy().to_string());
 
     match resolve_save_dir(&preferred, &root) {
@@ -453,38 +530,14 @@ pub(crate) fn check_api_token(
     Ok(())
 }
 
-fn resolve_media_referer(
-    url: &str,
-    page_url: Option<&str>,
-    referer: Option<&str>,
-) -> Option<String> {
-    let page = page_url.filter(|s| !s.is_empty());
-    let r = referer.filter(|s| !s.is_empty()).or(page);
+fn resolve_media_referer(url: &str, referer: Option<&str>) -> Option<String> {
+    let r = referer.filter(|s| !s.is_empty());
     let resolved = if is_googlevideo_url(url) || util::is_youtube_watch_url(url) {
         r.or(Some("https://www.youtube.com/"))
     } else {
         r
     };
     resolved.map(sanitize_header_value)
-}
-
-pub(crate) fn finalize_completed_download(dl: &mut Download) -> Result<(), String> {
-    let file_path = full_file_path(&dl.save_path, &dl.filename);
-    let size = validate_completed_file(&file_path)?;
-    dl.downloaded_size = size;
-    dl.total_size = size.max(dl.total_size);
-    dl.status = DownloadStatus::Completed;
-    dl.completed_at = Some(Utc::now().to_rfc3339());
-    dl.error_message = None;
-    dl.speed = 0.0;
-    Ok(())
-}
-
-pub(crate) fn fail_invalid_download(dl: &mut Download, reason: String) {
-    // Never delete dest — it may be a pre-existing user file (F-31 class).
-    dl.status = DownloadStatus::Failed;
-    dl.error_message = Some(reason);
-    dl.speed = 0.0;
 }
 
 #[cfg(test)]
@@ -552,37 +605,24 @@ mod tests {
     }
 
     #[test]
-    fn fail_invalid_download_does_not_delete_existing_dest() {
-        let dir = std::env::temp_dir().join(format!("falcon-fail-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dest = dir.join("keep.bin");
-        std::fs::write(&dest, b"user-bytes").unwrap();
-        let mut dl = Download {
-            id: Some(1),
-            url: "https://example.com/a".into(),
-            filename: "keep.bin".into(),
-            save_path: dir.to_string_lossy().into(),
-            total_size: 10,
-            downloaded_size: 10,
-            status: DownloadStatus::Downloading,
-            category: DownloadCategory::Other,
-            speed: 1.0,
-            segments: 1,
-            priority: 1,
-            created_at: "t".into(),
-            completed_at: None,
-            error_message: None,
-            referrer: None,
-            user_agent: None,
-            cookies: None,
-            aria2_gid: None,
-            archived: false,
-        };
-        fail_invalid_download(&mut dl, "invalid".into());
-        assert_eq!(std::fs::read(&dest).unwrap(), b"user-bytes");
-        assert_eq!(dl.status, DownloadStatus::Failed);
-        let _ = std::fs::remove_file(&dest);
-        let _ = std::fs::remove_dir(&dir);
+    fn audio_only_selectors_are_recognized() {
+        assert!(is_audio_only_format("bestaudio[ext=m4a]/bestaudio"));
+        assert!(is_audio_only_format("ba"));
+        assert!(!is_audio_only_format("bestvideo[height<=720]+bestaudio/best[height<=720]"));
+        assert!(!is_audio_only_format(download::ytdlp::DEFAULT_VIDEO_FORMAT));
+        assert!(!is_audio_only_format("bestaudio/best"));
+        assert!(!is_audio_only_format(""));
+        assert_eq!(with_extension("My Song.webm", "m4a"), "My Song.m4a");
+        assert_eq!(with_extension("noext", "mp4"), "noext.mp4");
+    }
+
+    #[test]
+    fn turkish_locale_tags_are_detected() {
+        assert!(is_turkish("tr"));
+        assert!(is_turkish("tr-TR"));
+        assert!(is_turkish("tr_TR.UTF-8"));
+        assert!(!is_turkish("en"));
+        assert!(!is_turkish("en_US"));
     }
 
     #[test]
@@ -607,43 +647,38 @@ mod tests {
     }
 
     #[test]
-    fn failed_retry_clears_occupied_part_not_complete() {
-        let dir = std::env::temp_dir().join(format!("falcon-retry-{}", std::process::id()));
+    fn artifacts_of_every_engine_are_removed() {
+        let dir = std::env::temp_dir().join(format!("falcon-artifacts-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let save = dir.to_string_lossy().to_string();
-        let retry_id = 1_000_000_000_000i64 + i64::from(std::process::id());
-        let occupied = dir.join("bad.bin");
-        std::fs::write(&occupied, b"<html>err</html>").unwrap();
-        let complete = dir.join("keep.bin");
-        std::fs::write(&complete, vec![0u8; 1024]).unwrap();
-        let part = crate::download::http::part_path_for(&save, "bad.bin", retry_id).unwrap();
+        let id = 1_000_000_000_000i64 + i64::from(std::process::id());
+        let part = download::http::part_path_for(&save, "a.bin", id).unwrap();
+        let state = download::http::state_path_for(&save, "a.bin", id).unwrap();
         std::fs::write(&part, b"partial").unwrap();
-        let segs = crate::download::http::segment_dir_for(&save, "bad.bin", retry_id).unwrap();
-        std::fs::create_dir_all(&segs).unwrap();
-        std::fs::write(segs.join("x"), b"s").unwrap();
+        std::fs::write(&state, b"{}").unwrap();
+        let run_dir = download::ytdlp::run_dir_for(&save, id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("output.f140.m4a.part"), b"x").unwrap();
+        let user_file = dir.join("a.bin");
+        std::fs::write(&user_file, b"finished file").unwrap();
 
-        clear_failed_retry_artifacts(&save, "bad.bin", retry_id);
-        assert!(!occupied.exists());
-        assert!(!part.exists());
-        assert!(!segs.exists());
-
-        clear_failed_retry_artifacts(&save, "keep.bin", retry_id + 1);
-        assert_eq!(std::fs::read(&complete).unwrap().len(), 1024);
+        remove_download_artifacts(&save, "a.bin", id);
+        assert!(!part.exists() && !state.exists() && !run_dir.exists());
+        assert_eq!(std::fs::read(&user_file).unwrap(), b"finished file", "never the real file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn hijack_api_state(token: &str, ext_id: &str) -> AppState {
+    fn api_state(token: &str, ext_id: &str) -> AppState {
         let settings =
             Settings { allowed_extension_ids: vec![ext_id.to_string()], ..Default::default() };
         AppState {
             db: Database::in_memory().unwrap(),
-            engine: Aria2Engine::new(),
             queue: QueueManager::new(),
             api_token: Arc::new(Mutex::new(token.to_string())),
             settings: Arc::new(Mutex::new(settings)),
             rate_bucket: Arc::new(Mutex::new(VecDeque::new())),
-            pending_pair_ids: Arc::new(Mutex::new(VecDeque::new())),
-            pair_proofs: Arc::new(PairProofStore::default()),
+            pairing: Arc::new(Mutex::new(PairingState::default())),
+            ui_lang: Arc::new(Mutex::new("en".into())),
         }
     }
 
@@ -651,18 +686,18 @@ mod tests {
     fn intercept_auth_requires_token_origin_and_allowlist() {
         let ext = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let token = "live-hijack-token";
-        let state = hijack_api_state(token, ext);
+        let state = api_state(token, ext);
         let origin = format!("chrome-extension://{ext}");
         let mut headers = HeaderMap::new();
         headers.insert("x-falcon-token", token.parse().unwrap());
         assert!(check_api_token(&headers, &state, Some(&origin)).is_ok());
         assert_eq!(check_api_token(&headers, &state, None), Err(StatusCode::FORBIDDEN));
-        let unknown = hijack_api_state(token, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let unknown = api_state(token, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert_eq!(check_api_token(&headers, &unknown, Some(&origin)), Err(StatusCode::FORBIDDEN));
         let mut bad = HeaderMap::new();
         bad.insert("x-falcon-token", "wrong".parse().unwrap());
         assert_eq!(check_api_token(&bad, &state, Some(&origin)), Err(StatusCode::UNAUTHORIZED));
-        let legacy = hijack_api_state(LEGACY_DEFAULT_API_TOKEN, ext);
+        let legacy = api_state(LEGACY_DEFAULT_API_TOKEN, ext);
         assert_eq!(
             check_api_token(&headers, &legacy, Some(&origin)),
             Err(StatusCode::UNAUTHORIZED)
