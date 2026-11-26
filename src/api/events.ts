@@ -1,6 +1,6 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { DownloadSchema, ProgressPayloadSchema } from '../lib/schema';
-import type { DownloadModel, ProgressPayload } from '../types';
+import { DownloadSchema, PairRequestSchema, ProgressPayloadSchema } from '../lib/schema';
+import type { DownloadModel, PairRequest, ProgressPayload } from '../types';
 
 export function parseDownloadEvent(payload: unknown): DownloadModel | null {
   const parsed = DownloadSchema.safeParse(payload);
@@ -12,38 +12,42 @@ export function parseProgressEvent(payload: unknown): ProgressPayload | null {
   return parsed.success ? parsed.data : null;
 }
 
-export function parsePairExtensionId(payload: unknown): string | null {
-  if (!payload || typeof payload !== 'object') return null;
-  const id = (payload as { extension_id?: unknown }).extension_id;
-  if (typeof id !== 'string') return null;
-  const trimmed = id.trim();
-  return trimmed || null;
+export function parsePairRequest(payload: unknown): PairRequest | null {
+  const parsed = PairRequestSchema.safeParse(payload);
+  return parsed.success ? parsed.data : null;
 }
 
-// ponytail: typed event listeners with zod validation. Each listen wrapper
-// parses the payload before handing it to the callback, so a malformed backend
-// event can't corrupt UI state. Returns the raw unlisten handle for cleanup.
+export function parseRemovedId(payload: unknown): number | null {
+  return typeof payload === 'number' && Number.isInteger(payload) ? payload : null;
+}
 
-export async function onDownloadAdded(cb: (d: DownloadModel) => void): Promise<UnlistenFn> {
-  return listen<unknown>('download-added', (event) => {
-    const parsed = parseDownloadEvent(event.payload);
-    if (!parsed) return;
-    cb(parsed);
+// Each wrapper validates the payload before the callback sees it, so a
+// malformed event cannot corrupt UI state.
+function on<T>(
+  name: string,
+  parse: (payload: unknown) => T | null,
+  cb: (value: T) => void,
+): Promise<UnlistenFn> {
+  return listen<unknown>(name, (event) => {
+    const value = parse(event.payload);
+    if (value !== null) cb(value);
   });
 }
 
-export async function onDownloadProgress(cb: (p: ProgressPayload) => void): Promise<UnlistenFn> {
-  return listen<unknown>('download-progress', (event) => {
-    const parsed = parseProgressEvent(event.payload);
-    if (!parsed) return;
-    cb(parsed);
-  });
-}
+/** A new row was created (manual add, extension, upload). */
+export const onDownloadAdded = (cb: (d: DownloadModel) => void) =>
+  on('download-added', parseDownloadEvent, cb);
 
-export async function onPairRequest(cb: (extensionId: string) => void): Promise<UnlistenFn> {
-  return listen<unknown>('pair-request', (event) => {
-    const id = parsePairExtensionId(event.payload);
-    if (!id) return;
-    cb(id);
-  });
-}
+/** Authoritative row after any status or metadata change. */
+export const onDownloadUpdated = (cb: (d: DownloadModel) => void) =>
+  on('download-updated', parseDownloadEvent, cb);
+
+export const onDownloadRemoved = (cb: (id: number) => void) =>
+  on('download-removed', parseRemovedId, cb);
+
+/** Byte counters of a running worker (about twice a second). */
+export const onDownloadProgress = (cb: (p: ProgressPayload) => void) =>
+  on('download-progress', parseProgressEvent, cb);
+
+export const onPairRequest = (cb: (request: PairRequest) => void) =>
+  on('pair-request', parsePairRequest, cb);

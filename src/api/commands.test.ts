@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { extractTauriError, localizeDownloadError } from './commands';
 
+const t = (key: string, options?: Record<string, unknown>) =>
+  options?.code ? `${key}:${options.code}` : key;
+
 describe('extractTauriError', () => {
   it('maps missing invoke to a human message', () => {
     document.documentElement.lang = 'en';
@@ -12,16 +15,31 @@ describe('extractTauriError', () => {
   it('keeps normal backend strings', () => {
     expect(extractTauriError('invalid url')).toBe('invalid url');
   });
+});
 
-  it('localizeDownloadError maps magnet and invalid url codes', () => {
-    const t = (key: string) =>
-      ({
-        'errors.unsupported_magnet': 'No magnet',
-        'errors.invalid_url': 'Bad URL',
-        'errors.junk_media_url': 'Junk',
-      })[key] || key;
-    expect(localizeDownloadError('ERR_UNSUPPORTED_MAGNET', t)).toBe('No magnet');
-    expect(localizeDownloadError('invalid url', t)).toBe('Bad URL');
-    expect(localizeDownloadError('not a real media url', t)).toBe('Junk');
+describe('localizeDownloadError', () => {
+  it('maps engine codes to messages', () => {
+    expect(localizeDownloadError('ERR_UNSUPPORTED_MAGNET', t)).toBe('errors.unsupported_magnet');
+    expect(localizeDownloadError('invalid url', t)).toBe('errors.invalid_url');
+    expect(localizeDownloadError('not a real media url', t)).toBe('errors.junk_media_url');
+    expect(localizeDownloadError('ERR_DISK_FULL', t)).toBe('errors.disk_full');
+    expect(localizeDownloadError('ERR_YTDLP_MISSING', t)).toBe('errors.ytdlp_missing');
+    expect(localizeDownloadError('ERR_YTDLP_PATH_INVALID: /bad/path', t)).toBe(
+      'errors.ytdlp_path_invalid',
+    );
+    expect(localizeDownloadError('ERR_HLS_LIVE', t)).toBe('errors.hls_live');
+  });
+
+  it('groups HTTP status codes by what the user can do', () => {
+    expect(localizeDownloadError('HTTP 403', t)).toBe('errors.http_forbidden:403');
+    expect(localizeDownloadError('HTTP 404', t)).toBe('errors.http_not_found:404');
+    expect(localizeDownloadError('HTTP 429', t)).toBe('errors.http_rate_limited:429');
+    expect(localizeDownloadError('HTTP 503', t)).toBe('errors.http_server:503');
+    expect(localizeDownloadError('HTTP 418', t)).toBe('errors.http_other:418');
+  });
+
+  it('strips the yt-dlp prefix and keeps unknown text', () => {
+    expect(localizeDownloadError('yt-dlp: Private video', t)).toBe('Private video');
+    expect(localizeDownloadError('something odd', t)).toBe('something odd');
   });
 });

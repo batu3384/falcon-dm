@@ -1,452 +1,321 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  CheckCircle2,
   AlertCircle,
-  Info,
-  Plus,
-  Play,
-  Pause,
-  Clock,
-  Settings,
+  CheckCircle2,
+  Download,
   Gauge,
-  Sun,
+  Info,
   Moon,
-  DownloadCloud,
-  Trash2,
+  PanelRight,
+  Pause,
+  Play,
+  Plus,
+  Puzzle,
   ScrollText,
-  BarChart3,
+  Settings,
   X,
 } from 'lucide-react';
 import './App.css';
-import TitleBar from './components/TitleBar';
 import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import DownloadList from './components/DownloadList';
-import NewDownloadModal from './components/NewDownloadModal';
-import { OnboardingWizard } from './components/OnboardingWizard';
-import { InspectorPanel } from './components/InspectorPanel';
 import StatusBar from './components/StatusBar';
-import { CommandPalette, type PaletteAction } from './components/CommandPalette';
-import { SchedulerModal } from './components/SchedulerModal';
-import { SettingsModal } from './components/SettingsModal';
+import { Inspector } from './components/Inspector';
+import NewDownloadSheet from './components/NewDownloadSheet';
+import { SettingsSheet, CLIPBOARD_KEY } from './components/settings/SettingsSheet';
+import { OnboardingWizard, ONBOARDING_KEY } from './components/OnboardingWizard';
+import { PairRequestDialog } from './components/PairRequestDialog';
+import { MoveRenameDialog } from './components/MoveRenameDialog';
 import { LogPanel } from './components/LogPanel';
-import { StatsPanel } from './components/StatsPanel';
-import { ErrorBoundary } from './components/ErrorBoundary';
+import { CommandPalette, type PaletteAction } from './components/CommandPalette';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { useDownloadsStore } from './store/downloads';
+import { useAppStore } from './store/app';
+import { useUiStore } from './store/ui';
 import { useToastStore } from './store/toast';
-import { onDownloadAdded, onDownloadProgress, onPairRequest } from './api/events';
+import {
+  onDownloadAdded,
+  onDownloadProgress,
+  onDownloadRemoved,
+  onDownloadUpdated,
+  onPairRequest,
+} from './api/events';
 import * as api from './api/commands';
-import { applyTheme, watchSystemTheme } from './types';
-import { getDownloadCapabilities } from './lib/downloadCapabilities';
-import { libraryCountsFromStats } from './lib/libraryCounts';
+import { applyTheme, formatSpeed, watchSystemTheme } from './types';
 import { useClipboardMonitor } from './hooks/useClipboardMonitor';
 import { isForegroundDialogOpen } from './hooks/useModalA11y';
 import { publicHttpUrlsFromMixedText } from './lib/publicHttpUrl';
-import { speedLimitFromSettings } from './lib/speedLimit';
+import { toggleSpeedLimit } from './lib/speedLimit';
+import { useDownloadActions } from './lib/useDownloadActions';
+
+function useDebounced(fn: () => void, ms: number) {
+  const timer = useRef<number | undefined>(undefined);
+  return useCallback(() => {
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(fn, ms);
+  }, [fn, ms]);
+}
 
 function App() {
   const { t, i18n } = useTranslation();
   const showToast = useToastStore((s) => s.showToast);
-  const statsBroken = useRef(false);
-  const toastBackgroundError = useCallback(
-    (error: unknown) => {
-      const msg = api.extractTauriError(error);
-      if (/invoke/i.test(msg) || /not connected|bağlı değil/.test(msg)) return;
-      showToast('error', msg);
-    },
-    [showToast],
-  );
+  const toasts = useToastStore((s) => s.toasts);
+  const dismissToast = useToastStore((s) => s.dismiss);
 
-  // Downloads store absorbs downloads/selection/loading state.
-  const {
-    downloads,
-    loading,
-    error,
-    selectedDownload,
-    selectedIds,
-    hasMore,
-    loadingMore,
-    fetchDownloads,
-    loadMoreDownloads,
-    retryFetch,
-    applyProgress,
-    addDownload,
-    selectDownload,
-    clearSelection,
-    syncSelectedFromList,
-  } = useDownloadsStore();
+  const rows = useDownloadsStore((s) => s.rows);
+  const selectedIds = useDownloadsStore((s) => s.selectedIds);
+  const primaryId = useDownloadsStore((s) => s.primaryId);
+  const refresh = useDownloadsStore((s) => s.refresh);
+  const upsert = useDownloadsStore((s) => s.upsert);
+  const remove = useDownloadsStore((s) => s.remove);
+  const applyProgress = useDownloadsStore((s) => s.applyProgress);
+  const select = useDownloadsStore((s) => s.select);
 
-  // Local UI state (not shared enough to deserve a store).
-  const [showOnboarding, setShowOnboarding] = useState(false);
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [clipboardMonitor, setClipboardMonitor] = useState(
-    () => localStorage.getItem('falcon_clipboard_monitor') === '1',
-  );
-  const [prefilledUrl, setPrefilledUrl] = useState('');
-  const [activeCategory, setActiveCategory] = useState('All Downloads');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [paletteOpen, setPaletteOpen] = useState(false);
+  const refreshStats = useAppStore((s) => s.refreshStats);
+  const refreshExtension = useAppStore((s) => s.refreshExtension);
+  const refreshSchedule = useAppStore((s) => s.refreshSchedule);
+  const showPairPrompt = useAppStore((s) => s.showPairPrompt);
+  const pairPrompt = useAppStore((s) => s.pairPrompt);
+  const stats = useAppStore((s) => s.stats);
+
+  const ui = useUiStore();
+  const actions = useDownloadActions();
   const [dragging, setDragging] = useState(false);
-  const [speedLimited, setSpeedLimited] = useState(false);
-  const [savedSpeedLimit, setSavedSpeedLimit] = useState(0);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [schedulerOpen, setSchedulerOpen] = useState(false);
-  const [schedulerActive, setSchedulerActive] = useState(false);
-  const [logsOpen, setLogsOpen] = useState(false);
-  const [statsOpen, setStatsOpen] = useState(false);
-  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
-  const [libraryCounts, setLibraryCounts] = useState<Record<string, number>>({});
+  const [clipboardMonitor, setClipboardMonitor] = useState(
+    () => localStorage.getItem(CLIPBOARD_KEY) === '1',
+  );
+  const statsLater = useDebounced(
+    useCallback(() => void refreshStats(), [refreshStats]),
+    300,
+  );
 
-  // Keep inspector in sync with live list (was a useEffect in App before).
+  // First load, theme and onboarding.
   useEffect(() => {
-    syncSelectedFromList();
-  }, [downloads, syncSelectedFromList]);
-
-  useEffect(() => {
-    void api.setUiLanguage(i18n.language).catch(toastBackgroundError);
-  }, [i18n.language, toastBackgroundError]);
-
-  useEffect(() => {
-    const onboardingComplete = localStorage.getItem('onboarding_complete');
-    if (!onboardingComplete) setShowOnboarding(true);
-
+    watchSystemTheme();
     api
       .getSettings()
       .then((s) => applyTheme(s.theme))
-      .catch((error) => {
+      .catch((e) => {
         applyTheme('system');
-        const msg = api.extractTauriError(error);
-        if (msg.includes('settings.json is corrupt')) showToast('error', msg);
+        const msg = api.extractTauriError(e);
+        if (msg.includes('corrupt')) showToast('error', t('errors.settings_corrupt'));
       });
-    watchSystemTheme();
+    if (!localStorage.getItem(ONBOARDING_KEY)) useUiStore.getState().setOnboardingOpen(true);
+    void refresh();
+    void refreshStats();
+    void refreshExtension();
+    void refreshSchedule();
+  }, [refresh, refreshStats, refreshExtension, refreshSchedule, showToast, t]);
 
-    fetchDownloads();
-    const refreshLibraryCounts = () => {
-      api
-        .getStats()
-        .then((stats) => {
-          statsBroken.current = false;
-          setLibraryCounts(libraryCountsFromStats(stats));
-        })
-        .catch((error) => {
-          if (statsBroken.current) return;
-          statsBroken.current = true;
-          toastBackgroundError(error);
-        });
-    };
-    refreshLibraryCounts();
-
-    const refreshTimer = setInterval(() => {
-      fetchDownloads();
-      refreshLibraryCounts();
-    }, 5000);
-
-    const unlistenAdded = onDownloadAdded((d) => {
-      addDownload(d);
-      showToast('success', t('app.download_captured', { name: d.filename }));
-    });
-
-    const unlistenProgress = onDownloadProgress((p) => {
-      applyProgress(p);
-    });
-
-    const unlistenPair = onPairRequest((extensionId) => {
-      showToast('info', t('settings.pair_pending') + ': ' + extensionId);
-    });
-
+  // Live events from the engine.
+  useEffect(() => {
+    const unlisten = [
+      onDownloadAdded((row) => {
+        upsert(row);
+        statsLater();
+      }),
+      onDownloadUpdated((row) => {
+        upsert(row);
+        statsLater();
+      }),
+      onDownloadRemoved((id) => {
+        remove(id);
+        statsLater();
+      }),
+      onDownloadProgress(applyProgress),
+      onPairRequest((request) => {
+        showPairPrompt(request);
+        void refreshExtension();
+      }),
+    ];
     return () => {
-      unlistenAdded.then((f) => f());
-      unlistenProgress.then((f) => f());
-      unlistenPair.then((f) => f());
-      clearInterval(refreshTimer);
+      unlisten.forEach((p) => void p.then((off) => off()));
     };
-  }, [fetchDownloads, applyProgress, addDownload, showToast, t, toastBackgroundError]);
+  }, [upsert, remove, applyProgress, showPairPrompt, refreshExtension, statsLater]);
 
-  // ponytail: refetch with the right archived flag when the sidebar category
-  // switches to/from "Archived" (archived rows are excluded by default).
+  // Safety net: events cover changes, a slow resync covers anything missed.
   useEffect(() => {
-    fetchDownloads(activeCategory === 'Archived', undefined, activeCategory);
-    api
-      .getStats()
-      .then((stats) => {
-        statsBroken.current = false;
-        setLibraryCounts(libraryCountsFromStats(stats));
-      })
-      .catch((error) => {
-        if (statsBroken.current) return;
-        statsBroken.current = true;
-        toastBackgroundError(error);
-      });
-  }, [activeCategory, fetchDownloads, toastBackgroundError]);
+    const statsTimer = window.setInterval(() => void refreshStats(), 5000);
+    const listTimer = window.setInterval(() => void refresh(), 20000);
+    const onFocus = () => {
+      void refresh();
+      void refreshStats();
+      void refreshExtension();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(statsTimer);
+      window.clearInterval(listTimer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refresh, refreshStats, refreshExtension]);
 
   useEffect(() => {
-    const handle = window.setTimeout(() => {
-      if (useDownloadsStore.getState().search === searchQuery) return;
-      void fetchDownloads(undefined, searchQuery);
-    }, 280);
-    return () => window.clearTimeout(handle);
-  }, [searchQuery, fetchDownloads]);
+    document.documentElement.lang = i18n.language;
+    void api.setUiLanguage(i18n.language).catch(() => {});
+  }, [i18n.language]);
+
+  const pauseAll = useCallback(async () => {
+    try {
+      const count = await api.pauseAllDownloads();
+      showToast('info', t('app.paused_count', { count }));
+    } catch (e) {
+      showToast('error', api.extractTauriError(e));
+    }
+    void refreshStats();
+  }, [refreshStats, showToast, t]);
+
+  const resumeAll = useCallback(async () => {
+    try {
+      const count = await api.resumeAllDownloads();
+      showToast('info', t('app.resumed_count', { count }));
+    } catch (e) {
+      showToast('error', api.extractTauriError(e));
+    }
+    void refreshStats();
+  }, [refreshStats, showToast, t]);
+
+  const onToggleSpeedLimit = useCallback(async () => {
+    try {
+      const kbps = await toggleSpeedLimit();
+      showToast(
+        'info',
+        kbps > 0
+          ? t('app.limit_on', { limit: formatSpeed(kbps * 1024, i18n.language) })
+          : t('app.limit_off'),
+      );
+    } catch (e) {
+      showToast('error', api.extractTauriError(e));
+    }
+    void refreshStats();
+  }, [i18n.language, refreshStats, showToast, t]);
+
+  // App-wide shortcuts. The list handles its own keys while focused.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      const key = e.key.toLowerCase();
+      const state = useUiStore.getState();
+      if (key === 'k') {
+        e.preventDefault();
+        if (state.paletteOpen) state.setPaletteOpen(false);
+        else if (!isForegroundDialogOpen()) state.setPaletteOpen(true);
+        return;
+      }
+      if (isForegroundDialogOpen()) return;
+      if (key === 'n') {
+        e.preventDefault();
+        state.openNewDownload();
+      } else if (key === ',') {
+        e.preventDefault();
+        state.openSettings();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   useClipboardMonitor(
     clipboardMonitor,
     (text) => {
       if (isForegroundDialogOpen()) return false;
-      setPrefilledUrl(text);
-      setIsModalOpen(true);
-      showToast('info', t('app.clipboard_url'));
+      useUiStore.getState().openNewDownload(text);
     },
-    toastBackgroundError,
+    () => showToast('error', t('app.clipboard_failed')),
   );
 
-  const runBatchAction = useCallback(
-    async (
-      targets: typeof downloads,
-      action: 'pause' | 'resume' | 'delete',
-      deleteFromDisk = false,
-    ) => {
-      if (!targets.length) return;
-      const results = await Promise.allSettled(
-        targets.map((download) => {
-          if (action === 'delete') return api.removeDownload(download.id, deleteFromDisk);
-          if (action === 'pause') return api.pauseDownload(download.id);
-          return api.resumeDownload(download.id);
-        }),
-      );
-      const succeeded = results.filter((result) => result.status === 'fulfilled');
-      const failures = results.flatMap((result, index) =>
-        result.status === 'rejected'
-          ? [{ download: targets[index], error: api.extractTauriError(result.reason) }]
-          : [],
-      );
-      await fetchDownloads();
-      api
-        .getStats()
-        .then((stats) => {
-          statsBroken.current = false;
-          setLibraryCounts(libraryCountsFromStats(stats));
-        })
-        .catch((error) => {
-          if (statsBroken.current) return;
-          statsBroken.current = true;
-          toastBackgroundError(error);
-        });
-      const failedNames = failures
-        .map(({ download, error }) => `${download.filename} (${error})`)
-        .join(', ');
-      showToast(
-        failures.length ? 'error' : 'info',
-        t('app.batch_result', {
-          success: succeeded.length,
-          failed: failures.length,
-          names: failedNames ? `: ${failedNames}` : '',
-        }),
-      );
-    },
-    [fetchDownloads, showToast, t, toastBackgroundError],
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    if (isForegroundDialogOpen()) return;
+    const text = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+    const urls = publicHttpUrlsFromMixedText(text);
+    if (urls.length) ui.openNewDownload(urls.join('\n'));
+    else if (text.trim()) showToast('error', t('new_download.invalid_url'));
+  };
+
+  const selectedRows = useMemo(
+    () => rows.filter((row) => selectedIds.has(row.id)),
+    [rows, selectedIds],
   );
-
-  const handlePauseAll = useCallback(async () => {
-    try {
-      const rows = await api.listAllDownloads({ archived: false });
-      await runBatchAction(
-        rows.filter((download) => getDownloadCapabilities(download.status).pause),
-        'pause',
-      );
-    } catch (e) {
-      showToast('error', api.extractTauriError(e));
-    }
-  }, [runBatchAction, showToast]);
-
-  const handleResumeAll = useCallback(async () => {
-    try {
-      const rows = await api.listAllDownloads({ archived: false });
-      await runBatchAction(
-        rows.filter((download) => getDownloadCapabilities(download.status).resume),
-        'resume',
-      );
-    } catch (e) {
-      showToast('error', api.extractTauriError(e));
-    }
-  }, [runBatchAction, showToast]);
-
-  const handleBatchAction = useCallback(
-    async (action: 'pause' | 'resume' | 'delete', deleteFromDisk = false) => {
-      const targets = downloads.filter((download) => {
-        if (!selectedIds.has(download.id)) return false;
-        const capabilities = getDownloadCapabilities(download.status);
-        return action === 'delete' ? capabilities.remove : capabilities[action];
-      });
-      if (!targets.length) return;
-      await runBatchAction(targets, action, deleteFromDisk);
-      clearSelection();
-    },
-    [downloads, selectedIds, runBatchAction, clearSelection],
-  );
-
-  // Settings save writes disk; refetch when the modal closes so Gauge matches.
-  useEffect(() => {
-    if (settingsOpen) return;
-    api
-      .getSettings()
-      .then((s) => {
-        const kbps = s.speed_limit_kbps;
-        setSpeedLimited(speedLimitFromSettings(kbps, 0).limited);
-        setSavedSpeedLimit((previous) => speedLimitFromSettings(kbps, previous).saved);
-      })
-      .catch(() => {
-        setSpeedLimited(false);
-      });
-  }, [settingsOpen]);
-
-  // Scheduler save writes disk; refetch when the modal closes so Clock matches.
-  useEffect(() => {
-    if (schedulerOpen) return;
-    api
-      .getSchedule()
-      .then((s) => setSchedulerActive(Boolean(s.active)))
-      .catch(() => setSchedulerActive(false));
-  }, [schedulerOpen]);
-
-  const toggleSpeedLimit = useCallback(async () => {
-    try {
-      const s = await api.getSettings();
-      const newLimit = (s.speed_limit_kbps ?? 0) > 0 ? 0 : savedSpeedLimit || 1024;
-      await api.saveSettings({ ...s, speed_limit_kbps: newLimit });
-      setSpeedLimited(newLimit > 0);
-      if (newLimit > 0) setSavedSpeedLimit(newLimit);
-      // ponytail: hardcoded "Speed limit:" string replaced with i18n key.
-      showToast(
-        'info',
-        newLimit > 0
-          ? t('app.speed_limit_set', { limit: newLimit })
-          : t('commandPalette.speed_limit_off'),
-      );
-    } catch {
-      showToast('error', t('settings.save_failed'));
-    }
-  }, [savedSpeedLimit, showToast, t]);
-
-  // ⌘K opens command palette
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault();
-        setPaletteOpen((open) => {
-          if (open) return false;
-          if (isForegroundDialogOpen({ ignorePalette: true })) return false;
-          return true;
-        });
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, []);
-
-  // Drag-and-drop URL zone
-  const onDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragging(false);
-      if (isForegroundDialogOpen()) return;
-      const text = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
-      const urls = publicHttpUrlsFromMixedText(text);
-      if (!urls.length) {
-        if (text.trim()) showToast('error', t('newDownloadModal.url_invalid'));
-        return;
-      }
-      setPrefilledUrl(urls.join('\n'));
-      setIsModalOpen(true);
-    },
-    [showToast, t],
-  );
+  const primary = rows.find((row) => row.id === primaryId) ?? null;
 
   const paletteActions = useMemo<PaletteAction[]>(
     () => [
-      { id: 'add', label: t('toolbar.add_download'), icon: Plus, run: () => setIsModalOpen(true) },
-      { id: 'pause-all', label: t('toolbar.pause_all'), icon: Pause, run: handlePauseAll },
-      { id: 'resume-all', label: t('toolbar.resume_all'), icon: Play, run: handleResumeAll },
       {
-        id: 'scheduler',
-        label: t('toolbar.scheduler'),
-        icon: Clock,
-        run: () => setSchedulerOpen(true),
+        id: 'new',
+        label: t('toolbar.new_download'),
+        icon: Plus,
+        shortcut: '⌘N',
+        run: () => ui.openNewDownload(),
       },
+      { id: 'resume-all', label: t('toolbar.resume_all'), icon: Play, run: resumeAll },
+      { id: 'pause-all', label: t('toolbar.pause_all'), icon: Pause, run: pauseAll },
       {
-        id: 'logs',
-        label: t('toolbar.logs'),
-        icon: ScrollText,
-        run: () => setLogsOpen(true),
-      },
-      {
-        id: 'stats',
-        label: t('toolbar.stats'),
-        icon: BarChart3,
-        run: () => setStatsOpen(true),
-      },
-      {
-        id: 'speed-limit',
-        label: speedLimited
-          ? t('commandPalette.speed_limit_off')
-          : t('commandPalette.speed_limit_on'),
+        id: 'limit',
+        label: t('toolbar.speed_limit'),
         icon: Gauge,
-        run: toggleSpeedLimit,
+        keywords: 'speed limit hız',
+        run: onToggleSpeedLimit,
+      },
+      {
+        id: 'inspector',
+        label: t('toolbar.inspector'),
+        icon: PanelRight,
+        run: () => ui.toggleInspector(),
       },
       {
         id: 'settings',
-        label: t('sidebar.settings'),
+        label: t('settings.title'),
         icon: Settings,
-        run: () => setSettingsOpen(true),
+        shortcut: '⌘,',
+        run: () => ui.openSettings(),
       },
+      {
+        id: 'extension',
+        label: t('settings.tab_extension'),
+        icon: Puzzle,
+        run: () => ui.openSettings('extension'),
+      },
+      { id: 'logs', label: t('logs.title'), icon: ScrollText, run: () => ui.setLogsOpen(true) },
       {
         id: 'theme',
-        label: t('commandPalette.toggle_theme'),
-        icon: Sun,
-        run: () => {
-          const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-          const next = isDark ? 'light' : 'dark';
-          // ponytail: applyTheme now marks the choice as manual so the OS theme
-          // listener no longer overrides it.
-          applyTheme(next);
-          api
-            .getSettings()
-            .then((s) => api.saveSettings({ ...s, theme: next }))
-            .catch((e) => showToast('error', api.extractTauriError(e)));
-        },
-      },
-      {
-        id: 'lang',
-        label: t('sidebar.language'),
+        label: t('palette.toggle_theme'),
         icon: Moon,
-        run: () => {
-          const next = i18n.language === 'en' ? 'tr' : 'en';
-          i18n.changeLanguage(next);
-          localStorage.setItem('falcon_lang', next);
-          document.documentElement.lang = next;
+        run: async () => {
+          const next =
+            document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+          applyTheme(next);
+          const s = await api.getSettings();
+          await api.saveSettings({ ...s, theme: next });
         },
       },
     ],
-    [t, handlePauseAll, handleResumeAll, speedLimited, toggleSpeedLimit, i18n, showToast],
+    [t, ui, resumeAll, pauseAll, onToggleSpeedLimit],
   );
 
-  const toasts = useToastStore((s) => s.toasts);
-  const dismissToast = useToastStore((s) => s.dismiss);
-  const selectedDownloads = useMemo(
-    () => downloads.filter((download) => selectedIds.has(download.id)),
-    [downloads, selectedIds],
-  );
-  const canBatchPause = selectedDownloads.some(
-    (download) => getDownloadCapabilities(download.status).pause,
-  );
-  const canBatchResume = selectedDownloads.some(
-    (download) => getDownloadCapabilities(download.status).resume,
-  );
+  const removing = ui.confirmRemove;
+  const confirmRemove = async (deleteFile?: boolean) => {
+    const targets = removing ?? [];
+    ui.closeRemove();
+    const results = await Promise.allSettled(
+      targets.map((row) => api.removeDownload(row.id, !!deleteFile && row.status === 'Completed')),
+    );
+    const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failed.length) showToast('error', api.extractTauriError(failed[0].reason));
+    void refreshStats();
+  };
+
+  const showInspector = ui.inspectorVisible && selectedRows.length > 0;
+  const activeCount = stats?.active ?? 0;
 
   return (
     <div
-      className="app-shell"
+      className="app"
       onDragOver={(e) => {
+        if (isForegroundDialogOpen() || e.dataTransfer.types.includes('Files')) return;
         e.preventDefault();
         if (!dragging) setDragging(true);
       }}
@@ -455,172 +324,104 @@ function App() {
       }}
       onDrop={onDrop}
     >
-      {showOnboarding && (
-        <OnboardingWizard
-          onComplete={() => setShowOnboarding(false)}
-          onSkip={() => setShowOnboarding(false)}
-        />
-      )}
-
-      <a href="#main-content" className="skip-link">
-        {t('app.skip_to_content')}
+      <a href="#downloads" className="skip-link">
+        {t('app.skip_to_list')}
       </a>
-      <TitleBar />
-
-      <div className="app-body">
-        <Sidebar
-          activeCategory={activeCategory}
-          onSelectCategory={setActiveCategory}
-          counts={libraryCounts}
+      <Sidebar />
+      <main className="main" id="downloads">
+        <Toolbar
+          onPauseAll={pauseAll}
+          onResumeAll={resumeAll}
+          onToggleSpeedLimit={onToggleSpeedLimit}
         />
-
-        <main className="main-area" id="main-content">
-          <Toolbar
-            onAddClick={() => setIsModalOpen(true)}
-            searchQuery={searchQuery}
-            onSearchChange={setSearchQuery}
-            onPauseAll={handlePauseAll}
-            onResumeAll={handleResumeAll}
-            canPauseAll={(libraryCounts.pausable ?? 0) > 0}
-            canResumeAll={(libraryCounts.resumable ?? 0) > 0}
-            clipboardMonitor={clipboardMonitor}
-            onToggleClipboard={() =>
-              setClipboardMonitor((v) => {
-                const next = !v;
-                localStorage.setItem('falcon_clipboard_monitor', next ? '1' : '0');
-                return next;
-              })
-            }
-            onOpenSettings={() => setSettingsOpen(true)}
-            onOpenScheduler={() => setSchedulerOpen(true)}
-            onOpenLogs={() => setLogsOpen(true)}
-            onOpenStats={() => setStatsOpen(true)}
-            speedLimited={speedLimited}
-            onToggleSpeedLimit={toggleSpeedLimit}
-            schedulerActive={schedulerActive}
-          />
-
-          {selectedIds.size > 1 && (
-            <div className="batch-bar" role="toolbar" aria-label={t('app.batch_actions')}>
-              <span className="batch-count mono">
-                {selectedIds.size} {t('app.selected')}
-              </span>
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => handleBatchAction('pause')}
-                disabled={!canBatchPause}
-              >
-                <Pause size={14} aria-hidden={true} /> {t('toolbar.pause_all')}
-              </button>
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => handleBatchAction('resume')}
-                disabled={!canBatchResume}
-              >
-                <Play size={14} aria-hidden={true} /> {t('toolbar.resume_all')}
-              </button>
-              <button
-                type="button"
-                className="btn-secondary btn-danger-text"
-                onClick={() => setConfirmBatchDelete(true)}
-              >
-                <Trash2 size={14} aria-hidden={true} /> {t('downloadItem.delete')}
-              </button>
-              <button
-                type="button"
-                className="icon-btn"
-                onClick={clearSelection}
-                aria-label={t('app.clear_selection')}
-              >
-                <X size={15} aria-hidden={true} />
-              </button>
-            </div>
+        <div className="content">
+          <section className="list-pane" aria-label={t('app.downloads')}>
+            <ErrorBoundary label="DownloadList">
+              <DownloadList />
+            </ErrorBoundary>
+          </section>
+          {showInspector && (
+            <ErrorBoundary label="Inspector">
+              <Inspector
+                rows={selectedRows}
+                primary={primary}
+                actions={actions}
+                onClose={() => select(null)}
+              />
+            </ErrorBoundary>
           )}
+        </div>
+        <StatusBar />
+      </main>
 
-          <div className="content-row">
-            <div className="list-pane">
-              <ErrorBoundary label="DownloadList">
-                <DownloadList
-                  downloads={downloads}
-                  category={activeCategory}
-                  searchQuery={searchQuery}
-                  selectedId={selectedDownload?.id ?? null}
-                  onSelectDownload={selectDownload}
-                  onRefresh={fetchDownloads}
-                  onRetry={retryFetch}
-                  onAddClick={() => setIsModalOpen(true)}
-                  loading={loading}
-                  error={error}
-                  batchSelectedIds={selectedIds}
-                  hasMore={hasMore}
-                  onLoadMore={() => void loadMoreDownloads()}
-                />
-              </ErrorBoundary>
+      <span className="sr-only" role="status" aria-live="polite">
+        {activeCount > 0 ? t('app.live_summary', { count: activeCount }) : ''}
+      </span>
 
-              {hasMore && (
-                <button
-                  type="button"
-                  className="btn-secondary load-more-btn"
-                  onClick={() => void loadMoreDownloads()}
-                  disabled={loadingMore}
-                  aria-busy={loadingMore}
-                >
-                  {loadingMore ? t('app.loading_more') : t('app.load_more')}
-                </button>
-              )}
-            </div>
-
-            {selectedDownload && (
-              <ErrorBoundary label="InspectorPanel">
-                <InspectorPanel
-                  download={selectedDownload}
-                  onClose={() => selectDownload(null)}
-                  onRefresh={fetchDownloads}
-                />
-              </ErrorBoundary>
-            )}
-          </div>
-          <StatusBar downloads={downloads} selected={selectedDownload} hasMore={hasMore} />
-        </main>
-      </div>
-
-      {isModalOpen && (
-        <NewDownloadModal
-          onClose={() => {
-            setIsModalOpen(false);
-            setPrefilledUrl('');
+      {ui.newDownload !== null && (
+        <NewDownloadSheet initialText={ui.newDownload} onClose={ui.closeNewDownload} />
+      )}
+      {ui.settingsTab && (
+        <SettingsSheet
+          initialTab={ui.settingsTab}
+          onClose={ui.closeSettings}
+          onSaved={() => {
+            setClipboardMonitor(localStorage.getItem(CLIPBOARD_KEY) === '1');
+            void refreshStats();
+            void refreshSchedule();
           }}
-          onSuccess={() => setActiveCategory('All Downloads')}
-          onAdded={fetchDownloads}
-          initialUrl={prefilledUrl}
         />
       )}
+      {ui.logsOpen && <LogPanel onClose={() => ui.setLogsOpen(false)} />}
+      {ui.onboardingOpen && <OnboardingWizard onClose={() => ui.setOnboardingOpen(false)} />}
+      {ui.paletteOpen && (
+        <CommandPalette
+          actions={paletteActions}
+          onClose={() => ui.setPaletteOpen(false)}
+          onError={(e) => showToast('error', api.extractTauriError(e))}
+        />
+      )}
+      {ui.moveTarget && (
+        <MoveRenameDialog row={ui.moveTarget} onClose={() => ui.setMoveTarget(null)} />
+      )}
+      {removing && (
+        <ConfirmDialog
+          message={
+            removing.length === 1
+              ? t('remove.title_one', { name: removing[0].filename })
+              : t('remove.title_many', { count: removing.length })
+          }
+          detail={t('remove.detail')}
+          deleteFileOption={removing.some((row) => row.status === 'Completed')}
+          confirmLabel={t('actions.remove')}
+          onConfirm={(deleteFile) => void confirmRemove(deleteFile)}
+          onCancel={ui.closeRemove}
+        />
+      )}
+      {pairPrompt && <PairRequestDialog request={pairPrompt} />}
 
       {toasts.length > 0 && (
-        <div className="toast-stack" role="region" aria-label={t('app.toasts')}>
-          {toasts.map((tt) => (
+        <div className="toasts" role="region" aria-label={t('app.notifications')}>
+          {toasts.map((toast) => (
             <div
-              key={tt.id}
-              className={`toast ${tt.kind}`}
-              role={tt.kind === 'error' ? 'alert' : 'status'}
+              key={toast.id}
+              className={`toast ${toast.kind}`}
+              role={toast.kind === 'error' ? 'alert' : 'status'}
             >
-              {tt.kind === 'success' ? (
-                <CheckCircle2 aria-hidden={true} />
-              ) : tt.kind === 'error' ? (
-                <AlertCircle aria-hidden={true} />
+              {toast.kind === 'success' ? (
+                <CheckCircle2 size={15} aria-hidden={true} />
+              ) : toast.kind === 'error' ? (
+                <AlertCircle size={15} aria-hidden={true} />
               ) : (
-                <Info aria-hidden={true} />
+                <Info size={15} aria-hidden={true} />
               )}
-              <span>{tt.msg}</span>
+              <span>{toast.msg}</span>
               <button
                 type="button"
-                className="icon-btn toast-dismiss"
-                aria-label={t('app.dismiss')}
-                onClick={() => dismissToast(tt.id)}
+                aria-label={t('common.dismiss')}
+                onClick={() => dismissToast(toast.id)}
               >
-                <X size={14} aria-hidden={true} />
+                <X size={12} aria-hidden={true} />
               </button>
             </div>
           ))}
@@ -628,43 +429,17 @@ function App() {
       )}
 
       {dragging && (
-        <div className="drop-overlay" role="status" aria-live="assertive">
-          <div className="drop-hint">
-            <DownloadCloud aria-hidden={true} />
-            <span>{t('app.drop_url')}</span>
+        <div className="drop-overlay" role="status">
+          <div>
+            <Download size={34} aria-hidden={true} />
+            {t('app.drop_hint')}
           </div>
         </div>
-      )}
-
-      {paletteOpen && (
-        <CommandPalette
-          onClose={() => setPaletteOpen(false)}
-          actions={paletteActions}
-          onError={(e) => showToast('error', api.extractTauriError(e))}
-        />
-      )}
-
-      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
-      <SchedulerModal isOpen={schedulerOpen} onClose={() => setSchedulerOpen(false)} />
-      {logsOpen && <LogPanel onClose={() => setLogsOpen(false)} />}
-      {statsOpen && <StatsPanel onClose={() => setStatsOpen(false)} />}
-      {confirmBatchDelete && (
-        <ConfirmDialog
-          message={t('app.confirm_batch_delete', { count: selectedIds.size })}
-          deleteFileOption
-          onConfirm={(deleteFromDisk) => {
-            setConfirmBatchDelete(false);
-            void handleBatchAction('delete', deleteFromDisk);
-          }}
-          onCancel={() => setConfirmBatchDelete(false)}
-        />
       )}
     </div>
   );
 }
 
-// ponytail: wrap the whole app in an ErrorBoundary so a top-level render fault
-// shows a recovery UI instead of a white screen.
 export default function AppRoot() {
   return (
     <ErrorBoundary label="AppRoot">

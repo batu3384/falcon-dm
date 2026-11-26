@@ -3,13 +3,21 @@ import {
   DownloadArraySchema,
   DownloadSchema,
   DownloadStatsSchema,
+  ExtensionStatusSchema,
   LogArraySchema,
   ScheduleSchema,
   SettingsSchema,
-  ExtensionStatusSchema,
+  ToolStatusSchema,
 } from '../lib/schema';
-import type { DownloadModel, SettingsModel, ScheduleModel } from '../types';
-import { collectPaged } from '../lib/paging';
+import type {
+  DownloadModel,
+  DownloadStats,
+  ExtensionStatus,
+  LogEntry,
+  ScheduleModel,
+  SettingsModel,
+  ToolStatus,
+} from '../types';
 
 // ponytail: centralized Tauri command layer. Every invoke() in the app used to
 // repeat the raw command-name string with no type link to the backend; renaming
@@ -33,20 +41,43 @@ export function extractTauriError(e: unknown): string {
   return message;
 }
 
-/** Map backend download error codes to localized UI strings. */
-export function localizeDownloadError(message: string, t: (key: string) => string): string {
+type Translate = (key: string, options?: Record<string, unknown>) => string;
+
+const ERROR_CODES: Record<string, string> = {
+  ERR_UNSUPPORTED_MAGNET: 'errors.unsupported_magnet',
+  ERR_DISK_FULL: 'errors.disk_full',
+  ERR_FFMPEG_MISSING: 'errors.ffmpeg_missing',
+  ERR_YTDLP_MISSING: 'errors.ytdlp_missing',
+  ERR_HLS_LIVE: 'errors.hls_live',
+  ERR_REMOTE_CHANGED: 'errors.remote_changed',
+  ERR_FILE_MISSING: 'errors.file_missing',
+  'invalid url': 'errors.invalid_url',
+  'not a real media url': 'errors.junk_media_url',
+  'Server returned an error page instead of a file': 'errors.error_page',
+  'Downloaded file is empty': 'errors.empty_file',
+  'internal error: worker crashed': 'errors.internal',
+};
+
+/** Backend error codes and messages → text a user can act on. */
+export function localizeDownloadError(message: string, t: Translate): string {
   const trimmed = message.trim();
-  if (trimmed === 'ERR_UNSUPPORTED_MAGNET') return t('errors.unsupported_magnet');
-  if (trimmed === 'invalid url') return t('errors.invalid_url');
-  if (trimmed === 'not a real media url') return t('errors.junk_media_url');
-  const lower = trimmed.toLowerCase();
-  if (
-    lower.startsWith('unsupported url scheme: magnet') ||
-    lower.startsWith('unsupported fetch url scheme: magnet')
-  ) {
-    return t('errors.unsupported_magnet');
+  const key = ERROR_CODES[trimmed];
+  if (key) return t(key);
+  if (trimmed.startsWith('ERR_YTDLP_PATH_INVALID')) return t('errors.ytdlp_path_invalid');
+  const http = /^HTTP (\d{3})$/.exec(trimmed);
+  if (http) {
+    const code = Number(http[1]);
+    if (code === 401 || code === 403) return t('errors.http_forbidden', { code });
+    if (code === 404 || code === 410) return t('errors.http_not_found', { code });
+    if (code === 429) return t('errors.http_rate_limited', { code });
+    if (code >= 500) return t('errors.http_server', { code });
+    return t('errors.http_other', { code });
   }
-  return message;
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('unsupported url scheme: magnet')) return t('errors.unsupported_magnet');
+  if (lower.includes('private/loopback')) return t('errors.private_host');
+  if (lower.startsWith('yt-dlp: ')) return trimmed.slice('yt-dlp: '.length);
+  return trimmed;
 }
 
 export interface DownloadFilter {
@@ -67,35 +98,26 @@ export async function getDownloads(filter?: DownloadFilter): Promise<DownloadMod
   return DownloadArraySchema.parse(raw);
 }
 
-export async function listAllDownloads(filter?: DownloadFilter): Promise<DownloadModel[]> {
-  const pageSize = 200;
-  return collectPaged(pageSize, (beforeId) =>
-    getDownloads({
-      ...filter,
-      limit: pageSize,
-      ...(beforeId === undefined ? {} : { before_id: beforeId }),
-    }),
-  );
-}
-
 export async function getDownload(id: number): Promise<DownloadModel> {
-  const raw = await invoke<unknown>('get_download', { id });
-  return DownloadSchema.parse(raw);
+  return DownloadSchema.parse(await invoke<unknown>('get_download', { id }));
 }
 
-export async function addDownload(params: {
+export interface AddDownloadParams {
   url: string;
-  filename: string;
-  savePath: string;
+  /** Omit to let the engine pick the server's or the page's name. */
+  filename?: string;
+  savePath?: string;
   referrer?: string;
   userAgent?: string;
   cookies?: string;
   cookieUrl?: string;
-}): Promise<DownloadModel> {
-  // ponytail: Tauri's invoke auto-converts camelCase keys to the Rust command's
-  // snake_case params, so callers pass idiomatic TS names.
-  const raw = await invoke<unknown>('add_download', params);
-  return DownloadSchema.parse(raw);
+  /** yt-dlp format selector (YouTube quality). */
+  format?: string;
+}
+
+export async function addDownload(params: AddDownloadParams): Promise<DownloadModel> {
+  // Tauri maps camelCase keys to the Rust command's snake_case parameters.
+  return DownloadSchema.parse(await invoke<unknown>('add_download', { ...params }));
 }
 
 export async function pauseDownload(id: number): Promise<void> {
@@ -104,6 +126,14 @@ export async function pauseDownload(id: number): Promise<void> {
 
 export async function resumeDownload(id: number): Promise<void> {
   await invoke('resume_download', { id });
+}
+
+export async function pauseAllDownloads(): Promise<number> {
+  return invoke<number>('pause_all_downloads');
+}
+
+export async function resumeAllDownloads(): Promise<number> {
+  return invoke<number>('resume_all_downloads');
 }
 
 export async function removeDownload(id: number, deleteFile = false): Promise<void> {
@@ -123,8 +153,7 @@ export async function openFile(path: string): Promise<void> {
 }
 
 export async function getSettings(): Promise<SettingsModel> {
-  const raw = await invoke<unknown>('get_settings');
-  return SettingsSchema.parse(raw);
+  return SettingsSchema.parse(await invoke<unknown>('get_settings'));
 }
 
 export async function saveSettings(settings: SettingsModel): Promise<void> {
@@ -132,8 +161,7 @@ export async function saveSettings(settings: SettingsModel): Promise<void> {
 }
 
 export async function getSchedule(): Promise<ScheduleModel> {
-  const raw = await invoke<unknown>('get_schedule');
-  return ScheduleSchema.parse(raw);
+  return ScheduleSchema.parse(await invoke<unknown>('get_schedule'));
 }
 
 export async function setSchedule(params: {
@@ -144,75 +172,39 @@ export async function setSchedule(params: {
   await invoke('set_schedule', params);
 }
 
-export interface ExtensionStatus {
-  has_token: boolean;
-  approved_extension_ids: string[];
-  pending_pair_id: string | null;
-}
-
 export async function getExtensionStatus(): Promise<ExtensionStatus> {
-  const raw = await invoke<unknown>('get_extension_status');
-  return ExtensionStatusSchema.parse(raw) as ExtensionStatus;
+  return ExtensionStatusSchema.parse(await invoke<unknown>('get_extension_status'));
 }
 
 export async function approveExtensionPair(extensionId: string): Promise<void> {
   await invoke('approve_extension_pair', { extensionId });
 }
 
-export async function resetExtensionPin(): Promise<void> {
-  await invoke('reset_extension_pin');
+export async function rejectExtensionPair(extensionId: string): Promise<void> {
+  await invoke('reject_extension_pair', { extensionId });
 }
 
-export async function getPendingPair(): Promise<string | null> {
-  return invoke<string | null>('get_pending_pair');
+export async function revokeExtension(extensionId: string): Promise<void> {
+  await invoke('revoke_extension', { extensionId });
 }
 
-export async function getPendingPairs(): Promise<string[]> {
-  return invoke<string[]>('get_pending_pairs');
-}
-
-// ponytail: log panel — pulls the in-memory ring buffer the fan-out logger
-// captures. Optional level filter narrows server-side (e.g. "ERROR").
-export interface LogEntry {
-  ts: number;
-  level: string;
-  target: string;
-  message: string;
+export async function getToolStatus(): Promise<ToolStatus> {
+  return ToolStatusSchema.parse(await invoke<unknown>('get_tool_status'));
 }
 
 export async function getLogs(level?: string): Promise<LogEntry[]> {
-  const raw = await invoke<unknown>('get_logs', { level: level ?? null });
-  return LogArraySchema.parse(raw) as LogEntry[];
+  return LogArraySchema.parse(await invoke<unknown>('get_logs', { level: level ?? null }));
 }
 
 export async function clearLogs(): Promise<void> {
   await invoke('clear_logs');
 }
 
-// ponytail: aggregate statistics for the Stats panel.
-export interface DownloadStats {
-  active: number;
-  queued: number;
-  paused: number;
-  completed: number;
-  failed: number;
-  total_downloaded_bytes: number;
-  current_speed: number;
-  all: number;
-  archived: number;
-  video: number;
-  music: number;
-  document: number;
-  archive: number;
-  program: number;
-}
-
 export async function getStats(): Promise<DownloadStats> {
-  const raw = await invoke<unknown>('get_stats');
-  return DownloadStatsSchema.parse(raw) as DownloadStats;
+  return DownloadStatsSchema.parse(await invoke<unknown>('get_stats'));
 }
 
-// ponytail: rename and/or move a completed download's file.
+/** Rename and/or move a completed download's file. */
 export async function moveDownload(
   id: number,
   newFilename?: string,
@@ -225,21 +217,9 @@ export async function moveDownload(
   });
 }
 
-// ponytail: toggle the archived flag. Archived downloads are hidden from the
-// active list but kept in the DB + on disk. The "Archived" sidebar filter shows
-// them via get_downloads({ archived: true }).
+/** Archived downloads leave the main list but stay in the DB and on disk. */
 export async function archiveDownload(id: number, archived: boolean): Promise<void> {
   await invoke('archive_download', { id, archived });
-}
-
-export async function installNativeHostManifests(
-  chromeExtensionId: string,
-  edgeExtensionId?: string,
-): Promise<void> {
-  await invoke('install_native_host_manifests', {
-    chromeExtensionId,
-    edgeExtensionId: edgeExtensionId ?? null,
-  });
 }
 
 export interface UpdateCheckResult {
@@ -259,23 +239,4 @@ export async function readClipboard(): Promise<string> {
 
 export async function setUiLanguage(lang: string): Promise<void> {
   await invoke('set_ui_language', { lang });
-}
-
-/// Build a cURL command string from a download's URL + headers. For the "Copy as
-/// cURL" context-menu action — lets users replicate the request in a terminal.
-export function buildCurlCommand(dl: {
-  url: string;
-  user_agent?: string | null;
-  referrer?: string | null;
-}): string {
-  const parts = ['curl', '-L', shquote(dl.url)];
-  if (dl.user_agent) parts.push('-H', shquote(`User-Agent: ${dl.user_agent}`));
-  if (dl.referrer) parts.push('-H', shquote(`Referer: ${dl.referrer}`));
-  parts.push('-o', shquote(dl.url.split('/').pop()?.split('?')[0] || 'download.bin'));
-  return parts.join(' ');
-}
-
-function shquote(s: string): string {
-  // Single-quote wrap, escaping embedded single quotes.
-  return `'${s.replace(/'/g, "'\\''")}'`;
 }

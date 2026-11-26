@@ -144,3 +144,36 @@ export function hlsDownloadUrl(url: string): boolean {
     return false;
   }
 }
+
+export function dashDownloadUrl(url: string): boolean {
+  try {
+    return new URL(url).pathname.toLowerCase().endsWith('.mpd');
+  } catch {
+    return false;
+  }
+}
+
+/** Which engine the queue will use for this URL (mirrors `route_queued_download`). */
+export function downloadEngine(url: string): 'yt-dlp' | 'HLS' | 'HTTP' {
+  if (youtubeDownloadHost(url) || dashDownloadUrl(url)) return 'yt-dlp';
+  if (hlsDownloadUrl(url)) return 'HLS';
+  return 'HTTP';
+}
+
+/** YouTube watch/shorts/youtu.be pages — the ones that offer a quality choice. */
+export function isYoutubePageUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'youtu.be') return parsed.pathname.length > 1;
+    if (host !== 'youtube.com' && !host.endsWith('.youtube.com')) return false;
+    return (
+      parsed.pathname.startsWith('/watch') ||
+      parsed.pathname.startsWith('/shorts/') ||
+      parsed.pathname.startsWith('/live/') ||
+      parsed.pathname.startsWith('/embed/')
+    );
+  } catch {
+    return false;
+  }
+}

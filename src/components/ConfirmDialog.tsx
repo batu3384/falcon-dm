@@ -1,10 +1,10 @@
-import { useId, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useModalA11y } from '../hooks/useModalA11y';
+import { Sheet } from './Sheet';
 
 interface ConfirmDialogProps {
   message: string;
+  detail?: string;
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
@@ -15,6 +15,7 @@ interface ConfirmDialogProps {
 
 export function ConfirmDialog({
   message,
+  detail,
   confirmLabel,
   cancelLabel,
   danger = true,
@@ -23,64 +24,54 @@ export function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
-  const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  const detailId = useId();
+  const checkId = useId();
   const hintId = useId();
   const [deleteFromDisk, setDeleteFromDisk] = useState(false);
-  useModalA11y(panelRef, onCancel);
 
-  return createPortal(
-    <div
-      className="modal-overlay modal-overlay-root"
-      onClick={(e) => {
-        e.stopPropagation();
-        if (e.target === e.currentTarget) onCancel();
-      }}
-      role="presentation"
+  return (
+    <Sheet
+      size="small"
+      role="alertdialog"
+      labelledBy={titleId}
+      describedBy={detail ? detailId : undefined}
+      onClose={onCancel}
     >
-      <div
-        ref={panelRef}
-        className="modal-panel modal-sm"
-        onClick={(e) => e.stopPropagation()}
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={deleteFileOption ? hintId : undefined}
-      >
-        <div className="modal-body">
-          <p id={titleId} className="confirm-msg">
-            {message}
-          </p>
-          {deleteFileOption && (
-            <label className="check-row confirm-delete-file">
-              <input
-                type="checkbox"
-                checked={deleteFromDisk}
-                onChange={(e) => setDeleteFromDisk(e.target.checked)}
-              />
-              <span>
-                <span>{t('confirm.delete_from_disk')}</span>
-                <span id={hintId} className="field-hint">
-                  {t('confirm.delete_from_disk_hint')}
-                </span>
+      <div className="alert">
+        <img src="/icon.png" alt="" />
+        <h2 id={titleId}>{message}</h2>
+        {detail && <p id={detailId}>{detail}</p>}
+        {deleteFileOption && (
+          <div className="check">
+            <input
+              id={checkId}
+              type="checkbox"
+              checked={deleteFromDisk}
+              onChange={(e) => setDeleteFromDisk(e.target.checked)}
+              aria-describedby={hintId}
+            />
+            <label htmlFor={checkId}>
+              {t('confirm.delete_from_disk')}
+              <span id={hintId} className="hint">
+                {t('confirm.delete_from_disk_hint')}
               </span>
             </label>
-          )}
-        </div>
-        <div className="modal-foot">
-          <button type="button" className="btn-secondary" data-modal-cancel onClick={onCancel}>
-            {cancelLabel || t('settings.cancel')}
-          </button>
-          <button
-            type="button"
-            className={`btn-primary${danger ? ' danger' : ''}`}
-            onClick={() => onConfirm(deleteFileOption ? deleteFromDisk : undefined)}
-          >
-            {confirmLabel || t('inspector.remove')}
-          </button>
-        </div>
+          </div>
+        )}
       </div>
-    </div>,
-    document.body,
+      <div className="alert-foot">
+        <button type="button" className="btn" data-modal-cancel onClick={onCancel}>
+          {cancelLabel || t('common.cancel')}
+        </button>
+        <button
+          type="button"
+          className={`btn ${danger ? 'destructive' : 'primary'}`}
+          onClick={() => onConfirm(deleteFileOption ? deleteFromDisk : undefined)}
+        >
+          {confirmLabel || t('common.remove')}
+        </button>
+      </div>
+    </Sheet>
   );
 }

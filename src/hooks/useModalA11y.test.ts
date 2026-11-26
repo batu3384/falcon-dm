@@ -23,24 +23,18 @@ describe('pickModalInitialFocus', () => {
 });
 
 describe('isForegroundDialogOpen', () => {
-  it('treats onboarding and modals as blocking', () => {
+  it('treats any sheet as blocking and can ignore the palette', () => {
     expect(isForegroundDialogOpen()).toBe(false);
-    const wizard = el('div', { class: 'wizard-overlay' });
-    document.body.appendChild(wizard);
-    expect(isForegroundDialogOpen()).toBe(true);
-    expect(isForegroundDialogOpen({ ignorePalette: true })).toBe(true);
-    wizard.remove();
-
-    const palette = el('div', { class: 'modal-overlay palette-overlay' });
+    const palette = el('div', { class: 'sheet-overlay palette-overlay' });
     document.body.appendChild(palette);
     expect(isForegroundDialogOpen()).toBe(true);
     expect(isForegroundDialogOpen({ ignorePalette: true })).toBe(false);
     palette.remove();
 
-    const modal = el('div', { class: 'modal-overlay' });
-    document.body.appendChild(modal);
+    const sheet = el('div', { class: 'sheet-overlay' });
+    document.body.appendChild(sheet);
     expect(isForegroundDialogOpen({ ignorePalette: true })).toBe(true);
-    modal.remove();
+    sheet.remove();
   });
 });
 

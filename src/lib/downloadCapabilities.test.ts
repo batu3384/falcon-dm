@@ -1,34 +1,37 @@
 import { describe, expect, it } from 'vitest';
-import { getDownloadCapabilities } from './downloadCapabilities';
+import { getDownloadCapabilities, isLive } from './downloadCapabilities';
 
 describe('getDownloadCapabilities', () => {
-  it('does not expose move for Merging but allows pause', () => {
-    expect(getDownloadCapabilities('Merging')).toMatchObject({
-      pause: true,
-      move: false,
-    });
+  it('pauses anything that is running or waiting', () => {
+    for (const status of ['Queued', 'Downloading', 'Merging'] as const) {
+      expect(getDownloadCapabilities(status).pause).toBe(true);
+      expect(getDownloadCapabilities(status).resume).toBe(false);
+    }
   });
 
-  it('allows move only for terminal completed/failed rows', () => {
-    expect(getDownloadCapabilities('Completed').move).toBe(true);
-    expect(getDownloadCapabilities('Failed').move).toBe(true);
+  it('resumes paused rows and retries failed ones', () => {
+    expect(getDownloadCapabilities('Paused').resume).toBe(true);
+    expect(getDownloadCapabilities('Failed').resume).toBe(true);
+    expect(getDownloadCapabilities('Completed').resume).toBe(false);
+  });
+
+  it('opens and moves only completed files, like the backend', () => {
+    expect(getDownloadCapabilities('Completed')).toMatchObject({ open: true, move: true });
+    expect(getDownloadCapabilities('Failed')).toMatchObject({ open: false, move: false });
     expect(getDownloadCapabilities('Downloading').move).toBe(false);
   });
 
-  it('only exposes retry for paused and failed rows', () => {
-    expect(getDownloadCapabilities('Paused').resume).toBe(true);
-    expect(getDownloadCapabilities('Failed').resume).toBe(true);
-    expect(getDownloadCapabilities('Queued').resume).toBe(false);
-    expect(getDownloadCapabilities('Queued').pause).toBe(true);
-    expect(getDownloadCapabilities('Merging').resume).toBe(false);
-  });
-
-  it('allows archive only for terminal rows', () => {
+  it('archives only finished rows and reorders only queued ones', () => {
     expect(getDownloadCapabilities('Completed').archive).toBe(true);
     expect(getDownloadCapabilities('Failed').archive).toBe(true);
-    expect(getDownloadCapabilities('Queued').archive).toBe(false);
-    expect(getDownloadCapabilities('Downloading').archive).toBe(false);
     expect(getDownloadCapabilities('Paused').archive).toBe(false);
-    expect(getDownloadCapabilities('Merging').archive).toBe(false);
+    expect(getDownloadCapabilities('Queued').priority).toBe(true);
+    expect(getDownloadCapabilities('Downloading').priority).toBe(false);
+  });
+
+  it('treats Downloading and Merging as live', () => {
+    expect(isLive('Downloading')).toBe(true);
+    expect(isLive('Merging')).toBe(true);
+    expect(isLive('Queued')).toBe(false);
   });
 });

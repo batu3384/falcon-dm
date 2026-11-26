@@ -40,20 +40,21 @@ export const DownloadSchema = z.object({
   error_message: z.string().nullable(),
   referrer: z.string().nullable(),
   user_agent: z.string().nullable(),
-  aria2_gid: z.string().nullable(),
   archived: z.boolean().optional().default(false),
+  attempts: z.number().int().nonnegative().optional().default(0),
+  retry_at: z.number().nullable().optional().default(null),
 });
 
 export const DownloadArraySchema = z.array(DownloadSchema).max(500);
 
+/** Byte counters from a running worker. Status changes arrive as full rows. */
 export const ProgressPayloadSchema = z.object({
   id: z.number(),
-  downloaded_size: z.number(),
-  total_size: z.number(),
-  speed: z.number(),
-  status: DownloadStatusEnum,
-  connections: z.number(),
-  error_message: z.string().nullable().optional(),
+  downloaded_size: z.number().nonnegative(),
+  total_size: z.number().nonnegative(),
+  speed: z.number().finite().nonnegative(),
+  status: z.enum(['Downloading', 'Merging']),
+  connections: z.number().int().nonnegative(),
 });
 
 export const DownloadProfileSchema = z.object({
@@ -90,10 +91,23 @@ export const ScheduleSchema = z.object({
   active: z.boolean(),
 });
 
+const ExtensionIdSchema = z.string().regex(/^[a-p]{32}$/);
+
+export const PairRequestSchema = z.object({
+  extension_id: ExtensionIdSchema,
+  code: z.string().regex(/^\d{6}$/),
+});
+
 export const ExtensionStatusSchema = z.object({
-  has_token: z.boolean(),
   approved_extension_ids: z.array(z.string()),
-  pending_pair_id: z.string().nullable(),
+  pending: z.array(PairRequestSchema).max(16),
+});
+
+export const ToolStatusSchema = z.object({
+  ytdlp_path: z.string().nullable(),
+  ytdlp_version: z.string().nullable(),
+  ytdlp_error: z.string().nullable(),
+  ffmpeg_path: z.string().nullable(),
 });
 
 export const LogEntrySchema = z.object({
@@ -120,6 +134,8 @@ export const DownloadStatsSchema = z.object({
   document: z.number().int().nonnegative(),
   archive: z.number().int().nonnegative(),
   program: z.number().int().nonnegative(),
+  free_disk_bytes: z.number().finite().nonnegative().nullable().optional().default(null),
+  speed_limit_kbps: z.number().int().nonnegative().optional().default(0),
 });
 
 export type DownloadStatus = z.infer<typeof DownloadStatusEnum>;
@@ -129,6 +145,8 @@ export type ProgressPayload = z.infer<typeof ProgressPayloadSchema>;
 export type DownloadProfile = z.infer<typeof DownloadProfileSchema>;
 export type SettingsModel = z.infer<typeof SettingsSchema>;
 export type ScheduleModel = z.infer<typeof ScheduleSchema>;
-export type ParsedDownload = DownloadModel;
-export type ParsedProgress = ProgressPayload;
-export type ParsedSettings = SettingsModel;
+export type PairRequest = z.infer<typeof PairRequestSchema>;
+export type ExtensionStatus = z.infer<typeof ExtensionStatusSchema>;
+export type ToolStatus = z.infer<typeof ToolStatusSchema>;
+export type LogEntry = z.infer<typeof LogEntrySchema>;
+export type DownloadStats = z.infer<typeof DownloadStatsSchema>;

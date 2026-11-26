@@ -1,380 +1,302 @@
 import { create } from 'zustand';
 import type { DownloadModel, ProgressPayload } from '../types';
 import { getDownloads } from '../api/commands';
-import { downloadAdmittedToView, viewToDownloadFilter } from '../lib/downloadView';
+import {
+  downloadMatchesSearch,
+  downloadMatchesView,
+  viewToDownloadFilter,
+  type ViewId,
+} from '../lib/downloadView';
+import { isLive } from '../lib/downloadCapabilities';
 
 export const DOWNLOAD_PAGE_SIZE = 200;
 
-function liveSpeed(next: number, previous: number): number {
-  return next > 0 ? next : previous;
+/**
+ * A DB row from a refetch vs the row the store already holds. While both are
+ * live, the store's counters are fresher (progress events arrive twice a
+ * second, the DB is written every two). Anything else: the DB wins.
+ */
+export function mergeFetchedRow(fresh: DownloadModel, existing?: DownloadModel): DownloadModel {
+  if (!existing || !isLive(fresh.status) || !isLive(existing.status)) return fresh;
+  return {
+    ...fresh,
+    status: existing.status === 'Merging' ? 'Merging' : fresh.status,
+    downloaded_size: existing.downloaded_size,
+    total_size: existing.total_size || fresh.total_size,
+    speed: existing.speed,
+    segments: existing.segments,
+  };
 }
 
-function mergeLiveProgress(fresh: DownloadModel, existing?: DownloadModel): DownloadModel {
-  if (!existing || existing.id !== fresh.id) return fresh;
-  // Completed is sticky until the backend also reports Completed/Failed.
-  // Stale Downloading ticks must not revive a finished row.
-  if (
-    existing.status === 'Completed' &&
-    fresh.status !== 'Completed' &&
-    fresh.status !== 'Failed'
-  ) {
-    return {
-      ...fresh,
-      status: 'Completed',
-      downloaded_size: Math.max(fresh.downloaded_size, existing.downloaded_size),
-      total_size: Math.max(fresh.total_size, existing.total_size),
-      speed: 0,
-    };
-  }
-  // Same rule as applyProgress: a poll that started before pause must not
-  // revive the row. Queued is tray/IPC/schedule resume.
-  if (
-    existing.status === 'Paused' &&
-    fresh.status !== 'Paused' &&
-    fresh.status !== 'Failed' &&
-    fresh.status !== 'Completed' &&
-    fresh.status !== 'Queued'
-  ) {
-    return existing;
-  }
-  // HLS/ffmpeg emit Merging; a late Downloading poll or tick must not rewind UI.
-  if (existing.status === 'Merging' && fresh.status === 'Downloading') {
-    return {
-      ...existing,
-      downloaded_size: Math.max(fresh.downloaded_size, existing.downloaded_size),
-      total_size: Math.max(fresh.total_size, existing.total_size),
-      speed: 0,
-    };
-  }
-  // DB terminal/paused is source of truth — do not keep a stale Downloading row.
-  if (fresh.status === 'Completed' || fresh.status === 'Failed' || fresh.status === 'Paused') {
-    return fresh;
-  }
-  const freshLive = fresh.status === 'Downloading' || fresh.status === 'Merging';
-  const existingLive = existing.status === 'Downloading' || existing.status === 'Merging';
-  // Scheduler/concurrency write Queued. A poll that is behind live bytes is stale.
-  if (fresh.status === 'Queued') {
-    if (existingLive && existing.downloaded_size > fresh.downloaded_size) {
-      return {
-        ...fresh,
-        status: existing.status,
-        downloaded_size: existing.downloaded_size,
-        total_size: Math.max(fresh.total_size, existing.total_size),
-        speed: liveSpeed(fresh.speed, existing.speed),
-      };
-    }
-    return fresh;
-  }
-  if (existingLive && !freshLive) {
-    return {
-      ...fresh,
-      status: existing.status,
-      downloaded_size: Math.max(fresh.downloaded_size, existing.downloaded_size),
-      total_size: Math.max(fresh.total_size, existing.total_size),
-      speed: liveSpeed(fresh.speed, existing.speed),
-    };
-  }
-  if (freshLive && existingLive) {
-    return {
-      ...fresh,
-      downloaded_size: Math.max(fresh.downloaded_size, existing.downloaded_size),
-      total_size: Math.max(fresh.total_size, existing.total_size),
-      speed: liveSpeed(fresh.speed, existing.speed),
-    };
-  }
-  return fresh;
+/** Counters from a running worker. Only a live row moves; a late tick cannot revive a stopped one. */
+export function applyProgressToRow(row: DownloadModel, p: ProgressPayload): DownloadModel {
+  if (!isLive(row.status)) return row;
+  return {
+    ...row,
+    // Merging never goes back to Downloading within one run.
+    status: row.status === 'Merging' ? 'Merging' : p.status,
+    downloaded_size: p.downloaded_size,
+    total_size: p.total_size || row.total_size,
+    speed: p.status === 'Merging' ? 0 : p.speed,
+    segments: p.connections || row.segments,
+  };
 }
 
-// ponytail: downloads store absorbs the download list + selection state that
-// used to live as 4 separate useStates in App.tsx and was prop-drilled into
-// DownloadList, InspectorPanel, StatusBar, Sidebar. Components now subscribe
-// to just the slice they need.
+function insertById(rows: DownloadModel[], row: DownloadModel): DownloadModel[] {
+  // Rows are ordered newest first (id DESC), like the backend query.
+  const index = rows.findIndex((existing) => existing.id < row.id);
+  if (index === -1) return [...rows, row];
+  return [...rows.slice(0, index), row, ...rows.slice(index)];
+}
+
+export interface SelectMods {
+  toggle?: boolean;
+  range?: boolean;
+}
 
 interface DownloadsState {
-  downloads: DownloadModel[];
+  rows: DownloadModel[];
+  view: ViewId;
+  search: string;
   loading: boolean;
   error: string | null;
-  archived: boolean;
-  view: string;
-  search: string;
-  loadedPages: number;
   hasMore: boolean;
   loadingMore: boolean;
-  requestSequence: number;
-  selectedDownload: DownloadModel | null;
+  loadedPages: number;
+  sequence: number;
   selectedIds: Set<number>;
-  lastSelectId: number | null;
+  /** Row shown in the inspector and used as the range-select anchor. */
+  primaryId: number | null;
+  /** Speed of every running download, whatever the current view shows. */
+  liveSpeeds: Record<number, number>;
 
-  fetchDownloads: (archived?: boolean, search?: string, view?: string) => Promise<void>;
-  loadMoreDownloads: () => Promise<void>;
-  retryFetch: () => Promise<void>;
-  setLoading: (v: boolean) => void;
+  setView: (view: ViewId) => Promise<void>;
+  setSearch: (search: string) => Promise<void>;
+  refresh: () => Promise<void>;
+  loadMore: () => Promise<void>;
+  upsert: (row: DownloadModel) => void;
+  remove: (id: number) => void;
   applyProgress: (p: ProgressPayload) => void;
-  addDownload: (d: DownloadModel) => void;
-  selectDownload: (
-    item: DownloadModel | null,
-    mods?: { meta?: boolean; shift?: boolean },
-    visibleIds?: number[],
-  ) => void;
+  select: (id: number | null, mods?: SelectMods) => void;
+  selectAll: () => void;
   clearSelection: () => void;
-  syncSelectedFromList: () => void;
 }
 
-export const useDownloadsStore = create<DownloadsState>((set, get) => ({
-  downloads: [],
-  loading: true,
-  error: null,
-  archived: false,
-  view: 'All Downloads',
-  search: '',
-  loadedPages: 1,
-  hasMore: false,
-  loadingMore: false,
-  requestSequence: 0,
-  selectedDownload: null,
-  selectedIds: new Set(),
-  lastSelectId: null,
-
-  fetchDownloads: async (archived?: boolean, search?: string, view?: string) => {
-    const previousArchived = get().archived;
-    const previousView = get().view;
-    const currentArchived = archived ?? previousArchived;
-    const currentView = view ?? previousView;
-    const currentSearch = search ?? get().search;
-    const archiveChanged = archived !== undefined && archived !== previousArchived;
-    const viewChanged = view !== undefined && view !== previousView;
-    const searchChanged = search !== undefined && search !== get().search;
-    const pagesToFetch =
-      archiveChanged || searchChanged || viewChanged ? 1 : Math.max(1, get().loadedPages);
-    const sequence = get().requestSequence + 1;
-    const hasExistingRows = get().downloads.length > 0;
+export const useDownloadsStore = create<DownloadsState>((set, get) => {
+  const fetchPages = async (pages: number, reset: boolean) => {
+    const sequence = get().sequence + 1;
+    const { view, search } = get();
     set({
-      archived: currentArchived,
-      view: currentView,
-      search: currentSearch,
-      loadedPages: pagesToFetch,
+      sequence,
       loadingMore: false,
-      loading: !hasExistingRows,
+      loading: reset || get().rows.length === 0,
       error: null,
-      requestSequence: sequence,
+      ...(reset ? { rows: [], hasMore: false } : {}),
     });
     try {
-      const pages: DownloadModel[][] = [];
+      const filter = {
+        ...viewToDownloadFilter(view),
+        ...(search.trim() ? { search: search.trim() } : {}),
+      };
+      const collected: DownloadModel[] = [];
       let beforeId: number | undefined;
-      const viewFilter = viewToDownloadFilter(currentView, currentArchived);
-      for (let page = 0; page < pagesToFetch; page += 1) {
-        const filter =
-          pagesToFetch === 1 && page === 0
-            ? viewFilter
-            : {
-                ...viewFilter,
-                limit: DOWNLOAD_PAGE_SIZE,
-                ...(beforeId === undefined ? {} : { before_id: beforeId }),
-              };
-        const requestFilter = currentSearch.trim()
-          ? { ...filter, search: currentSearch.trim() }
-          : filter;
-        const rows = await getDownloads(requestFilter);
-        pages.push(rows);
-        const lastRow = rows[rows.length - 1];
-        beforeId = lastRow?.id;
-        if (rows.length < DOWNLOAD_PAGE_SIZE) break;
+      let lastPageFull = false;
+      for (let page = 0; page < pages; page += 1) {
+        const rows = await getDownloads({
+          ...filter,
+          limit: DOWNLOAD_PAGE_SIZE,
+          ...(beforeId === undefined ? {} : { before_id: beforeId }),
+        });
+        collected.push(...rows);
+        lastPageFull = rows.length === DOWNLOAD_PAGE_SIZE;
+        beforeId = rows[rows.length - 1]?.id;
+        if (!lastPageFull) break;
       }
-      const data = pages.flat();
-      if (get().requestSequence !== sequence) return;
+      if (get().sequence !== sequence) return;
       set((state) => {
-        const liveIds = new Set(data.map((download) => download.id));
-        const selectedIds = new Set([...state.selectedIds].filter((id) => liveIds.has(id)));
-        const merged = data.map((row) =>
-          mergeLiveProgress(
-            row,
-            state.downloads.find((download) => download.id === row.id),
-          ),
-        );
-        const selectedDownload = state.selectedDownload
-          ? (merged.find((download) => download.id === state.selectedDownload?.id) ?? null)
-          : null;
+        const byId = new Map(state.rows.map((row) => [row.id, row]));
+        const rows = collected.map((row) => mergeFetchedRow(row, byId.get(row.id)));
+        const visible = new Set(rows.map((row) => row.id));
+        const selectedIds = new Set([...state.selectedIds].filter((id) => visible.has(id)));
+        // Seed speeds of live rows so the total is right before the first tick.
+        const liveSpeeds = { ...state.liveSpeeds };
+        for (const row of rows) {
+          if (!isLive(row.status)) delete liveSpeeds[row.id];
+          else if (!(row.id in liveSpeeds)) liveSpeeds[row.id] = row.speed;
+        }
         return {
-          downloads: merged,
+          rows,
+          liveSpeeds,
           loading: false,
-          error: null,
-          hasMore: pages[pages.length - 1]?.length === DOWNLOAD_PAGE_SIZE,
+          hasMore: lastPageFull,
+          loadedPages: Math.max(1, Math.ceil(rows.length / DOWNLOAD_PAGE_SIZE)),
           selectedIds,
-          selectedDownload,
+          primaryId:
+            state.primaryId !== null && visible.has(state.primaryId) ? state.primaryId : null,
         };
       });
     } catch (e) {
-      console.error('Failed to fetch downloads', e);
-      if (get().requestSequence !== sequence) return;
-      set({
-        loading: false,
-        error: e instanceof Error ? e.message : String(e),
-      });
+      if (get().sequence !== sequence) return;
+      set({ loading: false, error: e instanceof Error ? e.message : String(e) });
     }
-  },
+  };
 
-  loadMoreDownloads: async () => {
-    const state = get();
-    if (state.loadingMore || !state.hasMore) return;
-    const sequence = state.requestSequence + 1;
-    set({ loadingMore: true, error: null, requestSequence: sequence });
-    try {
-      const rows = await getDownloads({
-        ...viewToDownloadFilter(state.view, state.archived),
-        ...(state.search.trim() ? { search: state.search.trim() } : {}),
-        limit: DOWNLOAD_PAGE_SIZE,
-        before_id: state.downloads[state.downloads.length - 1]?.id,
-      });
-      if (get().requestSequence !== sequence) return;
-      set((current) => {
-        const existingIds = new Set(current.downloads.map((download) => download.id));
-        const appended = rows
-          .filter((download) => !existingIds.has(download.id))
-          .map((row) =>
-            mergeLiveProgress(
-              row,
-              current.downloads.find((download) => download.id === row.id),
-            ),
-          );
-        return {
-          downloads: [...current.downloads, ...appended],
-          loadedPages: current.loadedPages + 1,
-          hasMore: rows.length === DOWNLOAD_PAGE_SIZE,
-          loadingMore: false,
-        };
-      });
-    } catch (e) {
-      if (get().requestSequence !== sequence) return;
-      set({
-        loadingMore: false,
-        error: e instanceof Error ? e.message : String(e),
-      });
-    }
-  },
+  return {
+    rows: [],
+    view: 'all',
+    search: '',
+    loading: true,
+    error: null,
+    hasMore: false,
+    loadingMore: false,
+    loadedPages: 1,
+    sequence: 0,
+    selectedIds: new Set(),
+    primaryId: null,
+    liveSpeeds: {},
 
-  retryFetch: () => get().fetchDownloads(get().archived, get().search, get().view),
+    setView: async (view) => {
+      if (view === get().view) return;
+      set({ view, selectedIds: new Set(), primaryId: null });
+      await fetchPages(1, true);
+    },
 
-  setLoading: (v) => set({ loading: v }),
+    setSearch: async (search) => {
+      if (search === get().search) return;
+      set({ search });
+      await fetchPages(1, false);
+    },
 
-  applyProgress: (p) => {
-    set((state) => {
-      if (!state.downloads.some((d) => d.id === p.id)) return state;
-      const downloads = state.downloads.map((d) => {
-        if (d.id !== p.id) return d;
-        if (d.status === 'Completed') {
-          if (p.status === 'Failed' || p.status === 'Paused') {
-            return {
-              ...d,
-              status: p.status,
-              speed: 0,
-              downloaded_size: Math.max(p.downloaded_size, d.downloaded_size),
-              total_size: Math.max(p.total_size, d.total_size),
-              error_message: p.status === 'Failed' ? (p.error_message ?? d.error_message) : null,
-            };
-          }
+    refresh: () => fetchPages(Math.max(1, get().loadedPages), false),
+
+    loadMore: async () => {
+      const state = get();
+      if (state.loadingMore || !state.hasMore || state.loading) return;
+      const sequence = state.sequence + 1;
+      set({ loadingMore: true, sequence });
+      try {
+        const rows = await getDownloads({
+          ...viewToDownloadFilter(state.view),
+          ...(state.search.trim() ? { search: state.search.trim() } : {}),
+          limit: DOWNLOAD_PAGE_SIZE,
+          before_id: state.rows[state.rows.length - 1]?.id,
+        });
+        if (get().sequence !== sequence) return;
+        set((current) => {
+          const known = new Set(current.rows.map((row) => row.id));
           return {
-            ...d,
-            downloaded_size: Math.max(p.downloaded_size, d.downloaded_size),
-            total_size: Math.max(p.total_size, d.total_size),
+            rows: [...current.rows, ...rows.filter((row) => !known.has(row.id))],
+            hasMore: rows.length === DOWNLOAD_PAGE_SIZE,
+            loadedPages: current.loadedPages + 1,
+            loadingMore: false,
           };
-        }
-        // Stale Downloading ticks after pause must not revive the row.
-        // Queued (IPC/tray resume) is the signal that the job is live again.
-        if (
-          d.status === 'Paused' &&
-          p.status !== 'Paused' &&
-          p.status !== 'Failed' &&
-          p.status !== 'Completed' &&
-          p.status !== 'Queued'
-        ) {
-          return d;
-        }
-        if (d.status === 'Merging' && p.status === 'Downloading') {
-          return {
-            ...d,
-            downloaded_size: Math.max(p.downloaded_size, d.downloaded_size),
-            total_size: Math.max(p.total_size, d.total_size),
-            speed: 0,
-          };
-        }
-        const halt =
-          p.status === 'Completed' ||
-          p.status === 'Failed' ||
-          p.status === 'Paused' ||
-          p.status === 'Queued' ||
-          p.status === 'Merging';
-        return {
-          ...d,
-          downloaded_size: Math.max(p.downloaded_size, d.downloaded_size),
-          total_size: Math.max(p.total_size, d.total_size),
-          speed: halt ? 0 : liveSpeed(p.speed, d.speed),
-          status: p.status,
-          segments: p.connections || d.segments,
-          error_message: p.status === 'Failed' ? (p.error_message ?? d.error_message) : null,
-        };
-      });
-      const selectedDownload =
-        state.selectedDownload?.id === p.id
-          ? (downloads.find((d) => d.id === p.id) ?? state.selectedDownload)
-          : state.selectedDownload;
-      return { downloads, selectedDownload };
-    });
-  },
-
-  addDownload: (d) => {
-    set((state) => {
-      if (state.downloads.some((x) => x.id === d.id)) return state;
-      if (!downloadAdmittedToView(d, state.view, state.archived)) return state;
-      return { downloads: [d, ...state.downloads] };
-    });
-  },
-
-  selectDownload: (item, mods, visibleIds) => {
-    if (!item) {
-      set({ selectedDownload: null, selectedIds: new Set() });
-      return;
-    }
-    const { downloads, lastSelectId } = get();
-    if (mods?.meta) {
-      set((state) => {
-        const n = new Set(state.selectedIds);
-        if (n.has(item.id)) {
-          n.delete(item.id);
-          const selectedDownload =
-            state.selectedDownload != null && n.has(state.selectedDownload.id)
-              ? state.selectedDownload
-              : (state.downloads.find((d) => n.has(d.id)) ?? null);
-          return { selectedIds: n, selectedDownload };
-        }
-        n.add(item.id);
-        return { selectedIds: n, selectedDownload: item };
-      });
-    } else if (mods?.shift && lastSelectId !== null) {
-      const ids = visibleIds?.length ? visibleIds : downloads.map((d) => d.id);
-      const start = ids.indexOf(lastSelectId);
-      const end = ids.indexOf(item.id);
-      if (start !== -1 && end !== -1) {
-        const [lo, hi] = start < end ? [start, end] : [end, start];
-        set({ selectedIds: new Set(ids.slice(lo, hi + 1)), selectedDownload: item });
-      } else {
-        set({ selectedDownload: item, selectedIds: new Set([item.id]) });
+        });
+      } catch (e) {
+        if (get().sequence !== sequence) return;
+        set({ loadingMore: false, error: e instanceof Error ? e.message : String(e) });
       }
-    } else {
-      set({ selectedDownload: item, selectedIds: new Set([item.id]) });
-    }
-    set({ lastSelectId: item.id });
-  },
+    },
 
-  clearSelection: () => set({ selectedIds: new Set(), selectedDownload: null }),
+    upsert: (row) =>
+      set((state) => {
+        const liveSpeeds = { ...state.liveSpeeds };
+        if (isLive(row.status)) liveSpeeds[row.id] = row.speed;
+        else delete liveSpeeds[row.id];
+        const index = state.rows.findIndex((existing) => existing.id === row.id);
+        const belongs =
+          downloadMatchesView(row, state.view) && downloadMatchesSearch(row, state.search);
+        if (!belongs) {
+          if (index === -1) return { liveSpeeds };
+          const selectedIds = new Set(state.selectedIds);
+          selectedIds.delete(row.id);
+          return {
+            liveSpeeds,
+            rows: state.rows.filter((existing) => existing.id !== row.id),
+            selectedIds,
+            primaryId: state.primaryId === row.id ? null : state.primaryId,
+          };
+        }
+        if (index === -1) return { liveSpeeds, rows: insertById(state.rows, row) };
+        const existing = state.rows[index];
+        // A row update never carries fresher counters than live progress.
+        const next =
+          isLive(row.status) && isLive(existing.status)
+            ? {
+                ...row,
+                downloaded_size: Math.max(row.downloaded_size, existing.downloaded_size),
+                speed: existing.speed,
+              }
+            : row;
+        const rows = state.rows.slice();
+        rows[index] = next;
+        return { liveSpeeds, rows };
+      }),
 
-  // Keep the inspector selection pointing at a live row (or clear it if removed).
-  syncSelectedFromList: () => {
-    set((state) => {
-      if (!state.selectedDownload) return state;
-      const live = state.downloads.find((d) => d.id === state.selectedDownload!.id);
-      if (!live) return { selectedDownload: null };
-      if (live !== state.selectedDownload) return { selectedDownload: live };
-      return state;
-    });
-  },
-}));
+    remove: (id) =>
+      set((state) => {
+        const liveSpeeds = { ...state.liveSpeeds };
+        delete liveSpeeds[id];
+        const selectedIds = new Set(state.selectedIds);
+        selectedIds.delete(id);
+        return {
+          liveSpeeds,
+          rows: state.rows.filter((row) => row.id !== id),
+          selectedIds,
+          primaryId: state.primaryId === id ? null : state.primaryId,
+        };
+      }),
+
+    applyProgress: (p) =>
+      set((state) => {
+        const index = state.rows.findIndex((row) => row.id === p.id);
+        const current = index === -1 ? undefined : state.rows[index];
+        // Speeds of rows outside this view still count towards the total.
+        if (current && !isLive(current.status)) return state;
+        const liveSpeeds = { ...state.liveSpeeds, [p.id]: p.status === 'Merging' ? 0 : p.speed };
+        if (!current) return { liveSpeeds };
+        const rows = state.rows.slice();
+        rows[index] = applyProgressToRow(current, p);
+        return { liveSpeeds, rows };
+      }),
+
+    select: (id, mods) =>
+      set((state) => {
+        if (id === null) return { selectedIds: new Set(), primaryId: null };
+        if (mods?.toggle) {
+          const selectedIds = new Set(state.selectedIds);
+          if (selectedIds.has(id)) {
+            selectedIds.delete(id);
+            const primaryId =
+              state.primaryId === id ? ([...selectedIds].pop() ?? null) : state.primaryId;
+            return { selectedIds, primaryId };
+          }
+          selectedIds.add(id);
+          return { selectedIds, primaryId: id };
+        }
+        if (mods?.range && state.primaryId !== null) {
+          const ids = state.rows.map((row) => row.id);
+          const from = ids.indexOf(state.primaryId);
+          const to = ids.indexOf(id);
+          if (from !== -1 && to !== -1) {
+            const [lo, hi] = from < to ? [from, to] : [to, from];
+            // The anchor stays put so the range can grow or shrink.
+            return { selectedIds: new Set(ids.slice(lo, hi + 1)) };
+          }
+        }
+        return { selectedIds: new Set([id]), primaryId: id };
+      }),
+
+    selectAll: () =>
+      set((state) => ({
+        selectedIds: new Set(state.rows.map((row) => row.id)),
+        primaryId: state.primaryId ?? state.rows[0]?.id ?? null,
+      })),
+
+    clearSelection: () => set({ selectedIds: new Set(), primaryId: null }),
+  };
+});
+
+/** Total speed of every running download. */
+export function totalLiveSpeed(speeds: Record<number, number>): number {
+  return Object.values(speeds).reduce((sum, value) => sum + (value > 0 ? value : 0), 0);
+}

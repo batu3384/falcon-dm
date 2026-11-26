@@ -16,10 +16,9 @@ export function isModalFocusable(el: HTMLElement): boolean {
   return style.display !== 'none' && style.visibility !== 'hidden';
 }
 
-/** Onboarding or a modal is up — don't open another sheet (⌘K / drop / clipboard). */
+/** A sheet is up — don't open another one (⌘K / drop / clipboard / shortcuts). */
 export function isForegroundDialogOpen(opts?: { ignorePalette?: boolean }): boolean {
-  if (document.querySelector('.wizard-overlay')) return true;
-  const sel = opts?.ignorePalette ? '.modal-overlay:not(.palette-overlay)' : '.modal-overlay';
+  const sel = opts?.ignorePalette ? '.sheet-overlay:not(.palette-overlay)' : '.sheet-overlay';
   return !!document.querySelector(sel);
 }
 

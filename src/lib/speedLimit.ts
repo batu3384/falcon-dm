@@ -1,8 +1,24 @@
-/** Toolbar Gauge vs Settings `speed_limit_kbps` — keep the last non-zero as restore. */
-export function speedLimitFromSettings(
-  kbps: number | undefined | null,
-  previousSaved: number,
-): { limited: boolean; saved: number } {
-  const n = typeof kbps === 'number' && Number.isFinite(kbps) && kbps > 0 ? Math.floor(kbps) : 0;
-  return { limited: n > 0, saved: n > 0 ? n : previousSaved };
+import * as api from '../api/commands';
+
+const LAST_KEY = 'falcon_speed_limit_last';
+export const DEFAULT_LIMIT_KBPS = 1024;
+
+/** The limit the toolbar toggle restores (last non-zero value, else 1 MB/s). */
+export function lastSpeedLimit(): number {
+  const saved = Number(localStorage.getItem(LAST_KEY));
+  return Number.isFinite(saved) && saved > 0 ? Math.floor(saved) : DEFAULT_LIMIT_KBPS;
+}
+
+export function rememberSpeedLimit(kbps: number) {
+  if (kbps > 0) localStorage.setItem(LAST_KEY, String(Math.floor(kbps)));
+}
+
+/** Turn the global limit on or off. Returns the new limit in KB/s (0 = off). */
+export async function toggleSpeedLimit(): Promise<number> {
+  const settings = await api.getSettings();
+  const current = settings.speed_limit_kbps ?? 0;
+  rememberSpeedLimit(current);
+  const next = current > 0 ? 0 : lastSpeedLimit();
+  await api.saveSettings({ ...settings, speed_limit_kbps: next });
+  return next;
 }

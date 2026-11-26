@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isValidSchedule, isValidScheduleRange } from '../lib/scheduler';
+import { isValidSchedule, isValidScheduleRange } from './scheduler';
 
 describe('isValidScheduleRange', () => {
   it('accepts overnight ranges', () => {

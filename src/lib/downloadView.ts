@@ -1,72 +1,86 @@
 import type { DownloadFilter } from '../api/commands';
+import type { DownloadStats } from '../types';
+
+export const LIBRARY_VIEWS = [
+  'all',
+  'active',
+  'paused',
+  'completed',
+  'failed',
+  'archived',
+] as const;
+export const CATEGORY_VIEWS = ['video', 'music', 'document', 'archive', 'program'] as const;
+export type ViewId = (typeof LIBRARY_VIEWS)[number] | (typeof CATEGORY_VIEWS)[number];
+
+const CATEGORY_OF: Record<(typeof CATEGORY_VIEWS)[number], string> = {
+  video: 'Video',
+  music: 'Music',
+  document: 'Document',
+  archive: 'Archive',
+  program: 'Program',
+};
 
 type ViewRow = { status: string; category: string; archived?: boolean };
 
-/** Map sidebar view → backend filter so Failed/Video/etc. are not sliced off the unfiltered page. */
-export function viewToDownloadFilter(view: string, archived: boolean): DownloadFilter {
-  if (archived || view === 'Archived') return { archived: true };
+/** Sidebar view → backend filter, so a view never shows a slice of another page. */
+export function viewToDownloadFilter(view: ViewId): DownloadFilter {
+  if (view === 'archived') return { archived: true };
   const base: DownloadFilter = { archived: false };
   switch (view) {
-    case 'Downloading':
-      return { ...base, statuses: ['Downloading', 'Merging'] };
-    case 'Paused':
-      return { ...base, statuses: ['Paused', 'Queued'] };
-    case 'Failed':
-      return { ...base, status: 'Failed' };
-    case 'Completed':
+    case 'active':
+      return { ...base, statuses: ['Downloading', 'Merging', 'Queued'] };
+    case 'paused':
+      return { ...base, status: 'Paused' };
+    case 'completed':
       return { ...base, status: 'Completed' };
-    case 'Video':
-      return { ...base, category: 'Video' };
-    case 'Music':
-      return { ...base, category: 'Music' };
-    case 'Documents':
-      return { ...base, category: 'Document' };
-    case 'Compressed':
-      return { ...base, category: 'Archive' };
-    case 'Programs':
-      return { ...base, category: 'Program' };
-    default:
+    case 'failed':
+      return { ...base, status: 'Failed' };
+    case 'all':
       return base;
+    default:
+      return { ...base, category: CATEGORY_OF[view] };
   }
 }
 
-/** Same rules as the sidebar fetch — list UI must not show the wrong rows. */
-export function downloadMatchesView(row: ViewRow, view: string, archived: boolean): boolean {
-  if (archived || view === 'Archived') return !!row.archived;
+/** Client-side twin of `viewToDownloadFilter` for live row updates. */
+export function downloadMatchesView(row: ViewRow, view: ViewId): boolean {
+  if (view === 'archived') return !!row.archived;
   if (row.archived) return false;
   switch (view) {
-    case 'Downloading':
-      return row.status === 'Downloading' || row.status === 'Merging';
-    case 'Paused':
-      return row.status === 'Paused' || row.status === 'Queued';
-    case 'Failed':
-      return row.status === 'Failed';
-    case 'Completed':
+    case 'active':
+      return row.status === 'Downloading' || row.status === 'Merging' || row.status === 'Queued';
+    case 'paused':
+      return row.status === 'Paused';
+    case 'completed':
       return row.status === 'Completed';
-    case 'Video':
-      return row.category === 'Video';
-    case 'Music':
-      return row.category === 'Music';
-    case 'Documents':
-      return row.category === 'Document';
-    case 'Compressed':
-      return row.category === 'Archive';
-    case 'Programs':
-      return row.category === 'Program';
-    default:
+    case 'failed':
+      return row.status === 'Failed';
+    case 'all':
       return true;
+    default:
+      return row.category === CATEGORY_OF[view];
   }
 }
 
-/**
- * Live `download-added` may enter the store only when this view can show it
- * now, or (Active) after Queued → Downloading without a refetch.
- */
-export function downloadAdmittedToView(row: ViewRow, view: string, archived: boolean): boolean {
-  if (archived || view === 'Archived') return !!row.archived;
-  if (row.archived) return false;
-  if (view === 'Downloading') {
-    return row.status === 'Downloading' || row.status === 'Merging' || row.status === 'Queued';
-  }
-  return downloadMatchesView(row, view, archived);
+/** Same contains-match as the backend `search` filter (filename or URL). */
+export function downloadMatchesSearch(row: { filename: string; url: string }, search: string) {
+  const q = search.trim().toLowerCase();
+  return !q || row.filename.toLowerCase().includes(q) || row.url.toLowerCase().includes(q);
+}
+
+/** Sidebar badges come from DB aggregates, not from the loaded page. */
+export function viewCounts(stats: DownloadStats): Record<ViewId, number> {
+  return {
+    all: stats.all,
+    active: stats.active + stats.queued,
+    paused: stats.paused,
+    completed: stats.completed,
+    failed: stats.failed,
+    archived: stats.archived,
+    video: stats.video,
+    music: stats.music,
+    document: stats.document,
+    archive: stats.archive,
+    program: stats.program,
+  };
 }

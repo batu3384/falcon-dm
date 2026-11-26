@@ -33,7 +33,6 @@ const validDownload = {
   referrer: null,
   user_agent: null,
   cookies: null,
-  aria2_gid: null,
 };
 
 describe('DownloadSchema', () => {
@@ -42,6 +41,14 @@ describe('DownloadSchema', () => {
     expect(parsed.id).toBe(1);
     expect(parsed.status).toBe('Downloading');
     expect(parsed.archived).toBe(false);
+    expect(parsed.attempts).toBe(0);
+    expect(parsed.retry_at).toBeNull();
+  });
+
+  it('keeps retry bookkeeping from the backend', () => {
+    const parsed = DownloadSchema.parse({ ...validDownload, attempts: 2, retry_at: 1_700_000 });
+    expect(parsed.attempts).toBe(2);
+    expect(parsed.retry_at).toBe(1_700_000);
   });
 
   it('does not expose cookies in download payload schema', () => {
@@ -93,7 +100,9 @@ describe('ProgressPayloadSchema', () => {
       connections: 8,
     });
     expect(parsed.status).toBe('Downloading');
-    expect(
+  });
+  it('only carries live statuses (stops arrive as full rows)', () => {
+    expect(() =>
       ProgressPayloadSchema.parse({
         id: 1,
         downloaded_size: 100,
@@ -101,9 +110,8 @@ describe('ProgressPayloadSchema', () => {
         speed: 0,
         status: 'Failed',
         connections: 0,
-        error_message: 'HTTP 403',
-      }).error_message,
-    ).toBe('HTTP 403');
+      }),
+    ).toThrow();
   });
   it('rejects an invalid status', () => {
     expect(() =>
@@ -133,13 +141,20 @@ describe('SettingsSchema', () => {
 });
 
 describe('ExtensionStatusSchema', () => {
-  it('accepts approved + pending + token state', () => {
+  it('accepts approved ids and pending code requests', () => {
     const parsed = ExtensionStatusSchema.parse({
-      has_token: true,
       approved_extension_ids: ['abc'],
-      pending_pair_id: null,
+      pending: [{ extension_id: 'abcdefghijklmnopabcdefghijklmnop', code: '482913' }],
     });
-    expect(parsed.has_token).toBe(true);
+    expect(parsed.pending[0].code).toBe('482913');
+  });
+  it('rejects a malformed pairing code', () => {
+    expect(() =>
+      ExtensionStatusSchema.parse({
+        approved_extension_ids: [],
+        pending: [{ extension_id: 'abcdefghijklmnopabcdefghijklmnop', code: '12ab56' }],
+      }),
+    ).toThrow();
   });
 });
 
@@ -170,6 +185,10 @@ describe('diagnostic payload schemas', () => {
     };
     expect(DownloadStatsSchema.parse(stats).active).toBe(1);
     expect(DownloadStatsSchema.parse(stats).all).toBe(10);
+    expect(DownloadStatsSchema.parse(stats).free_disk_bytes).toBeNull();
+    expect(
+      DownloadStatsSchema.parse({ ...stats, free_disk_bytes: 5, speed_limit_kbps: 512 }),
+    ).toMatchObject({ free_disk_bytes: 5, speed_limit_kbps: 512 });
     expect(() => DownloadStatsSchema.parse({ ...stats, active: '1' })).toThrow();
   });
 

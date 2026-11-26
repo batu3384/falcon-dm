@@ -4,28 +4,42 @@ import { initReactI18next } from 'react-i18next';
 import enTranslation from './locales/en.json';
 import trTranslation from './locales/tr.json';
 
-const saved = localStorage.getItem('falcon_lang');
-// ponytail: navigator.userLanguage is IE/legacy — typed access avoids `any`.
-// It's optional on the modern Navigator type, so guard with a feature check.
-const legacyLang =
-  typeof navigator !== 'undefined' && 'userLanguage' in navigator
-    ? (navigator as Navigator & { userLanguage?: string }).userLanguage
-    : undefined;
-const userLang = navigator.language || legacyLang || 'en';
-const defaultLang = saved || (userLang.startsWith('tr') ? 'tr' : 'en');
+const LANG_KEY = 'falcon_lang';
 
-document.documentElement.lang = defaultLang;
+function systemLanguage(): 'en' | 'tr' {
+  const lang = (typeof navigator !== 'undefined' && navigator.language) || 'en';
+  return lang.toLowerCase().startsWith('tr') ? 'tr' : 'en';
+}
 
-i18n.use(initReactI18next).init({
+/** 'system' | 'en' | 'tr' as chosen in Settings. */
+export function languagePreference(): string {
+  const saved = localStorage.getItem(LANG_KEY);
+  return saved === 'en' || saved === 'tr' ? saved : 'system';
+}
+
+function resolve(preference: string): 'en' | 'tr' {
+  return preference === 'en' || preference === 'tr' ? preference : systemLanguage();
+}
+
+export function applyLanguagePreference(preference: string) {
+  if (preference === 'en' || preference === 'tr') localStorage.setItem(LANG_KEY, preference);
+  else localStorage.removeItem(LANG_KEY);
+  const lang = resolve(preference);
+  document.documentElement.lang = lang;
+  void i18n.changeLanguage(lang);
+}
+
+const initial = resolve(languagePreference());
+document.documentElement.lang = initial;
+
+void i18n.use(initReactI18next).init({
   resources: {
     en: { translation: enTranslation },
     tr: { translation: trTranslation },
   },
-  lng: defaultLang,
+  lng: initial,
   fallbackLng: 'en',
-  interpolation: {
-    escapeValue: false,
-  },
+  interpolation: { escapeValue: false },
 });
 
 export default i18n;

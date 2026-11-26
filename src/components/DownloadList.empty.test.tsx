@@ -1,35 +1,51 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import '../i18n';
+import i18n from '../i18n';
 import DownloadList from './DownloadList';
+import { useDownloadsStore } from '../store/downloads';
+import { useUiStore } from '../store/ui';
 
 describe('DownloadList empty states', () => {
-  const base = {
-    downloads: [],
-    searchQuery: '',
-    selectedId: null,
-    onSelectDownload: vi.fn(),
-    onRefresh: vi.fn(),
-    onAddClick: vi.fn(),
-  };
-
-  it('shows category-specific copy for Video', () => {
-    render(<DownloadList {...base} category="Video" />);
-    expect(screen.getByRole('heading', { name: /Videos/i })).toBeInTheDocument();
-    expect(screen.getByText(/Videos is empty/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Add Download/i })).toBeInTheDocument();
+  beforeEach(() => {
+    void i18n.changeLanguage('en');
+    useDownloadsStore.setState({
+      rows: [],
+      view: 'all',
+      search: '',
+      loading: false,
+      error: null,
+      hasMore: false,
+      selectedIds: new Set(),
+      primaryId: null,
+    });
+    useUiStore.setState({ newDownload: null });
   });
 
-  it('shows load error when fetch fails with no rows', () => {
-    render(
-      <DownloadList
-        {...base}
-        category="All Downloads"
-        error="invoke failed"
-        onRetry={vi.fn()}
-      />,
-    );
-    expect(screen.getByRole('alert')).toBeInTheDocument();
-    expect(screen.getByText(/Downloads unavailable/i)).toBeInTheDocument();
+  it('invites the first download in the main view', () => {
+    render(<DownloadList />);
+    expect(screen.getByRole('heading', { name: 'No downloads yet' })).toBeInTheDocument();
+    screen.getByRole('button', { name: 'New Download' }).click();
+    expect(useUiStore.getState().newDownload).toBe('');
+  });
+
+  it('shows kind-specific copy without an add button', () => {
+    useDownloadsStore.setState({ view: 'video' });
+    render(<DownloadList />);
+    expect(screen.getByRole('heading', { name: 'No videos' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New Download' })).toBeNull();
+  });
+
+  it('explains an empty search', () => {
+    useDownloadsStore.setState({ search: 'zzz' });
+    render(<DownloadList />);
+    expect(screen.getByRole('heading', { name: 'No results for “zzz”' })).toBeInTheDocument();
+  });
+
+  it('shows a retryable error when nothing could be loaded', () => {
+    useDownloadsStore.setState({ error: 'invoke failed' });
+    render(<DownloadList />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Downloads could not be loaded');
+    expect(screen.getByRole('button', { name: 'Try Again' })).toBeInTheDocument();
   });
 });

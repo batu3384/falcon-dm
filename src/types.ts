@@ -6,18 +6,26 @@ export type {
   DownloadProfile,
   ProgressPayload,
   ScheduleModel,
+  PairRequest,
+  ExtensionStatus,
+  ToolStatus,
+  LogEntry,
+  DownloadStats,
 } from './lib/schema';
 
 export {
   formatBytes,
+  formatSpeed,
+  formatDuration,
   calculateETA,
   progressPercent,
   progressIndeterminate,
-  progressTotalLabel,
   loadedCountLabel,
   fileExtension,
   fileFullPath,
+  displayPath,
   formatLocaleDate,
+  formatShortDate,
 } from './lib/format';
 
 export { applyTheme, watchSystemTheme } from './lib/theme';

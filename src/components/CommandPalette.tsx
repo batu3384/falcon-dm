@@ -1,34 +1,29 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Search } from 'lucide-react';
-import { useModalA11y } from '../hooks/useModalA11y';
+import { Sheet } from './Sheet';
 
 export interface PaletteAction {
   id: string;
   label: string;
-  icon: React.ComponentType<{ size?: number; strokeWidth?: number; 'aria-hidden'?: boolean }>;
-  run: () => void | Promise<void>;
+  icon: React.ComponentType<{ size?: number; 'aria-hidden'?: boolean }>;
+  shortcut?: string;
   keywords?: string;
+  run: () => void | Promise<void>;
 }
 
-interface CommandPaletteProps {
-  onClose: () => void;
+export function CommandPalette({
+  actions,
+  onClose,
+  onError,
+}: {
   actions: PaletteAction[];
+  onClose: () => void;
   onError?: (error: unknown) => void;
-}
-
-export function CommandPalette({ onClose, actions, onError }: CommandPaletteProps) {
+}) {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
-  const [activeIndex, setActiveIndex] = useState(0);
-  const [running, setRunning] = useState(false);
-  const panelRef = useRef<HTMLDivElement>(null);
-  useModalA11y(panelRef, onClose);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+  const [active, setActive] = useState(0);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -36,16 +31,11 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
     return actions.filter(
       (a) => a.label.toLowerCase().includes(q) || (a.keywords?.toLowerCase().includes(q) ?? false),
     );
-  }, [query, actions]);
+  }, [actions, query]);
 
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [query]);
-
-  const runAction = async (action: PaletteAction | undefined) => {
-    if (!action || running) return;
-    setRunning(true);
-    // Close first so focus restore cannot steal the next dialog's initial focus.
+  const run = async (action: PaletteAction | undefined) => {
+    if (!action) return;
+    // Close first so the next sheet gets focus.
     onClose();
     try {
       await action.run();
@@ -55,100 +45,79 @@ export function CommandPalette({ onClose, actions, onError }: CommandPaletteProp
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (!filtered.length) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      if (filtered.length === 0) return;
-      setActiveIndex((i) => Math.min(i + 1, filtered.length - 1));
+      setActive((i) => (i + 1) % filtered.length);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      if (filtered.length === 0) return;
-      setActiveIndex((i) => Math.max(i - 1, 0));
+      setActive((i) => (i - 1 + filtered.length) % filtered.length);
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      if (filtered.length === 0) return;
-      void runAction(filtered[activeIndex]);
-    } else if (e.key === 'Home') {
-      e.preventDefault();
-      if (filtered.length === 0) return;
-      setActiveIndex(0);
-    } else if (e.key === 'End') {
-      e.preventDefault();
-      if (filtered.length === 0) return;
-      setActiveIndex(Math.max(0, filtered.length - 1));
+      void run(filtered[active]);
     }
   };
 
   return (
-    <div className="modal-overlay palette-overlay" onClick={onClose} role="presentation">
-      <div
-        ref={panelRef}
-        className="modal-panel modal-md palette-panel"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="palette-title"
-      >
-        <div className="modal-head">
-          <div className="search-wrap palette-search">
-            <Search size={16} aria-hidden={true} />
-            <input
-              ref={inputRef}
-              className="search-input"
-              placeholder={t('commandPalette.placeholder')}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={onKeyDown}
-              // ponytail: combobox pattern — input controls a listbox of options.
-              role="combobox"
-              aria-haspopup="listbox"
-              aria-expanded={true}
-              aria-controls="palette-listbox"
-              aria-autocomplete="list"
-              aria-activedescendant={
-                filtered[activeIndex] ? `palette-opt-${filtered[activeIndex].id}` : undefined
-              }
-              aria-label={t('commandPalette.placeholder')}
-              data-modal-initial-focus
-            />
-            <kbd className="kbd">Esc</kbd>
-          </div>
-        </div>
-        <div
-          className="modal-body palette-body"
-          id="palette-listbox"
-          role="listbox"
-          aria-label={t('commandPalette.title')}
-        >
-          <span id="palette-title" className="sr-only">
-            {t('commandPalette.title')}
-          </span>
-          {filtered.length === 0 ? (
-            <div className="empty-state palette-empty" role="status">
-              <span className="empty-title">{t('commandPalette.no_results')}</span>
-            </div>
-          ) : (
-            filtered.map((action, i) => {
-              const Icon = action.icon;
-              return (
-                <button
-                  key={action.id}
-                  id={`palette-opt-${action.id}`}
-                  type="button"
-                  className={`cmd-item ${i === activeIndex ? 'active' : ''}`}
-                  onClick={() => void runAction(action)}
-                  onMouseEnter={() => setActiveIndex(i)}
-                  role="option"
-                  aria-selected={i === activeIndex}
-                  disabled={running}
-                >
-                  <Icon size={15} strokeWidth={1.75} aria-hidden={true} />
-                  <span>{action.label}</span>
-                </button>
-              );
-            })
-          )}
-        </div>
+    <Sheet
+      label={t('palette.title')}
+      onClose={onClose}
+      dismissOnBackdrop
+      className="palette"
+      overlayClassName="palette-overlay"
+    >
+      <div className="palette-input">
+        <Search size={17} aria-hidden={true} />
+        <input
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setActive(0);
+          }}
+          onKeyDown={onKeyDown}
+          placeholder={t('palette.placeholder')}
+          aria-label={t('palette.placeholder')}
+          role="combobox"
+          aria-expanded={true}
+          aria-controls="palette-list"
+          aria-activedescendant={filtered[active] ? `palette-${filtered[active].id}` : undefined}
+          data-modal-initial-focus
+          spellCheck={false}
+        />
       </div>
-    </div>
+      <div
+        className="palette-list"
+        id="palette-list"
+        role="listbox"
+        aria-label={t('palette.title')}
+      >
+        {filtered.length === 0 ? (
+          <div className="palette-empty" role="status">
+            {t('palette.empty')}
+          </div>
+        ) : (
+          filtered.map((action, i) => {
+            const Icon = action.icon;
+            return (
+              <button
+                key={action.id}
+                id={`palette-${action.id}`}
+                type="button"
+                role="option"
+                aria-selected={i === active}
+                tabIndex={-1}
+                className={`palette-item${i === active ? ' active' : ''}`}
+                onMouseEnter={() => setActive(i)}
+                onClick={() => void run(action)}
+              >
+                <Icon size={15} aria-hidden={true} />
+                <span>{action.label}</span>
+                {action.shortcut && <kbd className="kbd">{action.shortcut}</kbd>}
+              </button>
+            );
+          })
+        )}
+      </div>
+    </Sheet>
   );
 }

@@ -1,118 +1,105 @@
 import { useTranslation } from 'react-i18next';
 import {
-  Download,
-  Activity,
-  CheckCircle2,
-  Film,
-  Music,
-  FileText,
-  Package,
-  AppWindow,
-  Pause,
   AlertTriangle,
+  AppWindow,
   Archive,
+  CheckCircle2,
+  Download,
+  FileArchive,
+  FileText,
+  Film,
+  Layers,
+  Music,
+  Pause,
+  Settings,
 } from 'lucide-react';
+import { useDownloadsStore } from '../store/downloads';
+import { useAppStore } from '../store/app';
+import { useUiStore } from '../store/ui';
+import { CATEGORY_VIEWS, LIBRARY_VIEWS, viewCounts, type ViewId } from '../lib/downloadView';
 
-interface SidebarProps {
-  activeCategory: string;
-  onSelectCategory: (category: string) => void;
-  counts?: Record<string, number>;
-}
+const ICONS: Record<ViewId, typeof Download> = {
+  all: Layers,
+  active: Download,
+  paused: Pause,
+  completed: CheckCircle2,
+  failed: AlertTriangle,
+  archived: Archive,
+  video: Film,
+  music: Music,
+  document: FileText,
+  archive: FileArchive,
+  program: AppWindow,
+};
 
-export default function Sidebar({ activeCategory, onSelectCategory, counts = {} }: SidebarProps) {
+export default function Sidebar() {
   const { t } = useTranslation();
+  const view = useDownloadsStore((s) => s.view);
+  const setView = useDownloadsStore((s) => s.setView);
+  const stats = useAppStore((s) => s.stats);
+  const extension = useAppStore((s) => s.extension);
+  const openSettings = useUiStore((s) => s.openSettings);
+  const counts = stats ? viewCounts(stats) : null;
+  const paired = (extension?.approved_extension_ids.length ?? 0) > 0;
+  const pending = (extension?.pending.length ?? 0) > 0;
 
-  const categories = [
-    { id: 'All Downloads', label: t('sidebar.all_downloads'), icon: Download },
-    { id: 'Downloading', label: t('sidebar.active'), icon: Activity },
-    { id: 'Paused', label: t('sidebar.paused'), icon: Pause },
-    { id: 'Failed', label: t('sidebar.failed'), icon: AlertTriangle },
-    { id: 'Completed', label: t('sidebar.completed'), icon: CheckCircle2 },
-    { id: 'Archived', label: t('sidebar.archived'), icon: Archive },
-  ];
-
-  const types = [
-    { id: 'Video', label: t('sidebar.videos'), icon: Film },
-    { id: 'Music', label: t('sidebar.music'), icon: Music },
-    { id: 'Documents', label: t('sidebar.documents'), icon: FileText },
-    { id: 'Compressed', label: t('sidebar.compressed'), icon: Package },
-    { id: 'Programs', label: t('sidebar.programs'), icon: AppWindow },
-  ];
-
-  const total = counts['All Downloads'] || 0;
-  const done = counts['Completed'] || 0;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const item = (id: ViewId) => {
+    const Icon = ICONS[id];
+    const count = counts?.[id] ?? 0;
+    return (
+      <li key={id}>
+        <button
+          type="button"
+          className={`nav-item${id === 'failed' && count > 0 ? ' attention' : ''}`}
+          aria-current={view === id ? 'page' : undefined}
+          onClick={() => void setView(id)}
+        >
+          <Icon size={16} strokeWidth={1.8} aria-hidden={true} />
+          <span className="nav-label">{t(`views.${id}`)}</span>
+          {count > 0 && <span className="nav-count">{count}</span>}
+        </button>
+      </li>
+    );
+  };
 
   return (
-    <aside className="sidebar no-drag" aria-label={t('sidebar.title')}>
-      <div className="sidebar-head">
-        <img src="/icon.png" alt="" className="brand-icon" />
-        <span className="brand-name">{t('sidebar.title')}</span>
-      </div>
-      <div className="sidebar-scroll">
-        <div className="sidebar-group">
-          <div className="sidebar-label">{t('sidebar.library')}</div>
-          {categories.map((cat) => {
-            const Icon = cat.icon;
-            return (
-              <button
-                key={cat.id}
-                type="button"
-                className={`nav-item ${activeCategory === cat.id ? 'active' : ''}`}
-                onClick={() => onSelectCategory(cat.id)}
-                aria-current={activeCategory === cat.id ? true : undefined}
-              >
-                <Icon size={16} strokeWidth={1.75} aria-hidden={true} />
-                <span className="nav-text">{cat.label}</span>
-                {counts[cat.id] !== undefined && counts[cat.id] > 0 && (
-                  <span className="nav-badge">{counts[cat.id]}</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="sidebar-group">
-          <div className="sidebar-label">{t('sidebar.categories')}</div>
-          {types.map((cat) => {
-            const Icon = cat.icon;
-            return (
-              <button
-                key={cat.id}
-                type="button"
-                className={`nav-item ${activeCategory === cat.id ? 'active' : ''}`}
-                onClick={() => onSelectCategory(cat.id)}
-                aria-current={activeCategory === cat.id ? true : undefined}
-              >
-                <Icon size={16} strokeWidth={1.75} aria-hidden={true} />
-                <span className="nav-text">{cat.label}</span>
-                {counts[cat.id] !== undefined && counts[cat.id] > 0 && (
-                  <span className="nav-badge">{counts[cat.id]}</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+    <aside className="sidebar" aria-label={t('sidebar.label')}>
+      <div className="sidebar-top" data-tauri-drag-region />
+      <nav className="sidebar-scroll" aria-label={t('sidebar.label')}>
+        <section className="sidebar-section">
+          <h2 className="sidebar-heading">{t('sidebar.library')}</h2>
+          <ul className="nav-list">{LIBRARY_VIEWS.map(item)}</ul>
+        </section>
+        <section className="sidebar-section">
+          <h2 className="sidebar-heading">{t('sidebar.kinds')}</h2>
+          <ul className="nav-list">{CATEGORY_VIEWS.map(item)}</ul>
+        </section>
+      </nav>
       <div className="sidebar-foot">
-        <div className="storage-row">
-          <div className="storage-label">
-            <span>{t('sidebar.completion_progress')}</span>
-            <span className="mono">
-              {done}/{total}
-            </span>
-          </div>
-          <div
-            className="storage-bar"
-            role="progressbar"
-            aria-label={t('sidebar.completion_progress')}
-            aria-valuenow={pct}
-            aria-valuemin={0}
-            aria-valuemax={100}
-          >
-            <div className="storage-fill" style={{ width: `${pct}%` }} />
-          </div>
-        </div>
+        <button
+          type="button"
+          className="ext-status"
+          onClick={() => openSettings('extension')}
+          title={t('sidebar.extension_settings')}
+        >
+          <span className={`dot${pending ? ' wait' : paired ? ' on' : ''}`} aria-hidden="true" />
+          <span>
+            {pending
+              ? t('sidebar.extension_pending')
+              : paired
+                ? t('sidebar.extension_on')
+                : t('sidebar.extension_off')}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={() => openSettings()}
+          title={`${t('settings.title')} (⌘,)`}
+          aria-label={t('settings.title')}
+        >
+          <Settings size={16} aria-hidden={true} />
+        </button>
       </div>
     </aside>
   );

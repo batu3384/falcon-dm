@@ -1,62 +1,80 @@
 import { describe, expect, it } from 'vitest';
-import { viewToDownloadFilter, downloadMatchesView, downloadAdmittedToView } from './downloadView';
+import {
+  downloadMatchesSearch,
+  downloadMatchesView,
+  viewCounts,
+  viewToDownloadFilter,
+} from './downloadView';
+import { makeRow } from '../test/fixtures';
 
 describe('viewToDownloadFilter', () => {
-  it('keeps Failed/Video on the server instead of client-slicing All', () => {
-    expect(viewToDownloadFilter('Failed', false)).toEqual({ archived: false, status: 'Failed' });
-    expect(viewToDownloadFilter('Video', false)).toEqual({ archived: false, category: 'Video' });
-    expect(viewToDownloadFilter('Downloading', false)).toEqual({
+  it('filters on the server so a view never shows a slice of another page', () => {
+    expect(viewToDownloadFilter('all')).toEqual({ archived: false });
+    expect(viewToDownloadFilter('active')).toEqual({
       archived: false,
-      statuses: ['Downloading', 'Merging'],
+      statuses: ['Downloading', 'Merging', 'Queued'],
     });
-    expect(viewToDownloadFilter('Paused', false)).toEqual({
-      archived: false,
-      statuses: ['Paused', 'Queued'],
-    });
-  });
-
-  it('maps Documents/Compressed/Programs to backend categories', () => {
-    expect(viewToDownloadFilter('Documents', false).category).toBe('Document');
-    expect(viewToDownloadFilter('Compressed', false).category).toBe('Archive');
-    expect(viewToDownloadFilter('Programs', false).category).toBe('Program');
-  });
-
-  it('uses archived-only rows for the Archived view', () => {
-    expect(viewToDownloadFilter('Archived', false)).toEqual({ archived: true });
-    expect(viewToDownloadFilter('All Downloads', true)).toEqual({ archived: true });
-    expect(viewToDownloadFilter('All Downloads', false)).toEqual({ archived: false });
+    expect(viewToDownloadFilter('failed')).toEqual({ archived: false, status: 'Failed' });
+    expect(viewToDownloadFilter('document')).toEqual({ archived: false, category: 'Document' });
+    expect(viewToDownloadFilter('archived')).toEqual({ archived: true });
   });
 });
 
 describe('downloadMatchesView', () => {
-  const queued = { status: 'Queued', category: 'Video', archived: false };
-
-  it('rejects live rows in the Archived view', () => {
-    expect(downloadMatchesView(queued, 'Archived', true)).toBe(false);
-    expect(downloadMatchesView({ ...queued, archived: true }, 'Archived', true)).toBe(true);
+  it('matches the server filter for live updates', () => {
+    const queued = makeRow({ status: 'Queued', category: 'Video' });
+    expect(downloadMatchesView(queued, 'active')).toBe(true);
+    expect(downloadMatchesView(queued, 'paused')).toBe(false);
+    expect(downloadMatchesView(queued, 'video')).toBe(true);
+    expect(downloadMatchesView(queued, 'music')).toBe(false);
   });
 
-  it('rejects the wrong status/category for sidebar views', () => {
-    expect(downloadMatchesView(queued, 'Failed', false)).toBe(false);
-    expect(downloadMatchesView({ ...queued, status: 'Failed' }, 'Failed', false)).toBe(true);
-    expect(downloadMatchesView(queued, 'Video', false)).toBe(true);
-    expect(downloadMatchesView({ ...queued, category: 'Music' }, 'Video', false)).toBe(false);
-  });
-
-  it('hides Queued from the Active list until it starts', () => {
-    expect(downloadMatchesView(queued, 'Downloading', false)).toBe(false);
-    expect(downloadMatchesView({ ...queued, status: 'Downloading' }, 'Downloading', false)).toBe(
-      true,
-    );
+  it('keeps archived rows out of every view but Archive', () => {
+    const archived = makeRow({ status: 'Completed', archived: true });
+    expect(downloadMatchesView(archived, 'all')).toBe(false);
+    expect(downloadMatchesView(archived, 'completed')).toBe(false);
+    expect(downloadMatchesView(archived, 'archived')).toBe(true);
+    expect(downloadMatchesView(makeRow(), 'archived')).toBe(false);
   });
 });
 
-describe('downloadAdmittedToView', () => {
-  const queued = { status: 'Queued', category: 'Video', archived: false };
+describe('downloadMatchesSearch', () => {
+  it('searches filename and URL, case-insensitively', () => {
+    const row = makeRow({ filename: 'Report.PDF', url: 'https://docs.example.com/x' });
+    expect(downloadMatchesSearch(row, '')).toBe(true);
+    expect(downloadMatchesSearch(row, 'report')).toBe(true);
+    expect(downloadMatchesSearch(row, 'DOCS.example')).toBe(true);
+    expect(downloadMatchesSearch(row, 'video')).toBe(false);
+  });
+});
 
-  it('keeps Queued in the Active store so live progress can reveal it', () => {
-    expect(downloadAdmittedToView(queued, 'Downloading', false)).toBe(true);
-    expect(downloadAdmittedToView(queued, 'Failed', false)).toBe(false);
-    expect(downloadAdmittedToView(queued, 'Archived', true)).toBe(false);
+describe('viewCounts', () => {
+  it('maps DB aggregates onto sidebar views', () => {
+    const counts = viewCounts({
+      active: 2,
+      queued: 3,
+      paused: 1,
+      completed: 4,
+      failed: 5,
+      total_downloaded_bytes: 0,
+      current_speed: 0,
+      all: 15,
+      archived: 6,
+      video: 7,
+      music: 8,
+      document: 9,
+      archive: 10,
+      program: 11,
+      free_disk_bytes: null,
+      speed_limit_kbps: 0,
+    });
+    expect(counts).toMatchObject({
+      all: 15,
+      active: 5,
+      paused: 1,
+      failed: 5,
+      archived: 6,
+      program: 11,
+    });
   });
 });
