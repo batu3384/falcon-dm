@@ -7,9 +7,9 @@
 | Download URLs | SSRF block: no loopback, private IP, or non-http(s) schemes |
 | DNS | Public addresses resolved and pinned per request hop |
 | Local API | `127.0.0.1` only; UUID API token; extension Origin allowlist |
-| Extension pairing | User must approve extension ID; native host proof required |
-| Shell / sidecars | Tauri allowlist: `aria2c`, `ffmpeg`, `yt-dlp`; native host is separate slim binary |
-| Hijack fallback | Default fail-open (browser keeps download); optional fail-closed toggle in extension |
+| Extension pairing | User compares a 6-digit code and approves it in the app; declined codes stay declined |
+| External tools | `ffmpeg` (bundled) and `yt-dlp` started by Rust with fixed arguments; webview has no shell access |
+| Capture fallback | Fail-closed by default (a capture the app cannot take is cancelled); opt-in browser fallback in the extension options |
 
 ## Extension cookies
 

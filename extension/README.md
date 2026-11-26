@@ -1,55 +1,35 @@
-# Falcon DM browser extension (MV3)
+# Falcon DM browser extension
 
-Load unpacked from this folder in Chrome/Edge.
+Chrome / Edge (Manifest V3). Sends browser downloads and page media to the Falcon DM desktop app.
 
-## API notes
+## Install
 
-- Pair: extension first asks registered `com.falcondm.native` host for a single-use proof, then calls `POST /api/pair` → `200` + token, or `202` pending (approve in Falcon Settings). Extension polls until approved.
-- Downloads: `POST /api/intercept` or `/api/add` with `X-Falcon-Token`.
-- Requests use bounded timeouts.
-- **Fail-open (default):** hijack cancels the browser save first; if Falcon cannot receive it, the extension re-queues the same URL via `chrome.downloads.download`.
-- **Fail-closed (opt-in):** enable **Block when offline** in popup or options → hijack stays cancelled and a blocking notification is shown when Falcon is offline.
-- **Pause:** popup **Pause** disables hijack entirely (`cancel: false` always).
-- Batch enqueue (link grabber) accepts up to **100** items; returns per-item `results`; successful items are removed from retry selection while failed items remain retryable.
-- Link grabber scans `<a href>`, `download` attributes, and `<video>/<audio>` `src`/`source` tags (documents, archives, media extensions).
-- **DASH (`.mpd`)** manifests route through yt-dlp in the desktop app.
-- **Blob media** on the page can be saved via `/api/upload` (max **32 MB**).
-- **Clipboard monitor** (popup/options): queues copied `http(s)` URLs about once per minute while connected.
-- YouTube quality: send JSON field `format` (yt-dlp `-f` selector). Do **not** put format in the URL. Legacy `#falconfmt=` still accepted server-side as internal storage.
-- Origin must be `chrome-extension://<id>` and that id must be allowlisted after Settings approve.
-- Native messaging host must be installed for Chrome and Edge. Missing host, timeout, or app rejection keeps native browser downloads intact (unless fail-closed is enabled on hijack).
-- Development install:
+1. Start Falcon DM.
+2. `chrome://extensions` → enable **Developer mode** → **Load unpacked** → this folder.
+3. Click the extension icon: it shows a 6-digit code. Approve the same code in Falcon DM.
 
-  ```bash
-  cargo build --manifest-path src-tauri/Cargo.toml -p falcon-dm-native-host
-  NATIVE_HOST_BIN="$PWD/src-tauri/target/debug/falcon-dm-native-host" \
-  CHROME_EXTENSION_ID="<chrome-id>" \
-  EDGE_EXTENSION_ID="<edge-id>" \
-  ./scripts/install-native-host.sh
-  ```
+## Files
 
-  Release bundles include an architecture-specific native host and checksums.
-  Run the installer with that extracted binary path after installing the app.
+| File | Role |
+| --- | --- |
+| `background.js` | Service worker: download capture, context menus, message router |
+| `shared.js` | State, badge, health checks, content-script injection |
+| `pairing.js` | Code pairing with the app (`/api/pair`) |
+| `api.js` | Authenticated calls (`/api/add`, `/api/intercept`, `/api/upload`, `/api/downloads`) |
+| `media-utils.js` | URL rules, media detection, YouTube quality presets (shared by worker, popup, page) |
+| `content.js` | In-page quality picker, link grabber and video button (shadow DOM) |
+| `popup.*`, `options.*`, `chrome.css` | Toolbar popup and settings page |
 
-## YouTube
+## Behaviour
 
-Desktop app needs `yt-dlp` on PATH (or set path in Falcon Settings). Extension sends watch URL + `format`; never googlevideo CDN URLs. Browser cookies reach yt-dlp only when **Settings → Use browser cookies for yt-dlp** is enabled.
+- Private, loopback and non-HTTP(S) URLs are never sent.
+- Cookies are attached only for the download's own HTTPS origin (YouTube cookies only for googlevideo streams).
+- The popup switch **Send browser downloads to Falcon DM** controls capture; when off, the browser downloads files itself.
+- A captured download that cannot reach Falcon DM is blocked by default. Enabling **Let Chrome download when Falcon DM is closed** in the options page hands it back to the browser instead.
 
-## Permissions
-
-- `<all_urls>` host permission is required to intercept browser downloads and sniff media on any site. There is no narrower scope: the download-hijack + media-overlay feature must work on arbitrary pages. The extension talks only to `127.0.0.1:14201` (Falcon DM) — no other network.
-- YouTube watch/Shorts pages load a static `content_scripts` entry (`youtube.js` at `document_idle`) so the overlay is ready without waiting for a network sniff. Other sites inject **on demand** via `chrome.scripting.executeScript` (popup open or media sniffed).
-- `nativeMessaging` is required for the app-authenticated pairing proof; the host communicates with Falcon DM through a local 0600 Unix socket.
-- `tabs`/`activeTab` are not requested: tab URL/title access is covered by `<all_urls>`, and `scripting` covers on-demand injection.
-
-Session cookies are accepted only on enqueue requests that need them. They are
-not returned in download list payloads, not copied into the frontend model, and
-are cleared when a download reaches a terminal state.
-
-## Smoke test
+## Tests
 
 ```bash
-node extension/smoke-test.mjs
+node smoke-test.mjs
+node flow-test.mjs
 ```
-
-Asserts media helpers, hijack contracts, fail-closed handlers, and batch limit constant.

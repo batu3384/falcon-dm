@@ -2,33 +2,30 @@
 
 ## Extension cannot pair
 
-- Confirm Falcon DM is running (`GET http://127.0.0.1:14201/api/health`)
-- Build/install native host: `cargo build -p falcon-dm-native-host --manifest-path src-tauri/Cargo.toml`
-- Install manifests and reload the extension
-- Approve the exact 32-character extension ID in Settings
-- Check token was not reset after pairing (re-pair if needed)
-- If native pairing times out: ensure you use the slim `falcon-dm-native-host` binary (not an AppKit-linked build)
+- Confirm Falcon DM is running (`GET http://127.0.0.1:14201/api/health` returns `"protocol": 2`)
+- Open the extension popup: it shows a 6-digit code while it waits
+- Approve the same code in Falcon DM (dialog, or **Settings → Extension**)
+- Declined by mistake? Click **Request a New Code** in the popup
 
 ## Downloads stay in browser (not Falcon)
 
-- **Pause** enabled in extension popup → hijack disabled by design
-- Pairing or native host failed → default fail-open keeps browser download
-- **Block when offline** enabled → hijack failure cancels browser save (expected)
-- Check extension console and Falcon logs
+- **Send browser downloads to Falcon DM** is off in the extension popup → capture disabled by design
+- Pairing not approved yet or the app is offline → capture never engages, the browser keeps the download
+- Check the extension console and Falcon logs
 
-## Hijacked download blocked with no browser fallback
+## Captured download blocked with no browser fallback
 
-- **Block when offline** is on. Disable in extension popup/options to restore fail-open behavior.
+- Blocking is the default: when capture has already started but Falcon DM cannot take the file, the browser copy is cancelled. Enable **Let Chrome download when Falcon DM is closed** in the extension options page to restore the fail-open fallback.
 
 ## HTTP download slow or single connection
 
-- Server may not support byte ranges or file smaller than parallel threshold (~512 KB)
-- Check **Settings → Network → Max connections per server**
-- Very small remaining resume bytes fall back to single connection
+- The server may not support byte ranges; then one connection is used and a retry starts at byte 0 (no resume)
+- Files below ~2 MB use one connection
+- Check **Settings → Downloads → Connections per file** and the speed limit in **Settings → Downloads** or the status bar
 
 ## HLS stalls or restarts from zero
 
-- Segment temp lives under app data `downloads_temp/hls-{download_id}/`. Retry should skip completed `.ts` files.
+- Segment temp lives under app data `downloads_temp/hls-{download_id}.falcondm-temp/`. Completed segments are reused; `*.tmp` leftovers are fetched again.
 - Check proxy/speed limit in **Settings → Network** if CDN throttles
 
 ## YouTube failures
@@ -39,7 +36,7 @@
 - If login-required content: try **Use browser cookies for yt-dlp** (opt-in)
 - Global proxy/speed limit from Settings apply to yt-dlp
 
-## yt-dlp / ffmpeg / aria2 missing
+## yt-dlp / ffmpeg missing
 
 Run `./scripts/provision-sidecars.sh` or install via Homebrew.
 

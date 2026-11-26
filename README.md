@@ -41,22 +41,22 @@
 
 | Area | What you get |
 |------|----------------|
-| **HTTP(S)** | Multi-connection range downloads (including resume after `.part`), DNS-pinned streaming, speed limit, proxy, scheduler windows |
-| **HLS (m3u8)** | Parallel segment fetch with resume, speed limit, proxy, ffmpeg mux |
+| **HTTP(S)** | Multi-connection range downloads, byte-exact resume after pause/crash/restart, DNS-pinned streaming, speed limit, proxy, scheduler windows |
+| **HLS (m3u8)** | Parallel segment fetch with resume, speed limit, proxy, ffmpeg mux; complex playlists handed to yt-dlp |
 | **YouTube** | Watch URL + `yt-dlp` (optional browser cookies, global proxy/speed limit, custom binary path) |
-| **Browser extension** | Download hijack, optional fail-closed when offline, video quality picker, link grabber (batch ≤100) |
-| **Desktop UI** | Inspector panel, speed graph, EN/TR i18n, category paths, release update check |
-| **Security** | Extension pair approval, SSRF URL block, token + Origin allowlist |
+| **Browser extension** | Download capture, offline fallback control, video quality picker, link grabber (batch ≤100) |
+| **Desktop UI** | macOS-native shell, inspector panel, speed graph, EN/TR i18n, category paths, release update check |
+| **Security** | 6-digit code pairing, SSRF URL block, token + Origin allowlist |
 
 ## Core Architecture
 
 ### Download engine
 
-Ordinary HTTP(S) traffic uses the Rust DNS-pinned streaming path. When a `.falcon.part` file already exists, resume tries multi-connection range fetch for the remaining bytes before falling back to a single connection. The bundled `aria2c` binary remains available for legacy session recovery and protocol-specific compatibility. Private targets, unsafe redirects, and magnet URLs are rejected.
+HTTP(S) downloads run in the Rust engine over DNS-pinned connections. The file is preallocated as one hidden `.falcon.part` file and split into one byte range per connection; every connection writes at its own offset, an idle connection takes over half of the largest remaining range, and per-range progress is saved next to the file (`.falcon.state`). Pause, crash, automatic retry and app restart all continue exactly where each connection stopped; a changed remote file (ETag / Last-Modified via `If-Range`) restarts cleanly instead of mixing versions. Transient failures (timeouts, 5xx, 429) are retried with backoff up to five times; a run that moves data resets the budget. One global token bucket enforces the speed limit across all downloads and applies to running ones immediately. Finished files are moved into place without overwriting (`name (1).ext` on a clash). Private targets, unsafe redirects, and magnet URLs are rejected.
 
 ### Stream pipeline (HLS + YouTube)
 
-- **HLS:** Rust downloads segments concurrently (proxy + speed limit from Settings); segment temp dir is reused per download ID for resume; `ffmpeg` sidecar muxes to disk.
+- **HLS:** Rust downloads MPEG-TS segments concurrently (proxy + speed limit from Settings); each segment is written to `*.tmp` and renamed when complete, so resume never trusts half a segment; `ffmpeg` remuxes to MP4. Encrypted, fMP4, byte-range and split-audio playlists are handed to yt-dlp; live playlists are refused instead of saving a few seconds.
 - **YouTube:** CDN (<code>googlevideo</code>) URLs are rewritten to watch URLs; <code>yt-dlp</code> runs as an external tool (PATH or **Settings → yt-dlp path**). Global **proxy** and **speed limit** apply; browser cookies are **opt-in** (**Settings → Use browser cookies for yt-dlp**). Not bundled.
 
 ### Queue & persistence
@@ -69,13 +69,15 @@ Axum serves `http://127.0.0.1:14201`:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /api/pair` | Extension pairing (`200` token or `202` pending approval) |
-| `POST /api/intercept` | Media / hijacked download |
+| `GET /api/health` | Liveness (loopback, no token, `protocol: 2`) |
+| `POST /api/pair` | Extension pairing by 6-digit code (`200` token or `202` pending approval) |
+| `POST /api/ping` | Authenticated liveness for a paired extension |
+| `GET /api/downloads` | Live download rows for the popup |
+| `POST /api/intercept` | Media / captured browser download |
 | `POST /api/add` | Direct URL (e.g. grabber batch) |
 | `POST /api/upload` | Blob media (32 MB cap) |
-| `GET /api/health` | Liveness (loopback, no token, `protocol: 1`) |
 
-Mutating requests require `X-Falcon-Token` and a `chrome-extension://` or Edge `Origin` on the allowlist after you approve in Settings. `GET /api/health` is unauthenticated on loopback. See [extension/README.md](extension/README.md).
+Mutating requests require `X-Falcon-Token` and a `chrome-extension://` or Edge `Origin` on the allowlist. `GET /api/health` is unauthenticated on loopback. See [extension/README.md](extension/README.md).
 
 ## Build requirements
 
@@ -83,7 +85,7 @@ Mutating requests require `X-Falcon-Token` and a `chrome-extension://` or Edge `
 - **Node.js 22+** (matches CI; Node 24 breaks Vitest/jsdom on GitHub Actions)
 - **Rust** stable (`rustup`)
 - **Tauri CLI:** `npm install` (devDependency) or `cargo install tauri-cli`
-- **Homebrew:** `brew install aria2 ffmpeg yt-dlp`
+- **Homebrew:** `brew install ffmpeg yt-dlp`
 
 ## Compilation & bootstrapping
 
@@ -93,11 +95,9 @@ Sidecars are **not** committed (`.gitignore`). Local provisioning is explicitly 
 ./scripts/provision-sidecars.sh
 ```
 
-Copies `aria2c` from Homebrew and `ffmpeg` (Homebrew on arm64, pinned evermeet.cx
-binary on Intel) into `src-tauri/binaries/` as `aria2c-<triple>` and
-`ffmpeg-<triple>`. Idempotent. Homebrew verifies its bottle; remote provisioning
-requires `FFMPEG_SHA256` and verifies the extracted binary before installation.
-`ARIA2_SHA256` can pin the copied Homebrew binary as well:
+Copies `ffmpeg` (Homebrew on arm64, pinned static build on Intel) into
+`src-tauri/binaries/` as `ffmpeg-<triple>`. Idempotent. Remote provisioning
+requires `FFMPEG_SHA256` and verifies the extracted binary before installation:
 
 ```bash
 ARCH=x86_64 \
@@ -106,14 +106,14 @@ FFMPEG_SHA256='<64-hex SHA-256 of extracted ffmpeg>' \
 ./scripts/provision-sidecars.sh
 ```
 
-Release workflows set `RELEASE_MODE=1` and require `ARIA2_SHA256`, immutable
-`FFMPEG_URL`, and `FFMPEG_SHA256`; missing values fail before any binary is used.
+Release workflows set `RELEASE_MODE=1` and require an immutable `FFMPEG_URL`
+and `FFMPEG_SHA256`; missing values fail before any binary is used.
 Signed releases also import the Apple certificate into an ephemeral runner
 keychain before Tauri build. If no signing secrets are configured, the workflow
 selects the explicit unsigned fallback.
 
 Never use an unpinned remote URL in release automation. Release jobs also
-publish architecture-specific checksums for the app, sidecars, and native host.
+publish architecture-specific checksums for the app and its sidecar.
 Configure repository variables `FFMPEG_URL` and `FFMPEG_SHA256` before creating
 an Intel release; missing values intentionally fail the release instead of
 installing an unverifiable remote binary.
@@ -126,21 +126,12 @@ npm run tauri build    # .app / .dmg (see release.yml for signed builds)
 
 ### Browser extension
 
-1. Chrome/Edge → `chrome://extensions` → **Load unpacked** → `extension/`
-2. Build/install native host manifests:
-
-   ```bash
-   cargo build --manifest-path src-tauri/Cargo.toml -p falcon-dm-native-host
-   NATIVE_HOST_BIN="$PWD/src-tauri/target/debug/falcon-dm-native-host" \
-   CHROME_EXTENSION_ID="<chrome-id>" \
-   EDGE_EXTENSION_ID="<edge-id>" \
-   ./scripts/install-native-host.sh
-   ```
-
-3. Open Falcon DM → **Settings → Approve extension** when pair request appears
-4. Extension popup/options: **Pause** stops hijack; **Block when offline** cancels browser download if Falcon cannot receive it (default: fail-open fallback)
+1. Chrome/Edge → `chrome://extensions` → enable **Developer mode** → **Load unpacked** → `extension/`
+2. Click the extension icon. It shows a 6-digit code and Falcon DM asks to connect.
+3. Check that Falcon DM shows the same code and click **Approve**. Connected extensions are listed (and can be disconnected) in **Settings → Extension**.
+4. Extension popup: the **Send browser downloads to Falcon DM** switch controls capture. Options → **Let Chrome download when Falcon DM is closed** restores the browser fallback; by default a captured download is blocked when the app cannot take it.
 5. YouTube: install `yt-dlp`; optional custom binary path and cookie opt-in in Settings
-6. **Updates:** Settings → **Check for updates** compares against GitHub Releases (opens release page when newer)
+6. **Updates:** Settings → **Check for Updates** compares against GitHub Releases (opens release page when newer)
 7. **Wake deep link:** `falcondm://wake` only (no download params — avoids token-in-url leaks). Extension wakes app then uses HTTP API. `tauri dev` may not register the URL scheme.
 
 ## Development & contributing
@@ -150,22 +141,22 @@ Details: [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECU
 ```bash
 # Frontend
 npm run lint && npm run format:check && npm run test && npm run build
-node extension/smoke-test.mjs
+node extension/smoke-test.mjs && node extension/flow-test.mjs
 
 # Backend (src-tauri/)
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
 CI on `main` (protected branch) runs: Frontend lint/test/build, Rust fmt/clippy/test/build on macOS arm64, and `cargo deny` supply-chain audit. Intel builds are validated in the **Release** workflow (`release.yml`).
 
 ## Security posture
 
-- **Extension trust:** No silent auto-pair; user must approve extension ID in Settings. API token is UUID; legacy default token rejected. Optional **fail-closed** intercept blocks browser fallback when Falcon is offline (popup/options toggle).
+- **Extension trust:** No silent auto-pair; the user compares a 6-digit code shown in the extension and in the app and approves it. Declined codes stay declined for ten minutes; disconnecting an extension rotates the token. API token is a per-install UUID. Captured downloads are **blocked by default** when Falcon cannot take them; the browser fallback is opt-in in the extension options.
 - **Network boundary:** Download URLs validated (no `file://`, loopback, or private IP SSRF). Local API binds `127.0.0.1` only.
 - **Deep links:** `falcondm://wake` only — enqueue happens over authenticated HTTP, not query strings.
-- **Process isolation:** Shell use limited to declared sidecars (`aria2c`, `ffmpeg`, `yt-dlp`). Native host is a slim standalone crate (`falcon-dm-native-host`, no AppKit). aria2 PID reclaim only touches Falcon's own `aria2.pid`.
+- **Process isolation:** The only external programs are the bundled `ffmpeg` and the user's `yt-dlp`, started with fixed argument lists (the URL always follows `--`).
 - **Data:** No telemetry. Session cookies stay in backend storage, are never
   serialized into frontend download payloads, and are cleared on terminal
   download states. yt-dlp uses browser cookies only when explicitly enabled in Settings.

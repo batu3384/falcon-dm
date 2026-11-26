@@ -1,80 +1,37 @@
 # Browser Extension
 
-Chromium MV3 extension in the repo `extension/` folder.
+Chrome / Edge MV3 extension in `extension/`. It sends browser downloads and page media to Falcon DM over the local API (`127.0.0.1:14201`).
 
-## Load unpacked
+## Install
 
-1. Chrome/Edge → `chrome://extensions`
-2. Enable **Developer mode**
-3. **Load unpacked** → select the `extension/` directory
-4. Copy the 32-character extension ID
+1. `chrome://extensions` (or `edge://extensions`) → enable **Developer mode**
+2. **Load unpacked** → choose the `extension/` folder
 
-## Native messaging host (required for secure pairing)
+## Pairing
 
-The extension obtains a single-use proof from the registered native host before calling `/api/pair`. The host binary is **`falcon-dm-native-host`** — a slim workspace crate without AppKit/Tauri (Chrome spawn safe).
+1. Click the extension icon. It shows a 6-digit code and asks Falcon DM to connect.
+2. Falcon DM opens a dialog with the same code. Approve it only if both codes match.
+3. The extension receives its API token and the popup switches to **Connected**.
 
-### From the app
+Declined codes stay declined for ten minutes; **Request a New Code** starts over. **Settings → Extension** lists connected extensions and pending requests; **Disconnect** removes an extension and rotates the token.
 
-**Onboarding** or **Settings → General → Install native pairing host** (enter extension ID).
+Web pages cannot use this flow: the request must carry a `chrome-extension://` (or `edge-extension://`) Origin, which browsers never let pages forge, and nothing is paired without the user's click.
 
-### From the terminal (macOS script)
+## What it does
+
+- **Download capture:** browser downloads are cancelled in Chrome and sent to Falcon DM (cookies only for the same HTTPS origin). Toggle with **Send browser downloads to Falcon DM**.
+- **Offline fallback:** a capture that cannot reach the app is blocked by default. Turning on **Let Chrome download when Falcon DM is closed** (options page) hands it back to the browser instead. Capture only engages while the app is connected, so an offline app never eats a download it cannot take.
+- **Video pages:** on YouTube a floating button opens a quality picker; other pages list detected media (MP4, HLS, DASH, blob).
+- **Link grabber:** **Grab Links on This Page…** (popup or page context menu) sends up to 100 links at once.
+- **Popup:** connection state, live progress of running downloads, quick actions.
+
+## Permissions
+
+`downloads`, `webRequest`, `cookies`, `contextMenus`, `storage`, `scripting`, `notifications`, and host access for media detection plus `http://127.0.0.1:14201/*`. No native messaging, clipboard or alarm permissions.
+
+## Tests
 
 ```bash
-cargo build --manifest-path src-tauri/Cargo.toml -p falcon-dm-native-host
-NATIVE_HOST_BIN="$PWD/src-tauri/target/debug/falcon-dm-native-host" \
-CHROME_EXTENSION_ID="<chrome-id>" \
-EDGE_EXTENSION_ID="<edge-id>" \
-./scripts/install-native-host.sh
+node extension/smoke-test.mjs   # static contracts
+node extension/flow-test.mjs    # popup, pairing and overlay flows with a mocked chrome API
 ```
-
-The in-app installer also writes manifests on **Linux** and **Windows** Chromium profile paths when supported.
-
-## Pairing flow
-
-1. Extension requests native proof → `POST /api/pair`
-2. Falcon shows pending ID in Settings
-3. User clicks **Approve**
-4. Extension receives token and uses `X-Falcon-Token` on `/api/intercept` and `/api/add`
-
-## Download hijack
-
-When the browser starts a file download, the extension can send it to Falcon instead.
-
-**Overlay FAB** appears only on YouTube watch/Shorts pages or when a visible `<video>` (≥120×120 px) plays a capturable `http(s)`/blob source. YouTube pages load `youtube.js` via a static `content_scripts` entry; other sites inject on demand. Generic PDF/ZIP/manifest responses do not inject the overlay.
-
-| Control | Where | Effect |
-|---------|-------|--------|
-| **Pause** | Popup | Hijack off — browser downloads normally |
-| **Block when offline** | Popup or extension options | Hijack stays cancelled when Falcon cannot receive the download (default fail-open re-downloads via Chrome) |
-
-Fail-closed applies to **`chrome.downloads.onDeterminingFilename`** only. Context menu, media overlay, and manual URL sends show an error but do not cancel a browser download (there is none).
-
-## Link grabber
-
-**Grab page links with Falcon** sends up to **100** selected URLs per batch via `/api/add`. Responses include per-item `results` so partial success can be retried.
-
-Scans page links (common file extensions + `download` attribute) and direct `video`/`audio` `src` URLs. Junk/tracking URLs are filtered.
-
-## DASH & blob media
-
-| Type | Capture | Engine |
-|------|---------|--------|
-| **DASH `.mpd`** | Network sniff + overlay | yt-dlp |
-| **HLS `.m3u8`** | Network sniff + overlay | Falcon HLS + ffmpeg |
-| **Blob `video`/`audio`** | Overlay picker | `/api/upload` (32 MB cap) |
-
-## Clipboard monitor
-
-Enable in extension **popup → Advanced** or **options**. While Falcon is connected, copied `http(s)` URLs are queued automatically (~1 min poll). Desktop app has a separate toolbar clipboard toggle.
-
-## YouTube
-
-Extension sends the **watch URL** and JSON field `format` (yt-dlp selector). Never send raw `googlevideo.com` CDN URLs. Optional browser cookies for yt-dlp are controlled in **Falcon Settings** (off by default).
-
-## Wake deep link
-
-`falcondm://wake` only wakes the app. Downloads are enqueued over authenticated HTTP — never via URL query parameters (avoids token leaks).
-
-## More detail
-
-See [extension/README.md](https://github.com/batu3384/falcon-dm/blob/main/extension/README.md) in the repository for API contracts and permission rationale.

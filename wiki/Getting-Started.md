@@ -6,7 +6,7 @@
 - Node.js 22+ (matches CI)
 - Rust stable (`rustup`)
 - Tauri CLI via `npm install` or `cargo install tauri-cli`
-- Homebrew: `brew install aria2 ffmpeg yt-dlp`
+- Homebrew: `brew install ffmpeg yt-dlp`
 
 ## Provision sidecars
 
@@ -16,7 +16,7 @@ Sidecars are not committed. Run once:
 ./scripts/provision-sidecars.sh
 ```
 
-This copies `aria2c` and `ffmpeg` into `src-tauri/binaries/` for your architecture.
+This copies `ffmpeg` into `src-tauri/binaries/` for your architecture.
 
 ## Run in development
 
@@ -35,23 +35,20 @@ Signed release builds use the GitHub **Release** workflow with Apple signing sec
 
 ## First-time setup
 
-1. Open **Settings** and note your API token (or rotate it).
-2. Load the browser extension (see [Browser Extension](Browser-Extension)).
-3. Approve the extension ID when a pair request appears.
-4. Install the native messaging host (onboarding wizard or Settings → General).
-5. Optional network tuning: **Settings → Network** — proxy, speed limit, max connections per server.
-6. Optional YouTube: **Settings → General** — yt-dlp path, **Use browser cookies for yt-dlp** (off by default).
-7. Optional extension: popup **Block when offline** if you prefer fail-closed hijack.
-8. Optional scheduler: toolbar **Scheduler** — start/stop time window (no shutdown/dial-up modes).
+1. Load `extension/` unpacked in Chrome or Edge (see [Browser Extension](Browser-Extension)).
+2. Click the extension icon — it shows a 6-digit code — and approve the same code in Falcon DM's pairing dialog. You never handle the API token yourself; pairing exchanges it.
+3. Optional download tuning: **Settings → Downloads** — connections per file, speed limit, scheduler time window (no shutdown/dial-up modes).
+4. Optional network tuning: **Settings → Network** — proxy, yt-dlp path, **Use browser cookies for yt-dlp** (off by default).
+5. Optional extension fallback: enable **Let Chrome download when Falcon DM is closed** in the extension options if you prefer the browser to keep captured downloads when the app is unreachable (off by default).
 
 ## Verify install
 
 ```bash
 npm run lint && npm test && npm run build
-node extension/smoke-test.mjs
-cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test
+node extension/smoke-test.mjs && node extension/flow-test.mjs
+cd src-tauri && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
-## Check for updates
+## Check for Updates
 
-In the running app: **Settings → General → Check for updates**. Compares the installed version to the latest GitHub Release and opens the release page when newer.
+In the running app: **Settings → General → Check for Updates**. Compares the installed version to the latest GitHub Release and opens the release page when newer.

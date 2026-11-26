@@ -10,16 +10,16 @@ setup and the standards a contribution must meet before merge.
 - **Node.js** 22+ and npm (matches CI)
 - **Rust** stable toolchain (`rustup`)
 - **macOS** (Falcon DM desktop target is macOS-only for now)
-- **Homebrew** dependencies: `brew install aria2 ffmpeg yt-dlp`
+- **Homebrew** dependencies: `brew install ffmpeg yt-dlp`
 - **Chrome/Edge** to load the `extension/` folder unpacked
 
 ### First run
 
 ```bash
-git clone <repo>
-cd downloadmanager
+git clone https://github.com/batu3384/falcon-dm.git
+cd falcon-dm
 
-# Provision sidecar binaries (aria2c + ffmpeg) for your architecture
+# Provision the ffmpeg sidecar for your architecture
 ./scripts/provision-sidecars.sh
 
 npm install
@@ -27,14 +27,15 @@ npm run tauri dev
 ```
 
 Load the extension: open `chrome://extensions`, enable Developer Mode,
-"Load unpacked", select the `extension/` folder, then approve the pairing
-request in Falcon DM's Settings.
+"Load unpacked", select the `extension/` folder. Click the extension icon — it
+shows a 6-digit code — then approve the same code in Falcon DM's pairing dialog
+(or **Settings → Extension**).
 
 ## Development Workflow
 
 - Branch off `main`: `git checkout -b feat/my-feature`.
-- Use **conventional commit** messages: `feat:`, `fix:`, `refactor:`, `docs:`,
-  `test:`, `chore:`, `perf:`, `ci:`. Example: `fix(hls): correct total_size estimate`.
+- Match the existing commit style: one imperative sentence, capitalized, trailing
+  period, focused on the *why* (e.g. `Fix hijack filename race and speed connected enqueue.`).
 - Keep commits focused; one logical change per commit.
 
 ## Checks Before Pushing
@@ -47,12 +48,16 @@ npm run lint            # ESLint, --max-warnings 0
 npm run format:check    # Prettier
 npm run test            # Vitest
 npm run build           # tsc + vite build
-node extension/smoke-test.mjs
+node extension/smoke-test.mjs   # static contracts (locales, permissions)
+node extension/flow-test.mjs    # popup/pairing/overlay flows, mocked chrome API
 
 # Backend (in src-tauri/)
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# Release helper
+bash scripts/provision-sidecars.test.sh
 ```
 
 Format everything with `npm run format` and `cargo fmt` as needed.
@@ -65,16 +70,19 @@ Format everything with `npm run format` and `cargo fmt` as needed.
 
 ## Architecture Pointers
 
-- **Backend** (`src-tauri/src/`): `download/` (aria2 engine, queue, hls, ytdlp),
-  `storage/` (SQLite via r2d2 pool + versioned migrations), `util.rs` (security
-  helpers: SSRF, path traversal, header injection), `lib.rs` (Tauri commands +
-  localhost HTTP API for the extension).
+- **Backend** (`src-tauri/src/`): `download/` (http, hls, ytdlp engines, queue,
+  progress, limiter, job, tools), `pairing.rs` + `local_api.rs` (extension code
+  pairing and the localhost HTTP API), `storage/` (SQLite via r2d2 pool +
+  versioned migrations), `util/` (security helpers: SSRF, path traversal,
+  DNS pinning, cookie encryption), `lib.rs` (Tauri commands).
 - **Frontend** (`src/`): `api/` (typed Tauri IPC wrappers + zod validation),
-  `store/` (Zustand: downloads, toast), `lib/schema.ts` (zod schemas),
-  `components/` (React). State flows store→component, never via prop drilling.
+  `store/` (Zustand: downloads, app, ui, toast), `lib/schema.ts` (zod schemas),
+  `components/` (React, macOS-style shell; `components/settings/` holds the
+  Settings panes). State flows store→component, never via prop drilling.
 - **Extension** (`extension/`): MV3 service worker + content script. Talks to
-  the desktop app over the authenticated localhost HTTP API. Supports pause,
-  optional fail-closed hijack, and batch enqueue (≤100).
+  the desktop app over the authenticated localhost HTTP API after 6-digit code
+  pairing. Supports capture pause, optional browser fallback, and batch
+  enqueue (≤100).
 
 Look for `// ponytail:` comments in the codebase — they document non-obvious
 decisions and the rationale behind them.

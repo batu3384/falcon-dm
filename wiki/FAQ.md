@@ -2,7 +2,7 @@
 
 ## Is Falcon DM IDM for macOS?
 
-It targets similar jobs (multi-connection HTTP, browser capture, queue) but is a smaller local-first app — not full IDM feature parity. Recent gaps closed: parallel HTTP resume, HLS/yt-dlp proxy and speed limits, extension fail-closed option, larger link grabber batches.
+It targets similar jobs (multi-connection HTTP, browser capture, queue) but is a smaller local-first app — not full IDM feature parity. Recent gaps closed: byte-exact parallel HTTP resume, HLS/yt-dlp proxy and speed limits, real yt-dlp progress, code pairing, larger link grabber batches.
 
 ## Does it phone home?
 
@@ -20,17 +20,13 @@ Yes. Add URLs manually or via the local API with a valid token.
 
 Default: `~/Downloads` (configurable in Settings). Category subfolders optional. Per-site **download profiles** can override save subdirs.
 
-## Why aria2 if HTTP is native Rust?
-
-aria2 remains for legacy session recovery and edge compatibility; primary HTTP path is Rust.
-
 ## What happens when Falcon is offline during a browser download?
 
-**Default (fail-open):** the browser keeps its native download. **Block when offline** (extension popup/options): the hijacked download is cancelled. Manual extension actions (context menu, media picker) only show an error.
+If the app is unreachable when the download starts, capture never engages — the browser downloads normally. If capture has already started and the enqueue fails (app quit, token rotated), the download is **blocked by default**; enabling **Let Chrome download when Falcon DM is closed** in the extension options hands it back to the browser. Manual extension actions (context menu, media picker) never cancel anything — they only show an error.
 
 ## Does resume use multiple connections?
 
-Yes, when the server supports ranges and the remaining bytes in `.falcon.part` are large enough (~512 KB+). Otherwise a single connection resumes.
+Yes. Ranged downloads keep a per-segment progress sidecar (`.falcon.state`) next to the hidden `.falcon.part` file, so pause, crash, retry and app restart all continue every connection byte-exactly in parallel. Servers without range support cannot resume at all — a retry there starts at byte 0.
 
 ## How do I update?
 
