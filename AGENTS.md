@@ -32,5 +32,6 @@ bash scripts/provision-sidecars.test.sh
 - UI strings live in `src/locales/{en,tr}.json`; `src/i18n.test.ts` enforces parity. Extension strings live in `extension/_locales`, checked by `smoke-test.mjs` (named placeholders like `{code}`, never `$1`).
 - Rust tests that need a network use local `TcpListener` fixtures with `allow_loopback_for_tests()`; the HLS end-to-end test skips without ffmpeg.
 - aria2 and the native messaging host were removed on purpose; do not reintroduce them.
+- Commits carry no tool attribution: never add `Generated with`, `Co-Authored-By`, or similar trailers — the user rejected them explicitly.
 - Capture is fail-closed by default: a browser download the app cannot take is cancelled. The browser fallback (`Let Chrome download when Falcon DM is closed`) is opt-in in extension options — docs must describe it this way, not as fail-open.
 - `wiki/` is the source of truth for the GitHub Wiki; publish with `./scripts/sync-wiki.sh` after editing. Keep doc claims aligned with the code (endpoints in `lifecycle.rs`, defaults in `settings.rs` and `extension/shared.js`).
