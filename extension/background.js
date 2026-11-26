@@ -20,34 +20,15 @@ function setupMenus() {
 chrome.runtime.onInstalled.addListener(() => {
   setupMenus();
   refreshBadge();
-  chrome.alarms.create('falconClipboard', { periodInMinutes: 1 });
   reinitContentScriptsAfterReload();
-  prefsReady.then(() =>
-    ensurePaired(true).catch(() => {
-      setState('offline');
-      notify(
-        msg('appName', 'Falcon DM'),
-        msg('popupOnboard', 'Open Falcon DM and approve this extension in Settings'),
-      );
-    }),
-  );
+  // Pairing starts from the popup, where the user can see the code.
+  prefsReady.then(() => ensurePaired(false).catch(() => {}));
 });
 
 chrome.runtime.onStartup.addListener(() => {
   refreshBadge();
   reinitContentScriptsAfterReload();
   prefsReady.then(() => ensurePaired(false).catch(() => {}));
-  chrome.alarms.create('falconClipboard', { periodInMinutes: 1 });
-});
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'falconClipboard') {
-    pollClipboardToFalcon().catch(() => {});
-  }
-});
-
-chrome.tabs.onActivated.addListener(() => {
-  pollClipboardToFalcon().catch(() => {});
 });
 
 refreshBadge();
@@ -563,102 +544,38 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'check_status') {
     (async () => {
       await prefsReady;
-      const healthy = await appHealthy();
-      if (!healthy) {
+      const status = () => ({
+        state: connectionState,
+        paused: interceptPaused,
+        failClosed: interceptFailClosed,
+        pairCode: formatPairCode(visiblePairCode()),
+        extensionId: chrome.runtime.id,
+      });
+      if (!(await appHealthy())) {
         setState('offline');
-        sendResponse({
-          state: connectionState,
-          paused: interceptPaused,
-          failClosed: interceptFailClosed,
-          clipboardMonitor: await getClipboardMonitorEnabled(),
-          recent: RECENT.slice(0, 3),
-          extensionId: chrome.runtime.id,
-        });
+        sendResponse(status());
         return;
       }
       const token = await getToken();
       if (token) {
-        try {
-          const r = await fetchWithTimeout(
-            `${FALCON_API}/api/ping`,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Falcon-Token': token,
-              },
-              body: '{}',
-            },
-            REQUEST_TIMEOUT_MS,
-            'Falcon ping',
-          );
-          if (r.ok) setState('connected');
-          else if (r.status === 403) setState('blocked');
-          else if (r.status === 401) setState('pending');
-          else setState('offline');
-        } catch {
-          setState('offline');
-        }
-      } else {
-        setState('pending');
+        const code = await pingToken(token);
+        if (code >= 200 && code < 300) setState('connected');
+        else if (code === 0) setState('offline');
+        // 401/403: the token is stale or revoked — pair again with a fresh prompt.
+        else ensurePaired(false).catch(() => {});
+      } else if (connectionState !== 'blocked') {
         ensurePaired(false).catch(() => {});
+        // Give the first pair request a moment so the popup can show the code.
+        await sleep(400);
       }
-      sendResponse({
-        state: connectionState,
-        paused: interceptPaused,
-        failClosed: interceptFailClosed,
-        clipboardMonitor: await getClipboardMonitorEnabled(),
-        recent: RECENT.slice(0, 3),
-        extensionId: chrome.runtime.id,
-      });
+      sendResponse(status());
     })();
     return true;
   }
 
-  if (request.action === 'save_token') {
+  if (request.action === 'get_downloads') {
     (async () => {
-      const token = (request.token || '').trim();
-      if (!token) {
-        sendResponse({ ok: false, error: msg('errorTokenEmpty', 'Token is empty') });
-        return;
-      }
-      await chrome.storage.local.set({ apiToken: token });
-      try {
-        const r = await fetchWithTimeout(
-          `${FALCON_API}/api/ping`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Falcon-Token': token,
-            },
-            body: '{}',
-          },
-          REQUEST_TIMEOUT_MS,
-          'Falcon ping',
-        );
-        if (r.ok) {
-          setState('connected');
-          sendResponse({ ok: true, state: 'connected' });
-        } else if (r.status === 403) {
-          setState('blocked');
-          sendResponse({
-            ok: false,
-            state: 'blocked',
-            error: msg(
-              'errorExtensionBlocked',
-              'Extension blocked — approve in Falcon DM Settings',
-            ),
-            extensionId: chrome.runtime.id,
-          });
-        } else {
-          setState('pending');
-          sendResponse({ ok: false, error: msg('errorTokenInvalid', 'Invalid token') });
-        }
-      } catch (e) {
-        setState('offline');
-        sendResponse({ ok: false, error: e.message || msg('errorAppOffline', 'Failed') });
-      }
+      sendResponse(await fetchDownloads());
     })();
     return true;
   }
@@ -670,8 +587,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         state: connectionState,
         paused: interceptPaused,
         failClosed: interceptFailClosed,
-        clipboardMonitor: await getClipboardMonitorEnabled(),
-        recent: RECENT.slice(0, 3),
       });
     })();
     return true;
@@ -701,19 +616,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  if (request.action === 'set_clipboard_monitor') {
-    (async () => {
-      try {
-        const next = await setClipboardMonitorEnabled(!!request.enabled);
-        sendResponse({ ok: true, clipboardMonitor: next });
-      } catch (e) {
-        sendResponse({ ok: false, error: e.message || 'Failed' });
-      }
-    })();
-    return true;
-  }
-
-  // --- popup: download current tab's media (inject overlay + open picker) ---
   if (request.action === 'grab_tab_media') {
     (async () => {
       try {
@@ -734,7 +636,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           sendResponse({ ok: false, error: msg('errorMediaUtils', 'Cannot run on this page') });
           return;
         }
-        chrome.tabs.sendMessage(active.id, { action: 'open_download_modal' }, (resp) => {
+        const overlay = request.mode === 'links' ? 'open_grabber' : 'open_download_modal';
+        chrome.tabs.sendMessage(active.id, { action: overlay }, (resp) => {
           if (chrome.runtime.lastError) {
             sendResponse({ ok: false, error: chrome.runtime.lastError.message });
           } else if (resp && resp.ok === false) {
@@ -867,6 +770,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'auto_pair') {
+    if (connectionState === 'blocked') setState('offline');
     ensureAppRunning()
       .then(() => ensurePaired(true))
       .then(() => sendResponse({ ok: true }))

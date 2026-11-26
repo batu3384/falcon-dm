@@ -6,215 +6,48 @@ function t(key, fallback) {
   }
 }
 
-document.documentElement.lang = (() => {
+const lang = (() => {
   try {
     return (chrome.i18n.getUILanguage() || 'en').slice(0, 2);
   } catch (_) {
     return 'en';
   }
 })();
+document.documentElement.lang = lang;
 
 const $ = (id) => document.getElementById(id);
-const statusEl = $('status');
-const queueEl = $('queue');
-const pageUrlEl = $('page-url');
-const grabBtn = $('grab');
-const dlUrlBtn = $('dl-url');
-const reconnectBtn = $('reconnect');
-const pauseBtn = $('pause');
-const failClosedEl = $('fail-closed');
-const clipboardMonitorEl = $('clipboard-monitor');
-const bannerEl = $('banner');
-const bannerTextEl = $('banner-text');
-const bannerActionEl = $('banner-action');
-const pendingBoxEl = $('pending-box');
-const pendingTextEl = $('pending-text');
-const blockedBoxEl = $('blocked-box');
-const blockedTextEl = $('blocked-text');
+const numberFormat = new Intl.NumberFormat(lang === 'tr' ? 'tr-TR' : 'en-US', {
+  maximumFractionDigits: 1,
+});
 
-let paused = false;
-let failClosed = false;
-let currentTabUrl = '';
-let currentTabId = 0;
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** i;
+  return `${i === 0 ? Math.round(value) : numberFormat.format(value >= 100 ? Math.round(value) : value)} ${units[i]}`;
+}
+
+function formatSpeed(bytes) {
+  return `${formatBytes(bytes)}/${lang === 'tr' ? 'sn' : 's'}`;
+}
+
+let state = 'checking';
+let currentTab = { id: 0, url: '' };
+let pollTimer = 0;
 
 function isYoutubeUrl(url) {
   return !!(globalThis.FalconMedia && FalconMedia.isYoutubePageUrl && FalconMedia.isYoutubePageUrl(url));
-}
-
-function applyStaticI18n() {
-  $('app-name').textContent = t('appName', 'Falcon DM');
-  grabBtn.textContent = t('popupDownloadPage', 'Download this page media');
-  $('grab-hint').textContent = t(
-    'popupGrabHint',
-    'Play the video first, then pick quality in the overlay.',
-  );
-  dlUrlBtn.textContent = t('popupDownloadUrl', 'Download URL');
-  reconnectBtn.textContent = t('popupReconnect', 'Reconnect');
-  pauseBtn.textContent = t('popupPause', 'Pause capture');
-  pauseBtn.title = t(
-    'popupPauseHint',
-    'Stops new browser captures. Downloads already in Falcon keep going.',
-  );
-  $('tab-label').textContent = t('popupCurrentTab', 'Current tab');
-  $('queue-label').textContent = t('popupQueueTitle', 'Recent downloads');
-  $('queue-empty').textContent = t('popupQueueEmpty', 'No recent downloads');
-  $('fail-closed-label').textContent = t(
-    'popupFailClosed',
-    'Allow browser fallback when offline',
-  );
-  $('fail-closed-hint').textContent = t(
-    'popupFailClosedHint',
-    'Off (default): Falcon owns hijacked downloads. On: if Falcon is closed, retry in Chrome.',
-  );
-  $('clipboard-monitor-label').textContent = t(
-    'popupClipboardMonitor',
-    'Queue copied http(s) URLs',
-  );
-  $('clipboard-monitor-hint').textContent = t(
-    'popupClipboardMonitorHint',
-    'Checks about once per minute while connected.',
-  );
-  $('more-label').textContent = t('popupAdvanced', 'Advanced');
-  $('settings').textContent = t('popupSettings', 'Settings');
-  bannerTextEl.textContent = t(
-    'popupOfflineHelp',
-    'Falcon DM is offline or not paired. Open the app, then reconnect.',
-  );
-  bannerActionEl.textContent = t('popupReconnect', 'Reconnect');
-  pendingTextEl.textContent = t(
-    'popupPendingHelp',
-    'Falcon DM → Settings → approve the extension.',
-  );
-  blockedTextEl.textContent = t(
-    'popupBlockedHelp',
-    'Extension not approved. Open Settings in extension options.',
-  );
-  $('open-options').textContent = t('popupOpenOptions', 'Open extension settings');
-}
-
-function setState(state) {
-  if (!statusEl) return;
-  statusEl.dataset.state = state;
-  statusEl.textContent = t(
-    state === 'connected'
-      ? 'popupStateConnected'
-      : state === 'pending'
-        ? 'popupStatePending'
-        : state === 'blocked'
-          ? 'popupStateBlocked'
-          : 'popupStateOffline',
-    state === 'connected'
-      ? 'Connected'
-      : state === 'pending'
-        ? 'Pending'
-        : state === 'blocked'
-          ? 'Blocked'
-          : 'Offline',
-  );
-
-  // Exactly one alert surface — never "Bağlı" + offline banner together.
-  if (bannerEl) bannerEl.hidden = true;
-  if (pendingBoxEl) pendingBoxEl.hidden = true;
-  if (blockedBoxEl) blockedBoxEl.hidden = true;
-  if (state === 'offline' && bannerEl) bannerEl.hidden = false;
-  else if (state === 'pending' && pendingBoxEl) pendingBoxEl.hidden = false;
-  else if (state === 'blocked' && blockedBoxEl) blockedBoxEl.hidden = false;
-
-  if (bannerActionEl) bannerActionEl.hidden = state !== 'offline';
-  const connected = state === 'connected';
-  // Overlay still opens offline — never mark the CTA disabled (HTML/ARIA both swallow or lie).
-  grabBtn.removeAttribute('aria-disabled');
-  grabBtn.classList.remove('is-blocked');
-  if (reconnectBtn) reconnectBtn.hidden = connected;
-  const grabHint = $('grab-hint');
-  if (grabHint) {
-    grabHint.textContent = connected
-      ? t('popupConnectedHint', 'Connected — play the video, pick quality, download.')
-      : t('popupGrabHint', 'Play the video first, then pick quality in the overlay.');
-  }
-}
-
-function setPauseButton(isPaused) {
-  pauseBtn.textContent = isPaused
-    ? t('popupResume', 'Resume capture')
-    : t('popupPause', 'Pause capture');
-  pauseBtn.title = t(
-    'popupPauseHint',
-    'Stops new browser captures. Downloads already in Falcon keep going.',
-  );
-}
-
-function timeAgo(ts) {
-  const s = Math.max(1, Math.round((Date.now() - ts) / 1000));
-  if (s < 60) return t('popupTimeNow', 'just now');
-  const minutes = Math.floor(s / 60);
-  if (minutes < 60) return t('popupTimeMin', '{n}m ago').replace('{n}', String(minutes));
-  return t('popupTimeHour', '{n}h ago').replace('{n}', String(Math.floor(minutes / 60)));
-}
-
-function renderQueue(recent) {
-  queueEl.innerHTML = '';
-  if (!recent || !recent.length) {
-    const li = document.createElement('li');
-    li.className = 'empty';
-    li.textContent = t('popupQueueEmpty', 'No recent downloads');
-    queueEl.appendChild(li);
-    return;
-  }
-  recent.slice(0, 3).forEach((it) => {
-    const li = document.createElement('li');
-    const main = document.createElement('div');
-    main.className = 'qmain';
-    const name = document.createElement('span');
-    name.className = 'qname';
-    name.textContent = it.filename || 'download';
-    name.title = it.filename || '';
-    const meta = document.createElement('span');
-    meta.className = 'qmeta';
-    meta.textContent = (it.host ? it.host + ' · ' : '') + timeAgo(it.ts);
-    main.appendChild(name);
-    main.appendChild(meta);
-    const kind = document.createElement('span');
-    kind.className = 'qkind';
-    kind.textContent = it.kind === 'media' ? t('kindVideoAudio', 'Video+Audio') : t('kindFile', 'File');
-    li.appendChild(main);
-    li.appendChild(kind);
-    queueEl.appendChild(li);
-  });
-}
-
-function showNotice(text) {
-  const notice = $('notice');
-  if (!notice) return;
-  notice.hidden = false;
-  notice.textContent = text;
-  notice.focus();
-  clearTimeout(showNotice._t);
-  showNotice._t = setTimeout(() => {
-    notice.hidden = true;
-    notice.textContent = '';
-  }, 6000);
-}
-
-function applyStatus(resp) {
-  if (!resp) return;
-  setState(resp.state || 'offline');
-  paused = !!resp.paused;
-  failClosed = !!resp.failClosed;
-  setPauseButton(paused);
-  // Checked = allow Chrome fallback = NOT fail-closed.
-  if (failClosedEl) failClosedEl.checked = !failClosed;
-  if (clipboardMonitorEl) clipboardMonitorEl.checked = !!resp.clipboardMonitor;
-  renderQueue(resp.recent || []);
 }
 
 function send(action, payload) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (value) => {
-      if (done) return;
-      done = true;
-      resolve(value);
+      if (!done) {
+        done = true;
+        resolve(value);
+      }
     };
     const timer = setTimeout(() => finish(null), 12000);
     try {
@@ -229,157 +62,217 @@ function send(action, payload) {
   });
 }
 
-async function refresh() {
-  if (statusEl) statusEl.textContent = '…';
-  let resp = await send('check_status');
-  if (!resp) {
-    setState('offline');
-    showNotice(t('errorAppOffline', 'Falcon DM is not running — open the desktop app'));
-    return;
-  }
-  applyStatus(resp);
-  if (resp.state === 'offline' || resp.state === 'pending') {
-    send('auto_pair').then(async (pair) => {
-      if (pair && pair.ok === false && pair.error) showNotice(pair.error);
-      const next = await send('check_status');
-      if (next) applyStatus(next);
-    });
+function showNotice(text, ok = false) {
+  const notice = $('notice');
+  notice.textContent = text;
+  notice.classList.toggle('ok', ok);
+  notice.hidden = false;
+  clearTimeout(showNotice.timer);
+  showNotice.timer = setTimeout(() => (notice.hidden = true), 6000);
+}
+
+const STATE_TEXT = {
+  connected: ['popupStateConnected', 'Connected'],
+  pending: ['popupStatePending', 'Waiting for approval'],
+  blocked: ['popupStateBlocked', 'Not approved'],
+  offline: ['popupStateOffline', 'Falcon DM is not running'],
+  checking: ['popupStateChecking', 'Checking…'],
+};
+
+function applyStatus(resp) {
+  state = (resp && resp.state) || 'offline';
+  const [key, fallback] = STATE_TEXT[state] || STATE_TEXT.offline;
+  $('dot').dataset.state = state;
+  $('state-text').textContent = t(key, fallback);
+  $('card-offline').hidden = state !== 'offline';
+  $('card-pending').hidden = state !== 'pending';
+  $('card-blocked').hidden = state !== 'blocked';
+  if (state === 'pending') $('pair-code').textContent = (resp && resp.pairCode) || '— — —';
+  $('capture').checked = !(resp && resp.paused);
+  $('activity').hidden = state !== 'connected';
+}
+
+function statusLine(row) {
+  const done = formatBytes(row.downloaded_size);
+  const size = row.total_size > 0 ? `${done} / ${formatBytes(row.total_size)}` : done;
+  switch (row.status) {
+    case 'Downloading':
+      return row.speed > 0 ? `${size} · ${formatSpeed(row.speed)}` : size;
+    case 'Merging':
+      return t('dlMerging', 'Finishing…');
+    case 'Queued':
+      return t('dlQueued', 'Waiting');
+    case 'Paused':
+      return `${t('dlPaused', 'Paused')} · ${size}`;
+    case 'Completed':
+      return formatBytes(row.total_size || row.downloaded_size);
+    case 'Failed':
+      return t('dlFailed', 'Failed');
+    default:
+      return size;
   }
 }
 
-async function initPage() {
+function renderDownloads(data) {
+  const list = $('downloads');
+  list.replaceChildren();
+  const rows = (data && data.downloads) || [];
+  if (!rows.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = t('popupNoDownloads', 'No downloads yet');
+    list.appendChild(li);
+    return;
+  }
+  for (const row of rows.slice(0, 5)) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'dl-name';
+    name.textContent = row.filename;
+    name.title = row.filename;
+    li.appendChild(name);
+    if (row.status !== 'Completed' && row.status !== 'Failed') {
+      const bar = document.createElement('div');
+      bar.className = row.status === 'Downloading' || row.status === 'Merging' ? 'bar' : 'bar paused';
+      const fill = document.createElement('span');
+      const pct = row.total_size > 0 ? Math.min(100, (row.downloaded_size / row.total_size) * 100) : 0;
+      fill.style.width = `${row.status === 'Merging' ? 100 : pct}%`;
+      bar.appendChild(fill);
+      li.appendChild(bar);
+    }
+    const meta = document.createElement('span');
+    meta.className = row.status === 'Failed' ? 'dl-meta bad' : 'dl-meta';
+    meta.textContent = statusLine(row);
+    li.appendChild(meta);
+    list.appendChild(li);
+  }
+  const summary = $('activity-title');
+  summary.textContent =
+    data.active > 0
+      ? t('popupActiveSummary', '{count} downloading · {speed}')
+          .replace('{count}', String(data.active))
+          .replace('{speed}', formatSpeed(data.speed || 0))
+      : t('popupRecent', 'Recent downloads');
+}
+
+async function refresh() {
+  const resp = await send('check_status');
+  applyStatus(resp);
+  if (state === 'connected') renderDownloads(await send('get_downloads'));
+}
+
+function startPolling() {
+  clearInterval(pollTimer);
+  // Live progress while the popup is open; pairing status while waiting for approval.
+  pollTimer = setInterval(() => void refresh(), 1500);
+}
+
+async function initTab() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    currentTabUrl = tab && tab.url ? tab.url : '';
-    currentTabId = tab && tab.id ? tab.id : 0;
-    pageUrlEl.textContent = currentTabUrl || '—';
-    pageUrlEl.title = currentTabUrl || '';
-    const okUrl = /^https?:/i.test(currentTabUrl);
-    dlUrlBtn.disabled = !okUrl;
-    dlUrlBtn.textContent = isYoutubeUrl(currentTabUrl)
-      ? t('popupOpenPicker', 'Pick quality')
-      : t('popupDownloadUrl', 'Download URL');
+    currentTab = { id: (tab && tab.id) || 0, url: (tab && tab.url) || '' };
   } catch (_) {
-    dlUrlBtn.disabled = true;
+    currentTab = { id: 0, url: '' };
   }
-}
-
-async function openMediaPicker() {
-  grabBtn.disabled = true;
+  const web = /^https?:/i.test(currentTab.url);
+  const grab = $('grab');
+  grab.disabled = !web;
+  grab.textContent = isYoutubeUrl(currentTab.url)
+    ? t('popupPickQuality', 'Download This Video…')
+    : t('popupDownloadPage', 'Download Media on This Page…');
+  $('grab-links').disabled = !web;
+  let host = '';
   try {
-    const resp = await send('grab_tab_media', { tabId: currentTabId || undefined });
-    if (resp && resp.ok) {
-      window.close();
-      return true;
-    }
-    showNotice((resp && resp.error) || t('errorAppOffline', 'Failed'));
-    return false;
-  } finally {
-    grabBtn.disabled = false;
-  }
+    host = web ? new URL(currentTab.url).hostname.replace(/^www\./, '') : '';
+  } catch (_) {}
+  $('page-url').textContent = host || t('popupNoPage', 'Open a web page to download from it.');
+  $('page-url').title = currentTab.url;
 }
 
-grabBtn.addEventListener('click', () => {
-  const state = statusEl?.dataset?.state || 'offline';
-  if (state === 'offline' || state === 'pending' || state === 'blocked') {
+async function openOverlay(mode) {
+  if (state !== 'connected') {
+    // The overlay can only send to a connected app: connect first.
     showNotice(
-      state === 'blocked'
-        ? t('popupBlockedHelp', 'Extension not approved. Open Settings in extension options.')
-        : state === 'pending'
-          ? t('popupPendingHelp', 'Falcon DM → Settings → approve the extension.')
-          : t('popupOfflineHelp', 'Falcon DM is offline or not paired. Open the app, then reconnect.'),
+      state === 'pending'
+        ? t('popupPendingTitle', 'Approve this code in Falcon DM')
+        : state === 'blocked'
+          ? t('popupBlockedText', 'Falcon DM declined this extension or disconnected it.')
+          : t('popupOfflineText', 'Downloads go to the desktop app. Start it to continue.'),
     );
-    if (state === 'offline' || state === 'pending') {
-      send('auto_pair').then(() => refresh());
-    }
+    if (state === 'offline') void send('auto_pair').then(() => refresh());
     return;
   }
-  openMediaPicker();
+  const resp = await send('grab_tab_media', { tabId: currentTab.id || undefined, mode });
+  if (resp && resp.ok) window.close();
+  else showNotice((resp && resp.error) || t('errorMediaUtils', 'Cannot run on this page'));
+}
+
+function applyStaticText() {
+  $('app-name').textContent = t('appName', 'Falcon DM');
+  $('open-app').title = t('popupOpenApp', 'Open Falcon DM');
+  $('open-app').setAttribute('aria-label', t('popupOpenApp', 'Open Falcon DM'));
+  $('offline-title').textContent = t('popupOfflineTitle', 'Falcon DM is not running');
+  $('offline-text').textContent = t(
+    'popupOfflineText',
+    'Downloads go to the desktop app. Start it to continue.',
+  );
+  $('start-app').textContent = t('popupStartApp', 'Open Falcon DM');
+  $('pending-title').textContent = t('popupPendingTitle', 'Approve this code in Falcon DM');
+  $('pending-text').textContent = t(
+    'popupPendingText',
+    'Falcon DM shows the same code. Approve it there to connect.',
+  );
+  $('blocked-title').textContent = t('popupBlockedTitle', 'Connection declined');
+  $('blocked-text').textContent = t(
+    'popupBlockedText',
+    'Falcon DM declined this extension or disconnected it.',
+  );
+  $('new-code').textContent = t('popupNewCode', 'Request a New Code');
+  $('activity-title').textContent = t('popupRecent', 'Recent downloads');
+  $('capture-label').textContent = t('popupCapture', 'Send browser downloads to Falcon DM');
+  $('capture-hint').textContent = t(
+    'popupCaptureHint',
+    'When off, Chrome downloads files itself.',
+  );
+  $('grab-links').textContent = t('popupGrabLinks', 'Grab Links on This Page…');
+  $('settings').textContent = t('popupSettings', 'Settings');
+}
+
+$('grab').addEventListener('click', () => void openOverlay('media'));
+$('grab-links').addEventListener('click', () => void openOverlay('links'));
+
+$('start-app').addEventListener('click', async () => {
+  $('start-app').disabled = true;
+  const pair = await send('auto_pair');
+  $('start-app').disabled = false;
+  if (pair && pair.ok === false && pair.error) showNotice(pair.error);
+  void refresh();
 });
 
-dlUrlBtn.addEventListener('click', async () => {
-  if (!currentTabUrl) return;
-  if (isYoutubeUrl(currentTabUrl)) {
-    await openMediaPicker();
-    return;
-  }
-  dlUrlBtn.disabled = true;
-  const resp = await send('add_url', { url: currentTabUrl });
-  dlUrlBtn.disabled = false;
-  if (resp && resp.success) {
-    showNotice(t('sentToApp', 'Sent to Falcon DM'));
-    refresh();
-  } else {
-    showNotice((resp && resp.error) || t('errorAppOffline', 'Failed'));
-  }
+$('new-code').addEventListener('click', async () => {
+  $('new-code').disabled = true;
+  // The request runs while the popup polls and shows the new code.
+  void send('auto_pair').then(() => ($('new-code').disabled = false));
+  setTimeout(() => void refresh(), 500);
 });
 
-reconnectBtn.addEventListener('click', async () => {
-  reconnectBtn.disabled = true;
-  await send('auto_pair');
-  reconnectBtn.disabled = false;
-  refresh();
+$('open-app').addEventListener('click', () => {
+  void send('auto_pair');
+  window.close();
 });
 
-bannerActionEl.addEventListener('click', () => {
-  reconnectBtn.click();
-});
-
-pauseBtn.addEventListener('click', async () => {
-  pauseBtn.disabled = true;
-  const resp = await send('set_paused', { paused: !paused });
-  pauseBtn.disabled = false;
+$('capture').addEventListener('change', async (e) => {
+  const enabled = e.target.checked;
+  const resp = await send('set_paused', { paused: !enabled });
   if (!resp || resp.ok === false) {
+    e.target.checked = !enabled;
     showNotice(t('errorAppOffline', 'Failed'));
-    refresh();
-    return;
   }
-  refresh();
 });
 
-if (failClosedEl) {
-  failClosedEl.addEventListener('change', async () => {
-    failClosedEl.disabled = true;
-    const resp = await send('set_fail_closed', { failClosed: !failClosedEl.checked });
-    failClosedEl.disabled = false;
-    if (!resp || resp.ok === false) {
-      failClosedEl.checked = !failClosedEl.checked;
-      showNotice(t('errorAppOffline', 'Failed'));
-      refresh();
-      return;
-    }
-    failClosed = !!resp.failClosed;
-  });
-}
+$('settings').addEventListener('click', () => chrome.runtime.openOptionsPage());
 
-if (clipboardMonitorEl) {
-  clipboardMonitorEl.addEventListener('change', async () => {
-    clipboardMonitorEl.disabled = true;
-    const resp = await send('set_clipboard_monitor', { enabled: clipboardMonitorEl.checked });
-    clipboardMonitorEl.disabled = false;
-    if (!resp || resp.ok === false) {
-      clipboardMonitorEl.checked = !clipboardMonitorEl.checked;
-      showNotice(t('errorAppOffline', 'Failed'));
-      refresh();
-    }
-  });
-}
-
-$('settings').addEventListener('click', (e) => {
-  e.preventDefault();
-  chrome.runtime.openOptionsPage();
-});
-
-$('open-options').addEventListener('click', (e) => {
-  e.preventDefault();
-  chrome.runtime.openOptionsPage();
-});
-
-applyStaticI18n();
-if (!statusEl || !grabBtn) {
-  document.body.innerHTML =
-    '<p style="padding:16px;margin:0">Falcon DM popup yüklenemedi. chrome://extensions → Reload.</p>';
-} else {
-  initPage();
-  refresh();
-}
+applyStaticText();
+void initTab();
+void refresh().then(startPolling);
+window.addEventListener('unload', () => clearInterval(pollTimer));

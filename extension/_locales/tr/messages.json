@@ -1,128 +1,299 @@
 {
-  "appName": { "message": "Falcon DM" },
-  "appDesc": { "message": "Tarayıcı indirmelerini ve medyayı Falcon DM'e yönlendirir." },
-  "downloadWithFalcon": { "message": "Falcon ile indir" },
-  "fabDismiss": { "message": "Bu sayfada indirme düğmesini gizle" },
-  "fabDismissHint": { "message": "Sayfayı yenileyene veya başka videoya geçene kadar gizli kalır" },
-  "fabDragHint": { "message": "Sürükleyerek taşı · tıklayarak indir" },
-  "blobVideo": { "message": "Sayfa videosu (blob)" },
-  "blobAudio": { "message": "Sayfa sesi (blob)" },
-  "blobHint": { "message": "Bu sekmeden alınır" },
-  "clipboardQueued": { "message": "Panodaki URL Falcon DM kuyruğuna eklendi" },
-  "kindDash": { "message": "DASH akışı" },
-  "blobBadge": { "message": "Blob" },
-  "popupClipboardMonitor": { "message": "Kopyalanan http(s) URL'leri kuyruğa al" },
-  "popupClipboardMonitorHint": { "message": "Bağlıyken yaklaşık dakikada bir kontrol eder." },
-  "optionsClipboardMonitor": { "message": "Panoya kopyalanan http(s) URL'leri kuyruğa al" },
-  "optionsClipboardMonitorHint": { "message": "Falcon DM bağlıyken yaklaşık dakikada bir kontrol eder." },
-  "downloadVideo": { "message": "Falcon DM ile indir" },
-  "cancel": { "message": "İptal" },
-  "startDownload": { "message": "İndirmeyi Başlat" },
-  "sending": { "message": "Gönderiliyor..." },
-  "queued": { "message": "Falcon DM kuyruğuna eklendi" },
+  "appName": {
+    "message": "Falcon DM"
+  },
+  "appDesc": {
+    "message": "Tarayıcı indirmelerini ve medyayı Falcon DM'e yönlendirir."
+  },
+  "downloadWithFalcon": {
+    "message": "Falcon ile indir"
+  },
+  "fabDismiss": {
+    "message": "Bu sayfada indirme düğmesini gizle"
+  },
+  "fabDismissHint": {
+    "message": "Sayfayı yenileyene veya başka videoya geçene kadar gizli kalır"
+  },
+  "fabDragHint": {
+    "message": "Sürükleyerek taşı · tıklayarak indir"
+  },
+  "blobVideo": {
+    "message": "Sayfa videosu (blob)"
+  },
+  "blobAudio": {
+    "message": "Sayfa sesi (blob)"
+  },
+  "blobHint": {
+    "message": "Bu sekmeden alınır"
+  },
+  "kindDash": {
+    "message": "DASH akışı"
+  },
+  "blobBadge": {
+    "message": "Blob"
+  },
+  "downloadVideo": {
+    "message": "Falcon DM ile indir"
+  },
+  "cancel": {
+    "message": "İptal"
+  },
+  "startDownload": {
+    "message": "İndirmeyi Başlat"
+  },
+  "sending": {
+    "message": "Gönderiliyor..."
+  },
+  "queued": {
+    "message": "Falcon DM kuyruğuna eklendi"
+  },
   "youtubeHint": {
     "message": "YouTube: Falcon bu sekmeden imzalı CDN adresini alır. Ses için Video+Ses seç."
   },
-  "videoOnlyHint": { "message": "Bu kaynakta ses yok. Ses istiyorsan Video+Ses kartını seç." },
-  "popupCurrentTab": { "message": "Bu sekme" },
-  "grabberSelectAll": { "message": "Tümünü seç" },
-  "grabberSelectNone": { "message": "Hiçbirini seçme" },
-  "grabberFailed": { "message": "indirme başarısız" },
-  "grabberRetry": { "message": "başarısızları tekrar dene" },
+  "videoOnlyHint": {
+    "message": "Bu kaynakta ses yok. Ses istiyorsan Video+Ses kartını seç."
+  },
+  "grabberSelectAll": {
+    "message": "Tümünü seç"
+  },
+  "grabberSelectNone": {
+    "message": "Hiçbirini seçme"
+  },
+  "grabberFailed": {
+    "message": "indirme başarısız"
+  },
+  "grabberRetry": {
+    "message": "başarısızları tekrar dene"
+  },
   "qualityHint": {
     "message": "Kalite ve format seçin. HLS akışları Falcon DM tarafından otomatik birleştirilir."
   },
-  "labelQuality": { "message": "Kalite ve format" },
-  "sentToApp": { "message": "Falcon DM'e gönderildi" },
+  "labelQuality": {
+    "message": "Kalite ve format"
+  },
+  "sentToApp": {
+    "message": "Falcon DM'e gönderildi"
+  },
   "errorJunkUrl": {
     "message": "Bu adres gerçek video değil — videoyu oynatıp kalite kartından seç"
   },
-  "errorWaking": { "message": "Falcon DM başlatılamadı — uygulamayı kurun veya manuel açın" },
-  "errorExtensionReload": { "message": "Eklenti yenilendi — sayfayı yenileyin" },
-  "errorMediaUtils": { "message": "Falcon modülü yüklenemedi — eklentiyi yenileyin" },
-  "errorNoActiveTab": { "message": "Aktif sekme yok — sayfaya tıklayıp tekrar dene" },
-  "errorAppOffline": { "message": "Falcon DM çalışmıyor — masaüstü uygulamasını açın" },
-  "errorTokenInvalid": { "message": "Bağlantı koptu — otomatik yeniden bağlanılacak" },
-  "errorExtensionBlocked": {
-    "message": "Eklenti engelli — Falcon DM Ayarlar → Eklentiyi yeniden bağla"
+  "errorWaking": {
+    "message": "Falcon DM başlamadı. Uygulamayı elle açın."
   },
-  "errorInvalidUrl": { "message": "Geçerli video adresi bulunamadı — başka kaynak seçin" },
-  "errorUnsupportedMagnet": { "message": "Magnet ve BitTorrent bağlantıları henüz desteklenmiyor" },
-  "errorNoValidSource": { "message": "İndirilebilir URL yok — videoyu oynatıp tekrar deneyin" },
-  "errorRateLimit": { "message": "Çok fazla istek — kısa süre sonra tekrar deneyin" },
-  "errorHttp": { "message": "İstek başarısız" },
-  "appClosedFallback": { "message": "Falcon DM çevrimdışı — tarayıcı indirmesi kullanıldı" },
-  "interceptBlocked": { "message": "Falcon DM çevrimdışı — indirme engellendi" },
+  "errorExtensionReload": {
+    "message": "Eklenti yenilendi — sayfayı yenileyin"
+  },
+  "errorMediaUtils": {
+    "message": "Falcon modülü yüklenemedi — eklentiyi yenileyin"
+  },
+  "errorNoActiveTab": {
+    "message": "Aktif sekme yok — sayfaya tıklayıp tekrar dene"
+  },
+  "errorAppOffline": {
+    "message": "Falcon DM çalışmıyor — masaüstü uygulamasını açın"
+  },
+  "errorTokenInvalid": {
+    "message": "Bağlantı koptu — Falcon DM kendiliğinden yeniden eşleşecek"
+  },
+  "errorExtensionBlocked": {
+    "message": "Bu eklenti Falcon DM'de onaylı değil"
+  },
+  "errorInvalidUrl": {
+    "message": "Geçerli video adresi bulunamadı — başka kaynak seçin"
+  },
+  "errorUnsupportedMagnet": {
+    "message": "Magnet ve BitTorrent bağlantıları henüz desteklenmiyor"
+  },
+  "errorNoValidSource": {
+    "message": "İndirilebilir URL yok — videoyu oynatıp tekrar deneyin"
+  },
+  "errorRateLimit": {
+    "message": "Çok fazla istek — kısa süre sonra tekrar deneyin"
+  },
+  "errorHttp": {
+    "message": "İstek başarısız"
+  },
+  "appClosedFallback": {
+    "message": "Falcon DM çevrimdışı — tarayıcı indirmesi kullanıldı"
+  },
+  "interceptBlocked": {
+    "message": "Falcon DM çevrimdışı — indirme engellendi"
+  },
   "interceptQueued": {
     "message": "Chrome indirmesi iptal — Falcon kuyruğuna alındı (dosya Falcon'da, Chrome İndirilenler'de değil)"
   },
-  "labelFilename": { "message": "Dosya adı" },
-  "contextDownload": { "message": "Falcon DM ile indir" },
-  "contextGrabber": { "message": "Sayfa linklerini Falcon ile yakala" },
-  "grabberTitle": { "message": "Link Grabber" },
-  "grabberFound": { "message": "indirilebilir link bulundu" },
-  "grabberEmpty": { "message": "Bu sayfada indirilebilir link bulunamadı" },
-  "grabberSend": { "message": "Seçilenleri gönder" },
-  "optionsTitle": { "message": "Falcon DM Bağlantısı" },
+  "labelFilename": {
+    "message": "Dosya adı"
+  },
+  "contextDownload": {
+    "message": "Falcon DM ile indir"
+  },
+  "contextGrabber": {
+    "message": "Sayfa linklerini Falcon ile yakala"
+  },
+  "grabberTitle": {
+    "message": "Link Grabber"
+  },
+  "grabberFound": {
+    "message": "indirilebilir link bulundu"
+  },
+  "grabberEmpty": {
+    "message": "Bu sayfada indirilebilir link bulunamadı"
+  },
+  "grabberSend": {
+    "message": "Seçilenleri gönder"
+  },
+  "optionsTitle": {
+    "message": "Falcon DM"
+  },
   "optionsDesc": {
-    "message": "Bağlandıktan sonra indirmeler Falcon DM'e gider. Sorun olursa alttan token kaydet."
+    "message": "Tarayıcınızdaki indirmeleri Falcon DM'e gönderin."
   },
-  "optionsTest": { "message": "Bağlantıyı test et" },
-  "optionsPair": { "message": "Şimdi bağlan" },
-  "optionsHint": {
-    "message": "Engelliyse: Falcon DM → Ayarlar → Eklentiyi yeniden bağla, sonra Şimdi bağlan."
+  "optionsPair": {
+    "message": "Bağlan"
   },
-  "optionsConnected": { "message": "Bağlı — indirmeler Falcon DM'e gider" },
-  "kindStream": { "message": "Akış" },
-  "kindAudio": { "message": "Ses" },
-  "kindVideoAudio": { "message": "Video+Ses" },
-  "kindVideoOnly": { "message": "Sadece video" },
-  "kindFile": { "message": "Dosya" },
-  "popupDownloadPage": { "message": "Bu sayfanın medyasını indir" },
-  "popupDownloadUrl": { "message": "URL indir" },
-  "popupReconnect": { "message": "Yeniden bağlan" },
-  "popupPause": { "message": "Yakalamayı duraklat" },
-  "popupResume": { "message": "Yakalamaya devam" },
-  "popupPauseHint": {
-    "message": "Yeni tarayıcı yakalamalarını durdurur. Falcon'daki indirmeler sürer."
+  "optionsConnected": {
+    "message": "Falcon DM'e bağlı"
   },
-  "popupStateConnected": { "message": "Bağlı" },
-  "popupStateOffline": { "message": "Çevrimdışı" },
-  "popupStatePending": { "message": "Onay bekleniyor" },
-  "popupQueueTitle": { "message": "Son indirmeler" },
-  "popupQueueEmpty": { "message": "Yakın zamanda indirme yok" },
-  "popupTimeNow": { "message": "az önce" },
-  "popupTimeMin": { "message": "{n} dk önce" },
-  "popupTimeHour": { "message": "{n} sa önce" },
-  "popupSettings": { "message": "Ayarlar" },
-  "popupFailClosed": { "message": "Çevrimdışıyken tarayıcıya düş" },
-  "popupFailClosedHint": {
-    "message": "Kapalı (varsayılan): indirme yalnız Falcon'da — Chrome dosyayı kaydetmez. Açık: Falcon kapalıysa Chrome'da dene."
+  "kindStream": {
+    "message": "Akış"
   },
-  "optionsFailClosed": { "message": "Çevrimdışıyken tarayıcıya düş" },
-  "optionsFailClosedHint": {
-    "message": "Kapalı (varsayılan): indirme yalnız Falcon'da — Chrome dosyayı kaydetmez. Açık: Falcon kapalıysa Chrome'da dene."
+  "kindAudio": {
+    "message": "Ses"
   },
-  "popupOnboard": { "message": "Falcon DM'i açın ve eklentiyi Ayarlar'da onaylayın" },
-  "errorPairPending": { "message": "Falcon DM Ayarlar'da bu eklentiyi onaylayın" },
-  "popupGrabHint": { "message": "Önce videoyu oynat. Sonra kalite seçip indir." },
-  "popupConnectedHint": { "message": "Bağlı — videoyu oynat, kalite seç, indir." },
-  "popupOfflineHelp": { "message": "Falcon DM kapalı veya eşleşmemiş. Uygulamayı aç, Yeniden bağlan'a bas." },
-  "popupAdvanced": { "message": "Gelişmiş" },
-  "popupPendingHelp": { "message": "Falcon DM → Ayarlar → Eklenti bölümünde onay ver." },
-  "popupOpenPicker": { "message": "Kalite seç" },
-  "overlaySteps": { "message": "Kalite seç → İndirmeyi başlat" },
-  "popupStateBlocked": { "message": "Onay gerekli" },
-  "popupBlockedHelp": { "message": "Eklenti ID'sini Falcon DM Ayarlar'da onayla, API token'ı eklenti ayarlarına yapıştır." },
-  "popupOpenOptions": { "message": "Eklenti ayarlarını aç" },
-  "errorNativeHostMissing": { "message": "Native host yok veya eski eklenti ID — Falcon Ayarlar'dan bu ID ile kur" },
-  "errorTokenEmpty": { "message": "Token boş" },
-  "optionsExtensionId": { "message": "Eklenti ID" },
-  "optionsExtensionIdHint": { "message": "Kopyala → Falcon DM Ayarlar → eklentiyi onayla + native host kur" },
-  "optionsCopyId": { "message": "Kopyala" },
-  "optionsIdCopied": { "message": "Eklenti ID kopyalandı" },
-  "optionsCopyFailed": { "message": "Kopyalanamadı" },
-  "optionsApiToken": { "message": "API token" },
-  "optionsApiTokenHint": { "message": "Falcon DM Ayarlar → API token kopyala, buraya yapıştır, Kaydet" },
-  "optionsSaveToken": { "message": "Token kaydet" }
+  "kindVideoAudio": {
+    "message": "Video+Ses"
+  },
+  "kindVideoOnly": {
+    "message": "Sadece video"
+  },
+  "popupDownloadPage": {
+    "message": "Bu Sayfadaki Medyayı İndir…"
+  },
+  "popupStateConnected": {
+    "message": "Bağlı"
+  },
+  "popupStateOffline": {
+    "message": "Falcon DM çalışmıyor"
+  },
+  "popupStatePending": {
+    "message": "Onay bekleniyor"
+  },
+  "popupSettings": {
+    "message": "Ayarlar"
+  },
+  "errorPairPending": {
+    "message": "Kodu Falcon DM'de onaylayın, sonra yeniden deneyin."
+  },
+  "overlaySteps": {
+    "message": "Kalite seç → İndirmeyi başlat"
+  },
+  "popupStateBlocked": {
+    "message": "Onaylı değil"
+  },
+  "optionsExtensionId": {
+    "message": "Eklenti kimliği"
+  },
+  "optionsCopyId": {
+    "message": "Kopyala"
+  },
+  "optionsIdCopied": {
+    "message": "Eklenti kimliği kopyalandı"
+  },
+  "optionsCopyFailed": {
+    "message": "Kopyalanamadı"
+  },
+  "dlFailed": {
+    "message": "Başarısız"
+  },
+  "dlMerging": {
+    "message": "Tamamlanıyor…"
+  },
+  "dlPaused": {
+    "message": "Duraklatıldı"
+  },
+  "dlQueued": {
+    "message": "Sırada"
+  },
+  "errorPairRejected": {
+    "message": "Falcon DM isteği reddetti. Yeni bir kod almak için yeniden deneyin."
+  },
+  "optionsConnection": {
+    "message": "Bağlantı"
+  },
+  "optionsConnectedDetail": {
+    "message": "İndirmeler masaüstü uygulamasına gider."
+  },
+  "optionsPendingDetail": {
+    "message": "{code} kodunu Falcon DM'de onaylayın."
+  },
+  "optionsPairing": {
+    "message": "Kodu eklenti penceresinde görün ve Falcon DM'de onaylayın."
+  },
+  "optionsCapture": {
+    "message": "İndirmeler"
+  },
+  "optionsFallback": {
+    "message": "Falcon DM kapalıyken Chrome indirsin"
+  },
+  "optionsFallbackHint": {
+    "message": "Kapalıyken yakalanan indirme, Falcon DM devralabilene kadar bekler."
+  },
+  "pairNotify": {
+    "message": "{code} kodunu Falcon DM'de onaylayın"
+  },
+  "popupActiveSummary": {
+    "message": "{count} indiriliyor · {speed}"
+  },
+  "popupRecent": {
+    "message": "Son indirmeler"
+  },
+  "popupNoDownloads": {
+    "message": "Henüz indirme yok"
+  },
+  "popupNoPage": {
+    "message": "İndirmek için bir web sayfası açın."
+  },
+  "popupPickQuality": {
+    "message": "Bu Videoyu İndir…"
+  },
+  "popupGrabLinks": {
+    "message": "Bu Sayfadaki Bağlantıları Topla…"
+  },
+  "popupOpenApp": {
+    "message": "Falcon DM'i Aç"
+  },
+  "popupOfflineTitle": {
+    "message": "Falcon DM çalışmıyor"
+  },
+  "popupOfflineText": {
+    "message": "İndirmeler masaüstü uygulamasına gider. Devam etmek için onu başlatın."
+  },
+  "popupStartApp": {
+    "message": "Falcon DM'i Aç"
+  },
+  "popupPendingTitle": {
+    "message": "Bu kodu Falcon DM'de onaylayın"
+  },
+  "popupPendingText": {
+    "message": "Falcon DM aynı kodu gösterir. Bağlanmak için orada onaylayın."
+  },
+  "popupBlockedTitle": {
+    "message": "Bağlantı reddedildi"
+  },
+  "popupBlockedText": {
+    "message": "Falcon DM bu eklentiyi reddetti ya da bağlantısını kesti."
+  },
+  "popupNewCode": {
+    "message": "Yeni Kod İste"
+  },
+  "popupCapture": {
+    "message": "Tarayıcı indirmelerini Falcon DM'e gönder"
+  },
+  "popupCaptureHint": {
+    "message": "Kapalıyken dosyaları Chrome kendisi indirir."
+  },
+  "popupStateChecking": {
+    "message": "Denetleniyor…"
+  }
 }

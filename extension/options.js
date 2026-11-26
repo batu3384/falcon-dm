@@ -14,146 +14,88 @@ document.documentElement.lang = (() => {
   }
 })();
 
-const statusEl = document.getElementById('status');
-const tokenEl = document.getElementById('api-token');
-const extIdEl = document.getElementById('extension-id');
+const $ = (id) => document.getElementById(id);
 
-function setStatus(text, kind) {
-  statusEl.textContent = text;
-  statusEl.className = 'status-card ' + (kind || '');
+function send(action, payload) {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ action, ...payload }, (resp) =>
+        resolve(chrome.runtime.lastError ? null : resp),
+      );
+    } catch (_) {
+      resolve(null);
+    }
+  });
 }
 
-document.getElementById('title').textContent = t('optionsTitle', 'Falcon DM Connection');
-document.getElementById('desc').textContent = t(
-  'optionsDesc',
-  'Connects automatically when Falcon DM is open.',
-);
-document.getElementById('id-label').textContent = t('optionsExtensionId', 'Extension ID');
-document.getElementById('id-hint').textContent = t(
-  'optionsExtensionIdHint',
-  'Copy to Falcon DM Settings → approve extension + install native host.',
-);
-document.getElementById('copy-id').textContent = t('optionsCopyId', 'Copy');
-document.getElementById('token-label').textContent = t('optionsApiToken', 'API token');
-document.getElementById('token-hint').textContent = t(
-  'optionsApiTokenHint',
-  'Copy from Falcon DM Settings → Extension API token, paste here, Save.',
-);
-document.getElementById('save-token').textContent = t('optionsSaveToken', 'Save token');
-document.getElementById('pair').textContent = t('optionsPair', 'Connect now');
-document.getElementById('test').textContent = t('optionsTest', 'Test connection');
-document.getElementById('hint').textContent = t(
-  'optionsHint',
-  'If blocked: approve extension ID in Falcon DM Settings, then save token here.',
-);
-document.getElementById('fail-closed-label').textContent = t(
-  'popupFailClosed',
-  'Allow browser fallback when offline',
-);
-document.getElementById('fail-closed-hint').textContent = t(
-  'popupFailClosedHint',
-  'Off (default): Falcon owns hijacked downloads. On: if Falcon is closed, retry in Chrome.',
-);
-document.getElementById('clipboard-monitor-label').textContent = t(
-  'optionsClipboardMonitor',
-  'Queue http(s) URLs copied to clipboard',
-);
-document.getElementById('clipboard-monitor-hint').textContent = t(
-  'optionsClipboardMonitorHint',
-  'Checks about once per minute while Falcon DM is connected.',
+function notice(text) {
+  $('notice').textContent = text;
+}
+
+const STATES = {
+  connected: ['optionsConnected', 'Connected to Falcon DM', 'optionsConnectedDetail', 'Downloads go to the desktop app.'],
+  pending: ['popupStatePending', 'Waiting for approval', 'optionsPendingDetail', 'Approve code {code} in Falcon DM.'],
+  blocked: ['popupStateBlocked', 'Not approved', 'popupBlockedText', 'Falcon DM declined this extension or disconnected it.'],
+  offline: ['popupStateOffline', 'Falcon DM is not running', 'popupOfflineText', 'Downloads go to the desktop app. Start it to continue.'],
+};
+
+async function refresh() {
+  const resp = await send('check_status');
+  const state = (resp && resp.state) || 'offline';
+  const [key, fallback, detailKey, detailFallback] = STATES[state] || STATES.offline;
+  $('dot').dataset.state = state;
+  $('conn-state').textContent = t(key, fallback);
+  $('conn-detail').textContent = t(detailKey, detailFallback).replace('{code}', (resp && resp.pairCode) || '');
+  $('pair').hidden = state === 'connected';
+  $('pair').textContent =
+    state === 'blocked' ? t('popupNewCode', 'Request a New Code') : t('optionsPair', 'Connect');
+  $('capture').checked = !(resp && resp.paused);
+  // Checked = Chrome may download when Falcon DM is closed.
+  $('fallback').checked = !(resp && resp.failClosed);
+}
+
+$('title').textContent = t('optionsTitle', 'Falcon DM');
+$('desc').textContent = t('optionsDesc', 'Send downloads from your browser to Falcon DM.');
+$('conn-title').textContent = t('optionsConnection', 'Connection');
+$('id-label').textContent = t('optionsExtensionId', 'Extension ID');
+$('extension-id').textContent = chrome.runtime.id;
+$('copy-id').textContent = t('optionsCopyId', 'Copy');
+$('capture-title').textContent = t('optionsCapture', 'Downloads');
+$('capture-label').textContent = t('popupCapture', 'Send browser downloads to Falcon DM');
+$('capture-hint').textContent = t('popupCaptureHint', 'When off, Chrome downloads files itself.');
+$('fallback-label').textContent = t('optionsFallback', 'Let Chrome download when Falcon DM is closed');
+$('fallback-hint').textContent = t(
+  'optionsFallbackHint',
+  'When off, a captured download waits until Falcon DM can take it.',
 );
 
-extIdEl.textContent = chrome.runtime.id;
+$('pair').addEventListener('click', async () => {
+  $('pair').disabled = true;
+  notice(t('optionsPairing', 'Look for the code in the popup and approve it in Falcon DM.'));
+  const resp = await send('auto_pair');
+  $('pair').disabled = false;
+  notice(resp && resp.ok ? t('optionsConnected', 'Connected to Falcon DM') : (resp && resp.error) || '');
+  void refresh();
+});
 
-document.getElementById('copy-id').addEventListener('click', async () => {
+$('copy-id').addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText(chrome.runtime.id);
-    setStatus(t('optionsIdCopied', 'Extension ID copied'), 'ok');
-  } catch {
-    setStatus(t('optionsCopyFailed', 'Copy failed'), 'err');
+    notice(t('optionsIdCopied', 'Extension ID copied'));
+  } catch (_) {
+    notice(t('optionsCopyFailed', 'Could not copy'));
   }
 });
 
-const failClosedEl = document.getElementById('fail-closed');
-const clipboardMonitorEl = document.getElementById('clipboard-monitor');
-
-function refresh() {
-  setStatus(t('sending', 'Checking...'), '');
-  chrome.runtime.sendMessage({ action: 'check_status' }, (resp) => {
-    if (!resp) {
-      setStatus(t('errorAppOffline', 'Falcon DM is not running'), 'err');
-      return;
-    }
-    const labels = {
-      connected: ['optionsConnected', 'Connected — downloads go to Falcon DM', 'ok'],
-      pending: ['popupStatePending', 'Pending approval in Falcon DM Settings', ''],
-      blocked: ['popupStateBlocked', 'Extension not approved — open Settings', 'err'],
-      offline: ['errorAppOffline', 'Falcon DM is not running', 'err'],
-    };
-    const [key, fallback, kind] = labels[resp.state] || labels.offline;
-    setStatus(t(key, fallback), kind);
-  });
-  chrome.runtime.sendMessage({ action: 'get_status' }, (resp) => {
-    if (resp && failClosedEl) failClosedEl.checked = !resp.failClosed;
-    if (resp && clipboardMonitorEl) clipboardMonitorEl.checked = !!resp.clipboardMonitor;
-  });
-}
-
-chrome.storage.local.get({ apiToken: '' }, (data) => {
-  if (data.apiToken) tokenEl.value = data.apiToken;
+$('capture').addEventListener('change', async (e) => {
+  const resp = await send('set_paused', { paused: !e.target.checked });
+  if (!resp || resp.ok === false) e.target.checked = !e.target.checked;
 });
 
-document.getElementById('save-token').addEventListener('click', () => {
-  const token = tokenEl.value.trim();
-  setStatus(t('sending', 'Saving...'), '');
-  chrome.runtime.sendMessage({ action: 'save_token', token }, (resp) => {
-    if (resp && resp.ok) {
-      setStatus(t('optionsConnected', 'Connected — downloads go to Falcon DM'), 'ok');
-      return;
-    }
-    setStatus((resp && resp.error) || t('errorAppOffline', 'Failed'), 'err');
-  });
+$('fallback').addEventListener('change', async (e) => {
+  const resp = await send('set_fail_closed', { failClosed: !e.target.checked });
+  if (!resp || resp.ok === false) e.target.checked = !e.target.checked;
 });
 
-document.getElementById('pair').addEventListener('click', () => {
-  setStatus(t('sending', 'Connecting...'), '');
-  chrome.runtime.sendMessage({ action: 'auto_pair' }, (resp) => {
-    if (resp && resp.ok) {
-      setStatus(t('optionsConnected', 'Connected — downloads go to Falcon DM'), 'ok');
-    } else {
-      setStatus(resp?.error || t('errorAppOffline', 'Connection failed'), 'err');
-    }
-  });
-});
-
-document.getElementById('test').addEventListener('click', refresh);
-
-if (failClosedEl) {
-  failClosedEl.addEventListener('change', () => {
-    chrome.runtime.sendMessage(
-      { action: 'set_fail_closed', failClosed: !failClosedEl.checked },
-      (resp) => {
-        if (!resp || resp.ok === false) {
-          failClosedEl.checked = !failClosedEl.checked;
-          setStatus(resp?.error || t('errorAppOffline', 'Failed'), 'err');
-        }
-      },
-    );
-  });
-}
-
-if (clipboardMonitorEl) {
-  clipboardMonitorEl.addEventListener('change', () => {
-    chrome.runtime.sendMessage(
-      { action: 'set_clipboard_monitor', enabled: clipboardMonitorEl.checked },
-      (resp) => {
-        if (!resp || resp.ok === false) {
-          clipboardMonitorEl.checked = !clipboardMonitorEl.checked;
-          setStatus(resp?.error || t('errorAppOffline', 'Failed'), 'err');
-        }
-      },
-    );
-  });
-}
-
-refresh();
+void refresh();
+setInterval(() => void refresh(), 3000);

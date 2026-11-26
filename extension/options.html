@@ -7,56 +7,56 @@
     <link rel="stylesheet" href="chrome.css" />
   </head>
   <body class="options">
-    <header class="options-head">
-      <img src="icon48.png" alt="" class="logo" />
+    <header class="opt-head">
+      <img src="icon128.png" alt="" />
       <div>
         <h1 id="title">Falcon DM</h1>
-        <p class="lead" id="desc"></p>
+        <p id="desc"></p>
       </div>
     </header>
 
-    <div id="status" class="status-card" role="status" aria-live="polite"></div>
-
-    <section class="setup-card" aria-labelledby="id-label" aria-describedby="id-hint">
-      <div class="section-title" id="id-label"></div>
-      <div class="mono-row">
-        <code id="extension-id" class="mono"></code>
-        <button id="copy-id" class="secondary sm" type="button"></button>
-      </div>
-      <p class="hint" id="id-hint"></p>
-    </section>
-
-    <section class="setup-card">
-      <label class="field-label" for="api-token" id="token-label"></label>
-      <input
-        id="api-token"
-        class="field-input mono"
-        type="password"
-        autocomplete="off"
-        aria-describedby="token-hint"
-      />
-      <p class="hint" id="token-hint"></p>
-      <div class="actions">
-        <button id="save-token" class="primary" type="button"></button>
+    <section class="group" aria-labelledby="conn-title">
+      <h2 class="section-title" id="conn-title"></h2>
+      <div class="group-box">
+        <div class="group-row">
+          <span class="dot" id="dot" data-state="checking"></span>
+          <div class="grow">
+            <div id="conn-state">…</div>
+            <div class="hint" id="conn-detail"></div>
+          </div>
+          <button id="pair" class="btn" type="button"></button>
+        </div>
+        <div class="group-row">
+          <div class="grow">
+            <div id="id-label"></div>
+            <div class="mono hint" id="extension-id"></div>
+          </div>
+          <button id="copy-id" class="btn small" type="button"></button>
+        </div>
       </div>
     </section>
 
-    <div class="actions" role="group" aria-describedby="hint">
-      <button id="pair" class="secondary" type="button"></button>
-      <button id="test" class="secondary" type="button"></button>
-    </div>
+    <section class="group" aria-labelledby="capture-title">
+      <h2 class="section-title" id="capture-title"></h2>
+      <div class="group-box">
+        <label class="group-row switch-row" for="capture">
+          <span class="grow">
+            <span id="capture-label"></span>
+            <span class="hint" id="capture-hint"></span>
+          </span>
+          <input id="capture" class="switch" type="checkbox" role="switch" />
+        </label>
+        <label class="group-row switch-row" for="fallback">
+          <span class="grow">
+            <span id="fallback-label"></span>
+            <span class="hint" id="fallback-hint"></span>
+          </span>
+          <input id="fallback" class="switch" type="checkbox" role="switch" />
+        </label>
+      </div>
+    </section>
 
-    <label class="check-row options-check" for="fail-closed">
-      <input id="fail-closed" type="checkbox" aria-describedby="fail-closed-hint" />
-      <span id="fail-closed-label"></span>
-    </label>
-    <p class="hint" id="fail-closed-hint"></p>
-    <label class="check-row options-check" for="clipboard-monitor">
-      <input id="clipboard-monitor" type="checkbox" aria-describedby="clipboard-monitor-hint" />
-      <span id="clipboard-monitor-label"></span>
-    </label>
-    <p class="hint" id="clipboard-monitor-hint"></p>
-    <p class="hint" id="hint"></p>
+    <p class="hint" id="notice" role="status" aria-live="polite"></p>
     <script src="options.js"></script>
   </body>
 </html>

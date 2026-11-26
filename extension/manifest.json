@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "version": "1.6.0",
+  "version": "2.0.0",
   "default_locale": "en",
   "description": "__MSG_appDesc__",
   "name": "__MSG_appName__",
@@ -16,10 +16,7 @@
     "cookies",
     "contextMenus",
     "storage",
-    "scripting",
-    "nativeMessaging",
-    "clipboardRead",
-    "alarms"
+    "scripting"
   ],
   "content_scripts": [
     {
@@ -28,11 +25,17 @@
         "*://youtu.be/*",
         "*://*.youtube-nocookie.com/*"
       ],
-      "js": ["media-utils.js", "content.js"],
+      "js": [
+        "media-utils.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
-  "host_permissions": ["<all_urls>", "http://127.0.0.1:14201/*"],
+  "host_permissions": [
+    "<all_urls>",
+    "http://127.0.0.1:14201/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },

@@ -1,128 +1,299 @@
 {
-  "appName": { "message": "Falcon DM" },
-  "appDesc": { "message": "Sends browser downloads and media to Falcon DM." },
-  "downloadWithFalcon": { "message": "Download with Falcon" },
-  "fabDismiss": { "message": "Hide download button for this page" },
-  "fabDismissHint": { "message": "Hidden until you refresh the page or open another video" },
-  "fabDragHint": { "message": "Drag to move · click to download" },
-  "blobVideo": { "message": "Page video (blob)" },
-  "blobAudio": { "message": "Page audio (blob)" },
-  "blobHint": { "message": "Fetched from this tab" },
-  "clipboardQueued": { "message": "URL from clipboard queued in Falcon DM" },
-  "kindDash": { "message": "DASH stream" },
-  "blobBadge": { "message": "Blob" },
-  "popupClipboardMonitor": { "message": "Queue copied http(s) URLs" },
-  "popupClipboardMonitorHint": { "message": "Checks about once per minute while connected." },
-  "optionsClipboardMonitor": { "message": "Queue http(s) URLs copied to clipboard" },
-  "optionsClipboardMonitorHint": { "message": "Checks about once per minute while Falcon DM is connected." },
-  "downloadVideo": { "message": "Download with Falcon DM" },
-  "cancel": { "message": "Cancel" },
-  "startDownload": { "message": "Start Download" },
-  "sending": { "message": "Sending..." },
-  "queued": { "message": "Queued in Falcon DM" },
+  "appName": {
+    "message": "Falcon DM"
+  },
+  "appDesc": {
+    "message": "Sends browser downloads and media to Falcon DM."
+  },
+  "downloadWithFalcon": {
+    "message": "Download with Falcon"
+  },
+  "fabDismiss": {
+    "message": "Hide download button for this page"
+  },
+  "fabDismissHint": {
+    "message": "Hidden until you refresh the page or open another video"
+  },
+  "fabDragHint": {
+    "message": "Drag to move · click to download"
+  },
+  "blobVideo": {
+    "message": "Page video (blob)"
+  },
+  "blobAudio": {
+    "message": "Page audio (blob)"
+  },
+  "blobHint": {
+    "message": "Fetched from this tab"
+  },
+  "kindDash": {
+    "message": "DASH stream"
+  },
+  "blobBadge": {
+    "message": "Blob"
+  },
+  "downloadVideo": {
+    "message": "Download with Falcon DM"
+  },
+  "cancel": {
+    "message": "Cancel"
+  },
+  "startDownload": {
+    "message": "Start Download"
+  },
+  "sending": {
+    "message": "Sending..."
+  },
+  "queued": {
+    "message": "Queued in Falcon DM"
+  },
   "youtubeHint": {
     "message": "YouTube: Falcon captures the signed CDN link from this tab. Pick Video+Audio for sound."
   },
   "videoOnlyHint": {
     "message": "This source has no audio. Pick a Video+Audio card if you want sound."
   },
-  "popupCurrentTab": { "message": "Current tab" },
-  "grabberSelectAll": { "message": "Select all" },
-  "grabberSelectNone": { "message": "Select none" },
-  "grabberFailed": { "message": "downloads failed" },
-  "grabberRetry": { "message": "retry failed items" },
+  "grabberSelectAll": {
+    "message": "Select all"
+  },
+  "grabberSelectNone": {
+    "message": "Select none"
+  },
+  "grabberFailed": {
+    "message": "downloads failed"
+  },
+  "grabberRetry": {
+    "message": "retry failed items"
+  },
   "qualityHint": {
     "message": "Choose quality and format. HLS streams are merged automatically by Falcon DM."
   },
-  "labelQuality": { "message": "Quality & format" },
-  "sentToApp": { "message": "Sent to Falcon DM" },
-  "errorJunkUrl": { "message": "Not a real video URL — play the video and pick a quality card" },
-  "errorWaking": { "message": "Could not start Falcon DM — install the app or open it manually" },
-  "errorExtensionReload": { "message": "Extension reloaded — refresh this page" },
-  "errorMediaUtils": { "message": "Falcon module failed to load — reload extension" },
-  "errorNoActiveTab": { "message": "No browser tab — click the page, then try again" },
-  "errorAppOffline": { "message": "Falcon DM is not running — open the desktop app" },
-  "errorTokenInvalid": { "message": "Connection lost — will re-pair automatically" },
-  "errorExtensionBlocked": {
-    "message": "Extension blocked — Falcon DM Settings → Reconnect extension"
+  "labelQuality": {
+    "message": "Quality & format"
   },
-  "errorInvalidUrl": { "message": "No valid video URL — try another source" },
-  "errorUnsupportedMagnet": { "message": "Magnet and BitTorrent links are not supported yet" },
-  "errorNoValidSource": { "message": "No downloadable URL — play the video and try again" },
-  "errorRateLimit": { "message": "Too many requests — try again shortly" },
-  "errorHttp": { "message": "Request failed" },
-  "appClosedFallback": { "message": "Falcon DM offline — using browser download" },
-  "interceptBlocked": { "message": "Falcon DM offline — download blocked" },
+  "sentToApp": {
+    "message": "Sent to Falcon DM"
+  },
+  "errorJunkUrl": {
+    "message": "Not a real video URL — play the video and pick a quality card"
+  },
+  "errorWaking": {
+    "message": "Falcon DM did not start. Open it manually."
+  },
+  "errorExtensionReload": {
+    "message": "Extension reloaded — refresh this page"
+  },
+  "errorMediaUtils": {
+    "message": "Falcon module failed to load — reload extension"
+  },
+  "errorNoActiveTab": {
+    "message": "No browser tab — click the page, then try again"
+  },
+  "errorAppOffline": {
+    "message": "Falcon DM is not running — open the desktop app"
+  },
+  "errorTokenInvalid": {
+    "message": "Connection lost — Falcon DM will pair again automatically"
+  },
+  "errorExtensionBlocked": {
+    "message": "This extension is not approved in Falcon DM"
+  },
+  "errorInvalidUrl": {
+    "message": "No valid video URL — try another source"
+  },
+  "errorUnsupportedMagnet": {
+    "message": "Magnet and BitTorrent links are not supported yet"
+  },
+  "errorNoValidSource": {
+    "message": "No downloadable URL — play the video and try again"
+  },
+  "errorRateLimit": {
+    "message": "Too many requests — try again shortly"
+  },
+  "errorHttp": {
+    "message": "Request failed"
+  },
+  "appClosedFallback": {
+    "message": "Falcon DM offline — using browser download"
+  },
+  "interceptBlocked": {
+    "message": "Falcon DM offline — download blocked"
+  },
   "interceptQueued": {
     "message": "Browser download cancelled — queued in Falcon DM (file saves in Falcon, not Chrome Downloads)"
   },
-  "labelFilename": { "message": "File name" },
-  "contextDownload": { "message": "Download with Falcon DM" },
-  "contextGrabber": { "message": "Grab page links with Falcon" },
-  "grabberTitle": { "message": "Link Grabber" },
-  "grabberFound": { "message": "downloadable links found" },
-  "grabberEmpty": { "message": "No downloadable links found on this page" },
-  "grabberSend": { "message": "Send selected" },
-  "optionsTitle": { "message": "Falcon DM Connection" },
+  "labelFilename": {
+    "message": "File name"
+  },
+  "contextDownload": {
+    "message": "Download with Falcon DM"
+  },
+  "contextGrabber": {
+    "message": "Grab page links with Falcon"
+  },
+  "grabberTitle": {
+    "message": "Link Grabber"
+  },
+  "grabberFound": {
+    "message": "downloadable links found"
+  },
+  "grabberEmpty": {
+    "message": "No downloadable links found on this page"
+  },
+  "grabberSend": {
+    "message": "Send selected"
+  },
+  "optionsTitle": {
+    "message": "Falcon DM"
+  },
   "optionsDesc": {
-    "message": "Connects automatically when Falcon DM is open. No token paste needed."
+    "message": "Send downloads from your browser to Falcon DM."
   },
-  "optionsTest": { "message": "Test connection" },
-  "optionsPair": { "message": "Connect now" },
-  "optionsHint": {
-    "message": "If blocked: Falcon DM → Settings → Reconnect extension, then Connect now."
+  "optionsPair": {
+    "message": "Connect"
   },
-  "optionsConnected": { "message": "Connected — downloads go to Falcon DM" },
-  "kindStream": { "message": "Stream" },
-  "kindAudio": { "message": "Audio" },
-  "kindVideoAudio": { "message": "Video+Audio" },
-  "kindVideoOnly": { "message": "Video only" },
-  "kindFile": { "message": "File" },
-  "popupDownloadPage": { "message": "Download this page's media" },
-  "popupDownloadUrl": { "message": "Download URL" },
-  "popupReconnect": { "message": "Reconnect" },
-  "popupPause": { "message": "Pause capture" },
-  "popupResume": { "message": "Resume capture" },
-  "popupPauseHint": {
-    "message": "Stops new browser captures. Downloads already in Falcon keep going."
+  "optionsConnected": {
+    "message": "Connected to Falcon DM"
   },
-  "popupStateConnected": { "message": "Connected" },
-  "popupStateOffline": { "message": "Offline" },
-  "popupStatePending": { "message": "Pending" },
-  "popupQueueTitle": { "message": "Recent downloads" },
-  "popupQueueEmpty": { "message": "No recent downloads" },
-  "popupTimeNow": { "message": "just now" },
-  "popupTimeMin": { "message": "{n}m ago" },
-  "popupTimeHour": { "message": "{n}h ago" },
-  "popupSettings": { "message": "Settings" },
-  "popupFailClosed": { "message": "Allow browser fallback when offline" },
-  "popupFailClosedHint": {
-    "message": "Off (default): Falcon owns hijacked downloads — Chrome does not save the file. On: if Falcon is closed, retry in Chrome."
+  "kindStream": {
+    "message": "Stream"
   },
-  "optionsFailClosed": { "message": "Allow browser fallback when offline" },
-  "optionsFailClosedHint": {
-    "message": "Off (default): Falcon owns hijacked downloads — Chrome does not save the file. On: if Falcon is closed, retry in Chrome."
+  "kindAudio": {
+    "message": "Audio"
   },
-  "popupOnboard": { "message": "Open Falcon DM and approve this extension in Settings" },
-  "errorPairPending": { "message": "Approve this extension in Falcon DM Settings" },
-  "popupGrabHint": { "message": "Play the video first, then pick quality in the overlay." },
-  "popupConnectedHint": { "message": "Connected — play the video, pick quality, download." },
-  "popupOfflineHelp": { "message": "Falcon DM is offline or not paired. Open the app, then Reconnect." },
-  "popupAdvanced": { "message": "Advanced" },
-  "popupPendingHelp": { "message": "Falcon DM → Settings → approve the extension." },
-  "popupOpenPicker": { "message": "Pick quality" },
-  "overlaySteps": { "message": "Pick quality → Start download" },
-  "popupStateBlocked": { "message": "Approval required" },
-  "popupBlockedHelp": { "message": "Approve this extension ID in Falcon DM Settings, then paste API token in extension options." },
-  "popupOpenOptions": { "message": "Open extension settings" },
-  "errorNativeHostMissing": { "message": "Native host missing or wrong extension ID — install from Falcon Settings with this ID" },
-  "errorTokenEmpty": { "message": "Token is empty" },
-  "optionsExtensionId": { "message": "Extension ID" },
-  "optionsExtensionIdHint": { "message": "Copy to Falcon DM Settings → approve extension + install native host." },
-  "optionsCopyId": { "message": "Copy" },
-  "optionsIdCopied": { "message": "Extension ID copied" },
-  "optionsCopyFailed": { "message": "Copy failed" },
-  "optionsApiToken": { "message": "API token" },
-  "optionsApiTokenHint": { "message": "Copy from Falcon DM Settings → Extension API token, paste here, Save." },
-  "optionsSaveToken": { "message": "Save token" }
+  "kindVideoAudio": {
+    "message": "Video+Audio"
+  },
+  "kindVideoOnly": {
+    "message": "Video only"
+  },
+  "popupDownloadPage": {
+    "message": "Download Media on This Page…"
+  },
+  "popupStateConnected": {
+    "message": "Connected"
+  },
+  "popupStateOffline": {
+    "message": "Falcon DM is not running"
+  },
+  "popupStatePending": {
+    "message": "Waiting for approval"
+  },
+  "popupSettings": {
+    "message": "Settings"
+  },
+  "errorPairPending": {
+    "message": "Approve the code in Falcon DM, then try again."
+  },
+  "overlaySteps": {
+    "message": "Pick quality → Start download"
+  },
+  "popupStateBlocked": {
+    "message": "Not approved"
+  },
+  "optionsExtensionId": {
+    "message": "Extension ID"
+  },
+  "optionsCopyId": {
+    "message": "Copy"
+  },
+  "optionsIdCopied": {
+    "message": "Extension ID copied"
+  },
+  "optionsCopyFailed": {
+    "message": "Could not copy"
+  },
+  "dlFailed": {
+    "message": "Failed"
+  },
+  "dlMerging": {
+    "message": "Finishing…"
+  },
+  "dlPaused": {
+    "message": "Paused"
+  },
+  "dlQueued": {
+    "message": "Waiting"
+  },
+  "errorPairRejected": {
+    "message": "Falcon DM declined the request. Try again to get a new code."
+  },
+  "optionsConnection": {
+    "message": "Connection"
+  },
+  "optionsConnectedDetail": {
+    "message": "Downloads go to the desktop app."
+  },
+  "optionsPendingDetail": {
+    "message": "Approve code {code} in Falcon DM."
+  },
+  "optionsPairing": {
+    "message": "Look for the code in the popup and approve it in Falcon DM."
+  },
+  "optionsCapture": {
+    "message": "Downloads"
+  },
+  "optionsFallback": {
+    "message": "Let Chrome download when Falcon DM is closed"
+  },
+  "optionsFallbackHint": {
+    "message": "When off, a captured download waits until Falcon DM can take it."
+  },
+  "pairNotify": {
+    "message": "Approve code {code} in Falcon DM"
+  },
+  "popupActiveSummary": {
+    "message": "{count} downloading · {speed}"
+  },
+  "popupRecent": {
+    "message": "Recent downloads"
+  },
+  "popupNoDownloads": {
+    "message": "No downloads yet"
+  },
+  "popupNoPage": {
+    "message": "Open a web page to download from it."
+  },
+  "popupPickQuality": {
+    "message": "Download This Video…"
+  },
+  "popupGrabLinks": {
+    "message": "Grab Links on This Page…"
+  },
+  "popupOpenApp": {
+    "message": "Open Falcon DM"
+  },
+  "popupOfflineTitle": {
+    "message": "Falcon DM is not running"
+  },
+  "popupOfflineText": {
+    "message": "Downloads go to the desktop app. Start it to continue."
+  },
+  "popupStartApp": {
+    "message": "Open Falcon DM"
+  },
+  "popupPendingTitle": {
+    "message": "Approve this code in Falcon DM"
+  },
+  "popupPendingText": {
+    "message": "Falcon DM shows the same code. Approve it there to connect."
+  },
+  "popupBlockedTitle": {
+    "message": "Connection declined"
+  },
+  "popupBlockedText": {
+    "message": "Falcon DM declined this extension or disconnected it."
+  },
+  "popupNewCode": {
+    "message": "Request a New Code"
+  },
+  "popupCapture": {
+    "message": "Send browser downloads to Falcon DM"
+  },
+  "popupCaptureHint": {
+    "message": "When off, Chrome downloads files itself."
+  },
+  "popupStateChecking": {
+    "message": "Checking…"
+  }
 }

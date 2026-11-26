@@ -32,10 +32,9 @@ function fetchWithTimeout(url, options, timeoutMs, label) {
 // Connection / UI state shared with popup + toolbar badge.
 // ponytail: MV3 service workers die after ~30s idle; in-memory prefs reset.
 // Pause + fail-closed live in chrome.storage.local so Chrome restart keeps them.
-let connectionState = 'offline'; // "connected" | "pending" | "offline"
+let connectionState = 'offline'; // "connected" | "pending" | "blocked" | "offline"
 let interceptPaused = false; // when true, automatic hijack is off (browser downloads natively)
 let interceptFailClosed = true; // default fail-closed: Chrome does not keep hijacked files
-const RECENT = []; // recent sends shown in the popup queue preview
 const INJECTED = new Set(); // tab ids that already have the on-demand content script
 
 // Writers set dirty so an in-flight hydrate get() cannot clobber a live toggle.
@@ -132,19 +131,6 @@ function refreshBadge() {
   } catch (_) {}
 }
 
-function trackDownload(filename, url, kind) {
-  let host = '';
-  try {
-    host = new URL(url).hostname.replace(/^www\./, '');
-  } catch (_) {}
-  RECENT.unshift({
-    filename: (filename || 'download').slice(0, 80),
-    host,
-    ts: Date.now(),
-    kind,
-  });
-  if (RECENT.length > 8) RECENT.length = 8;
-}
 
 /** Popup window is last-focused while open — never query lastFocusedWindow for page tabs. */
 async function getActiveBrowserTab() {
@@ -302,51 +288,6 @@ function notify(title, message) {
   });
 }
 
-const CLIPBOARD_URL_RE = /^https?:\/\/\S+/i;
-let lastClipboardUrl = '';
-
-(async () => {
-  try {
-    const { falconLastClipboardUrl } = await chrome.storage.local.get({
-      falconLastClipboardUrl: '',
-    });
-    lastClipboardUrl = String(falconLastClipboardUrl || '');
-  } catch (_) {}
-})();
-
-async function rememberClipboardUrl(url) {
-  lastClipboardUrl = url;
-  try {
-    await chrome.storage.local.set({ falconLastClipboardUrl: url });
-  } catch (_) {}
-}
-
-function isQueueableClipboardUrl(url) {
-  if (!CLIPBOARD_URL_RE.test(url)) return false;
-  if (url.length > 8192) return false;
-  if (String(url).toLowerCase().startsWith('magnet:')) return false;
-  const fm = self.FalconMedia;
-  if (!fm || !fm.isPublicHttpUrl || !fm.isPublicHttpUrl(url)) return false;
-  if (fm.isJunkUrl && fm.isJunkUrl(url)) return false;
-  return true;
-}
-
-async function getClipboardMonitorEnabled() {
-  try {
-    const { falconClipboardMonitor } = await chrome.storage.local.get({
-      falconClipboardMonitor: false,
-    });
-    return !!falconClipboardMonitor;
-  } catch (_) {
-    return false;
-  }
-}
-
-async function setClipboardMonitorEnabled(next) {
-  await chrome.storage.local.set({ falconClipboardMonitor: !!next });
-  return !!next;
-}
-
 async function fetchBlobPayload(tabId, blobUrl) {
   const maxBytes =
     (self.FalconMedia && self.FalconMedia.BLOB_MAX_BYTES) || 32 * 1024 * 1024;
@@ -382,34 +323,3 @@ async function fetchBlobPayload(tabId, blobUrl) {
   return result || { ok: false, error: 'blob fetch failed' };
 }
 
-async function pollClipboardToFalcon() {
-  if (!(await getClipboardMonitorEnabled())) return;
-  if (connectionState !== 'connected') return;
-  if (!(await appHealthy())) return;
-  try {
-    const text = String(await navigator.clipboard.readText()).trim();
-    if (!isQueueableClipboardUrl(text) || text === lastClipboardUrl) return;
-    // Remember first so overlapping alarm/tab polls cannot double-POST.
-    await rememberClipboardUrl(text);
-    try {
-      const filename =
-        (self.FalconMedia && self.FalconMedia.urlBasename && self.FalconMedia.urlBasename(text)) ||
-        'download';
-      await sendToFalcon('/api/add', {
-        url: text,
-        filename,
-        referrer: '',
-        user_agent: navigator.userAgent,
-        cookies: '',
-      });
-      notify(msg('appName', 'Falcon DM'), msg('clipboardQueued', 'URL from clipboard queued'));
-    } catch (_) {
-      lastClipboardUrl = '';
-      try {
-        await chrome.storage.local.remove('falconLastClipboardUrl');
-      } catch (_) {}
-    }
-  } catch (_) {
-    /* ponytail: clipboard may be denied without focus — skip quietly */
-  }
-}

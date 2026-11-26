@@ -335,12 +335,24 @@ async function runPopupGrab(state) {
             return { ok: true };
           }
           if (payload.action === 'check_status') {
+            return { state, paused: false, failClosed: false, pairCode: '482 913' };
+          }
+          if (payload.action === 'get_downloads') {
             return {
-              state,
-              paused: false,
-              failClosed: false,
-              recent: [],
-              clipboardMonitor: false,
+              downloads: [
+                {
+                  id: 1,
+                  filename: 'clip.mp4',
+                  status: 'Downloading',
+                  downloaded_size: 50,
+                  total_size: 100,
+                  speed: 10,
+                  error_message: null,
+                },
+              ],
+              active: 1,
+              queued: 0,
+              speed: 10,
             };
           }
           if (payload.action === 'auto_pair') return { ok: false, error: 'offline' };
@@ -357,10 +369,32 @@ async function runPopupGrab(state) {
     assert(grab, 'popup grab CTA exists');
     assert(!grab.disabled, `${state} popup CTA is clickable`);
     assert(grab.getAttribute('aria-disabled') !== 'true', 'offline CTA does not lie aria-disabled');
+    const doc = win.document;
+    if (state === 'pending') {
+      assert(!doc.getElementById('card-pending').hidden, 'pending popup shows the pairing card');
+      assert(doc.getElementById('pair-code').textContent === '482 913', 'pending popup shows the code');
+    }
+    if (state === 'connected') {
+      assert(doc.getElementById('card-offline').hidden, 'connected popup hides the offline card');
+      assert(
+        doc.querySelector('#downloads .dl-name')?.textContent === 'clip.mp4',
+        'connected popup lists live downloads',
+      );
+    }
+    if (state === 'offline') {
+      assert(!doc.getElementById('card-offline').hidden, 'offline popup offers to open the app');
+    }
     grab.click();
     await tick(60);
   });
+  // popup.js polls while open; closing the window stops its timers.
+  win.close();
   return { grabs, sent: sentBox.sent };
+}
+
+{
+  const pending = await runPopupGrab('pending');
+  assert(pending.grabs.length === 0, 'pending popup does not open the overlay');
 }
 
 {
@@ -378,6 +412,83 @@ async function runPopupGrab(state) {
   assert(connected.grabs[0].tabId === 42, `popup passes tabId 42, got ${connected.grabs[0].tabId}`);
 }
 
+// Code pairing: 202 (waiting) → 200 (approved) stores the token; 403 forgets the code.
+async function runPairing(responses) {
+  const store = {};
+  const notes = [];
+  const calls = [];
+  const sandbox2 = {
+    console,
+    URL,
+    setTimeout: (fn) => setTimeout(fn, 0),
+    clearTimeout,
+    AbortController,
+    Map,
+    Set,
+    Promise,
+    crypto: globalThis.crypto,
+    chrome: {
+      runtime: { id: 'abcdefghijklmnopabcdefghijklmnop' },
+      i18n: { getMessage: () => '' },
+      action: { setBadgeBackgroundColor() {}, setBadgeText() {} },
+      notifications: { create: (_id, opts) => notes.push(opts) },
+      storage: {
+        local: {
+          get: async (key) => (typeof key === 'string' ? { [key]: store[key] } : { ...key, ...store }),
+          set: async (values) => Object.assign(store, values),
+          remove: async (key) => delete store[key],
+        },
+        session: { get: async (d) => d, set: async () => {}, remove: async () => {} },
+      },
+      tabs: { create() {} },
+    },
+    fetch: async (url, opts = {}) => {
+      if (url.endsWith('/api/health')) return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      if (url.endsWith('/api/pair')) {
+        calls.push(JSON.parse(opts.body));
+        const next = responses.shift() || { status: 202, body: { pending: true } };
+        return { ok: next.status === 200, status: next.status, json: async () => next.body };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+  };
+  sandbox2.globalThis = sandbox2;
+  vm.createContext(sandbox2);
+  for (const file of ['media-utils.js', 'shared.js', 'pairing.js']) {
+    vm.runInContext(readFileSync(path.join(__dirname, file), 'utf8'), sandbox2);
+  }
+  let result;
+  let error;
+  try {
+    result = await vm.runInContext('ensurePaired(true)', sandbox2);
+  } catch (e) {
+    error = e;
+  }
+  return { store, calls, notes, result, error, state: vm.runInContext('connectionState', sandbox2) };
+}
+
+{
+  const approved = await runPairing([
+    { status: 202, body: { pending: true } },
+    { status: 200, body: { ok: true, token: 'tok-1' } },
+  ]);
+  assert(approved.result === 'tok-1', 'approved pairing returns the token');
+  assert(approved.store.apiToken === 'tok-1', 'token is stored');
+  assert(!approved.store.falconPairCode, 'code is forgotten after approval');
+  assert(/^\d{6}$/.test(approved.calls[0].code), 'pair request sends a six-digit code');
+  assert(approved.calls[0].code === approved.calls[1].code, 'polling keeps the same code');
+  assert(!('challenge' in approved.calls[0]) && !('proof' in approved.calls[0]), 'no native proof');
+  assert(approved.notes.length === 1, 'user is told to approve the code once');
+  assert(approved.state === 'connected', 'state is connected after approval');
+}
+
+{
+  const declined = await runPairing([{ status: 403, body: null }]);
+  assert(declined.error, 'declined pairing throws');
+  assert(declined.state === 'blocked', 'declined pairing is shown as blocked');
+  assert(!declined.store.falconPairCode, 'declined code is discarded for a fresh one');
+}
+
 let live = false;
 try {
   const health = await fetch('http://127.0.0.1:14201/api/health', {
@@ -385,7 +496,7 @@ try {
   });
   if (health.ok) {
     const body = await health.json();
-    assert(body.ok === true && body.service === 'falcon-dm' && body.protocol === 1, 'health payload');
+    assert(body.ok === true && body.service === 'falcon-dm' && body.protocol === 2, 'health payload');
     live = true;
   }
 } catch (_) {}

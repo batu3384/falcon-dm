@@ -1,89 +1,97 @@
-function newPairChallenge() {
-  if (crypto.randomUUID) return crypto.randomUUID();
-  const bytes = new Uint8Array(16);
+// Pairing with the desktop app.
+//
+// The extension shows a 6-digit code and asks Falcon DM to pair. The app shows
+// the same code and the user approves it there. The API token only reaches the
+// extension after that approval. Web pages cannot forge the chrome-extension://
+// Origin the request carries.
+
+const PAIR_CODE_KEY = 'falconPairCode';
+let pairCode = '';
+
+function newPairCode() {
+  const bytes = new Uint32Array(1);
   crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return String(bytes[0] % 1000000).padStart(6, '0');
 }
 
-function getNativePairProof(challenge, timeoutMs = 8000) {
-  return new Promise((resolve, reject) => {
-    if (!chrome.runtime.sendNativeMessage) {
-      reject(new Error('Native messaging is unavailable'));
-      return;
+/** The code currently shown to the user. Kept until the app answers. */
+async function currentPairCode(fresh = false) {
+  if (!fresh && pairCode) return pairCode;
+  if (!fresh) {
+    const stored = await chrome.storage.local.get(PAIR_CODE_KEY).catch(() => ({}));
+    if (/^\d{6}$/.test(stored[PAIR_CODE_KEY] || '')) {
+      pairCode = stored[PAIR_CODE_KEY];
+      return pairCode;
     }
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        reject(new Error('Native pairing timed out'));
-      }
-    }, timeoutMs);
-    try {
-      chrome.runtime.sendNativeMessage(
-        'com.falcondm.native',
-        { extension_id: chrome.runtime.id, challenge },
-        (response) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          const runtimeError = chrome.runtime.lastError;
-          if (runtimeError) {
-            reject(
-              new Error(
-                runtimeError.message.includes('Native messaging host not found')
-                  ? msg(
-                      'errorNativeHostMissing',
-                      'Native host missing or wrong extension ID — Falcon Settings → install native host with this extension ID',
-                    )
-                  : runtimeError.message,
-              ),
-            );
-            return;
-          }
-          if (!response || !response.ok || !response.proof) {
-            reject(new Error(response?.error || 'Native pairing failed'));
-            return;
-          }
-          resolve(response.proof);
-        },
-      );
-    } catch (error) {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        reject(error);
-      }
-    }
-  });
+  }
+  pairCode = newPairCode();
+  await chrome.storage.local.set({ [PAIR_CODE_KEY]: pairCode }).catch(() => {});
+  return pairCode;
+}
+
+async function forgetPairCode() {
+  pairCode = '';
+  await chrome.storage.local.remove(PAIR_CODE_KEY).catch(() => {});
+}
+
+/** Code to show in the popup while the app waits for approval. */
+function visiblePairCode() {
+  return connectionState === 'pending' ? pairCode : '';
 }
 
 async function requestPair() {
-  const challenge = newPairChallenge();
-  const proof = await getNativePairProof(challenge);
+  const code = await currentPairCode();
   return fetchWithTimeout(
     `${FALCON_API}/api/pair`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        extension_id: chrome.runtime.id,
-        challenge,
-        proof,
-      }),
+      body: JSON.stringify({ extension_id: chrome.runtime.id, code }),
     },
     REQUEST_TIMEOUT_MS,
     'Pair request',
   );
 }
 
-function throwIfExtensionBlocked(status) {
-  if (status !== 403) return;
+/** 200 token · 202 waiting · 403 declined · 503 app not ready yet. */
+async function readPairResponse(resp) {
+  if (resp.status === 202) return { pending: true };
+  if (resp.status === 403) return { rejected: true };
+  if (resp.status === 503) return { retry: true };
+  if (!resp.ok) return { error: true };
+  const data = await resp.json().catch(() => null);
+  if (data && data.ok && data.token) {
+    await chrome.storage.local.set({ apiToken: data.token });
+    await forgetPairCode();
+    return { token: data.token };
+  }
+  return data && data.pending ? { pending: true } : { error: true };
+}
+
+async function pingToken(token) {
+  try {
+    const r = await fetchWithTimeout(
+      `${FALCON_API}/api/ping`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Falcon-Token': token },
+        body: '{}',
+      },
+      REQUEST_TIMEOUT_MS,
+      'Falcon ping',
+    );
+    return r.status;
+  } catch {
+    return 0;
+  }
+}
+
+async function declined() {
+  // The next attempt shows a new code, so the user can try again on purpose.
+  await forgetPairCode();
   setState('blocked');
   throw new Error(
-    msg(
-      'errorExtensionBlocked',
-      'Extension blocked — open Falcon DM Settings → Reconnect extension',
-    ),
+    msg('errorPairRejected', 'Falcon DM declined the request. Try again to get a new code.'),
   );
 }
 
@@ -91,105 +99,69 @@ async function ensurePaired(force = false) {
   if (pairInFlight) return pairInFlight;
   pairInFlight = (async () => {
     try {
-      if (!force) {
-        const existing = await getToken();
-        if (existing && (await appHealthy())) {
-          try {
-            const r = await fetchWithTimeout(
-              `${FALCON_API}/api/ping`,
-              {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-Falcon-Token': existing,
-                },
-                body: '{}',
-              },
-              REQUEST_TIMEOUT_MS,
-              'Falcon ping',
-            );
-            if (r.ok) {
-              setState('connected');
-              return existing;
-            }
-          } catch (_) {}
-        }
-      }
-
       if (!(await appHealthy())) {
         await withTimeout(wakeFalcon(), 5000, 'Falcon wake');
         if (!(await waitForHealthy(25000))) {
-          throw new Error(
-            msg('errorWaking', 'Falcon DM başlatılamadı — uygulamayı kurun veya manuel açın'),
-          );
+          throw new Error(msg('errorWaking', 'Falcon DM did not start. Open it manually.'));
         }
       }
 
-      const r = await requestPair();
-      throwIfExtensionBlocked(r.status);
-
-      const finishPair = async (resp) => {
-        if (resp.status === 202) return { pending: true };
-        // 503: app is up but token not provisioned yet (cold-start race). Caller retries.
-        if (resp.status === 503) return { retry: true };
-        if (!resp.ok) return { error: true };
-        const data = await resp.json().catch(() => null);
-        if (data && data.pending) return { pending: true };
-        if (data && data.token && data.ok) {
-          await chrome.storage.local.set({ apiToken: data.token });
-          return { token: data.token };
+      const existing = force ? '' : await getToken();
+      if (existing) {
+        const status = await pingToken(existing);
+        if (status >= 200 && status < 300) {
+          setState('connected');
+          return existing;
         }
-        return { error: true };
-      };
-
-      let first = await finishPair(r);
-      // Cold-start 503 race: short backoff + retry before giving up.
-      for (let i = 0; first.retry && i < 5; i++) {
-        await sleep(500);
-        const rr = await requestPair();
-        throwIfExtensionBlocked(rr.status);
-        first = await finishPair(rr);
+        // 401: token rotated (another extension was disconnected) — pair again.
+        // 403: this extension was disconnected — needs a new approval.
+        await chrome.storage.local.remove('apiToken');
       }
-      if (first.token) {
+
+      let result = { retry: true };
+      for (let i = 0; result.retry && i < 6; i++) {
+        if (i) await sleep(500);
+        result = await readPairResponse(await requestPair());
+      }
+      if (result.token) {
         setState('connected');
-        return first.token;
+        return result.token;
       }
-      if (first.error) {
+      if (result.rejected) return declined();
+      if (!result.pending) {
         throw new Error(msg('errorAppOffline', 'Could not pair with Falcon DM'));
       }
 
-      // Pending approval — poll until Settings approve (or timeout)
       setState('pending');
       notify(
         msg('appName', 'Falcon DM'),
-        msg('errorPairPending', 'Approve this extension in Falcon DM Settings, then try again'),
+        msg('pairNotify', 'Approve code {code} in Falcon DM').replace('{code}', formatPairCode(pairCode)),
       );
       for (let i = 0; i < PAIR_POLL_ATTEMPTS; i++) {
-        await new Promise((res) => setTimeout(res, 2000));
-        let r2;
+        await sleep(2000);
+        let next;
         try {
-          r2 = await requestPair();
+          next = await readPairResponse(await requestPair());
         } catch {
           continue;
         }
-        if (r2.status === 403) {
-          throwIfExtensionBlocked(r2.status);
-        }
-        const again = await finishPair(r2);
-        if (again.token) {
+        if (next.token) {
           setState('connected');
-          return again.token;
+          return next.token;
         }
+        if (next.rejected) return declined();
       }
-      throw new Error(
-        msg('errorPairPending', 'Approve this extension in Falcon DM Settings, then try again'),
-      );
+      throw new Error(msg('errorPairPending', 'Approve the code in Falcon DM, then try again.'));
     } catch (e) {
-      if (connectionState !== 'blocked') setState('offline');
+      if (connectionState !== 'blocked' && connectionState !== 'pending') setState('offline');
       throw e;
     } finally {
       pairInFlight = null;
     }
   })();
   return pairInFlight;
+}
+
+function formatPairCode(code) {
+  return code ? `${code.slice(0, 3)} ${code.slice(3)}` : '';
 }

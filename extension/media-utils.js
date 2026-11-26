@@ -545,9 +545,11 @@
   function defaultFilename(pageTitle, item) {
     let base = (pageTitle || 'download')
       .replace(/\s*-\s*YouTube\s*$/i, '')
-      .replace(/[^\w\s\u00C0-\u024F.-]/g, '')
+      // Only characters no file system accepts; titles in any script stay readable.
+      .replace(/[\u0000-\u001f\u007f/\\:*?"<>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
       .trim()
-      .slice(0, 80);
+      .slice(0, 120);
     if (!base) base = 'download';
     const ext = item ? item.ext : 'bin';
     if (/\.[a-z0-9]{2,5}$/i.test(base)) return base;

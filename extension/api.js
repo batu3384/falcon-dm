@@ -1,11 +1,8 @@
 function mapHttpError(status, bodyError) {
   if (status === 401)
-    return msg('errorTokenInvalid', 'Connection lost — Falcon will re-pair automatically');
+    return msg('errorTokenInvalid', 'Connection lost — Falcon DM will pair again automatically');
   if (status === 403)
-    return msg(
-      'errorExtensionBlocked',
-      'Extension blocked — Falcon DM Settings → Reconnect extension',
-    );
+    return msg('errorExtensionBlocked', 'This extension is not approved in Falcon DM');
   if (status === 429) return msg('errorRateLimit', 'Too many requests — try again shortly');
   if (bodyError) return bodyError;
   if (status) return msg('errorHttp', 'Request failed') + ` (HTTP ${status})`;
@@ -78,11 +75,6 @@ async function postFalcon(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
     if (err === 'invalid url') throw new Error(msg('errorInvalidUrl', 'No valid URL'));
     throw new Error(err);
   }
-  try {
-    if (body && body.url) {
-      trackDownload(body.filename || '', body.url, path === '/api/intercept' ? 'media' : 'file');
-    }
-  } catch (_) {}
   return data;
 }
 
@@ -115,4 +107,24 @@ async function sendToFalcon(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
 
   setState('offline');
   throw new Error(msg('errorWaking', 'Falcon DM başlatılamadı'));
+}
+
+/** Live and recent downloads for the popup. Returns null when not paired. */
+async function fetchDownloads() {
+  const token = await getToken();
+  if (!token) return null;
+  try {
+    const response = await fetchWithTimeout(
+      `${FALCON_API}/api/downloads`,
+      { method: 'GET', headers: { 'X-Falcon-Token': token } },
+      HEALTH_TIMEOUT_MS,
+      'Falcon downloads',
+    );
+    if (response.status === 401 || response.status === 403) return null;
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data && Array.isArray(data.downloads) ? data : null;
+  } catch {
+    return null;
+  }
 }
