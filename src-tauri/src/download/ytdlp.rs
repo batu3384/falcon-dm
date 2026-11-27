@@ -359,6 +359,10 @@ async fn write_cookie_file(
     Ok(Some(CookieFileGuard(path)))
 }
 
+fn configured_user_proxy(opts: &YtDlpOptions) -> Option<&str> {
+    opts.proxy.as_deref().map(str::trim).filter(|p| !p.is_empty())
+}
+
 fn build_command(
     bin: &Path,
     url: &str,
@@ -366,6 +370,7 @@ fn build_command(
     audio_only: bool,
     opts: &YtDlpOptions,
     cookie_file: Option<&Path>,
+    egress_proxy: Option<&str>,
 ) -> Command {
     let format = opts
         .format
@@ -416,8 +421,19 @@ fn build_command(
     {
         cmd.arg("--user-agent").arg(ua);
     }
-    if let Some(proxy) = opts.proxy.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+    if let Some(proxy) = configured_user_proxy(opts) {
+        // The user's proxy choice wins; chaining it through the validating proxy is out of scope.
         cmd.arg("--proxy").arg(proxy);
+    } else if let Some(proxy) = egress_proxy {
+        cmd.arg("--proxy").arg(proxy);
+        // yt-dlp honors --proxy itself; descendants such as ffmpeg often read only env.
+        // NO_PROXY inherited from the login session would be a direct-network SSRF bypass.
+        for key in
+            ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]
+        {
+            cmd.env(key, proxy);
+        }
+        cmd.env_remove("NO_PROXY").env_remove("no_proxy");
     }
     if opts.speed_limit_kbps > 0 {
         cmd.arg("--limit-rate").arg(format!("{}K", opts.speed_limit_kbps));
@@ -480,11 +496,33 @@ pub async fn process_ytdlp(
     let _ticker = ctx.progress.start();
     ctx.progress.set_connections(opts.max_connections.clamp(1, 8) as u32);
 
+    let egress_proxy = if configured_user_proxy(&opts).is_some() {
+        None
+    } else {
+        match crate::download::egress_proxy::shared().await {
+            Ok(proxy) => Some(proxy.url()),
+            Err(error) => {
+                // A loopback ephemeral bind is practically infallible; continuing without
+                // validation would silently reopen yt-dlp's redirect/segment SSRF gap.
+                return Err(DownloadError::fatal(format!(
+                    "validating egress proxy unavailable: {error}"
+                )));
+            }
+        }
+    };
+
     let cookie_path = cookie_file.as_ref().map(|guard| guard.0.as_path());
-    let mut child =
-        build_command(&bin, validated_url.as_str(), &run_dir, audio_only, &opts, cookie_path)
-            .spawn()
-            .map_err(|e| DownloadError::fatal(format!("yt-dlp could not start: {e}")))?;
+    let mut child = build_command(
+        &bin,
+        validated_url.as_str(),
+        &run_dir,
+        audio_only,
+        &opts,
+        cookie_path,
+        egress_proxy.as_deref(),
+    )
+    .spawn()
+    .map_err(|e| DownloadError::fatal(format!("yt-dlp could not start: {e}")))?;
     let stdout = child.stdout.take().ok_or_else(|| DownloadError::fatal("yt-dlp has no stdout"))?;
     let stderr = child.stderr.take().ok_or_else(|| DownloadError::fatal("yt-dlp has no stderr"))?;
     // Both pipes are drained: an unread pipe would block yt-dlp once it fills.
@@ -829,6 +867,7 @@ mod tests {
             false,
             &opts,
             Some(Path::new("/tmp/run/cookies.txt")),
+            None,
         );
         let args: Vec<String> =
             cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -862,8 +901,57 @@ mod tests {
             true,
             &opts,
             Some(Path::new("/tmp/run/cookies.txt")),
+            None,
         );
         assert!(!audio.as_std().get_args().any(|a| a == "--merge-output-format"));
+    }
+
+    fn explicit_env(cmd: &Command, name: &str) -> Option<Option<String>> {
+        cmd.as_std()
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(name))
+            .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    #[test]
+    fn validating_egress_proxy_reaches_ytdlp_and_descendants_only_without_a_user_proxy() {
+        let egress = "http://127.0.0.1:43210";
+        let opts = YtDlpOptions::default();
+        let cmd = build_command(
+            Path::new("yt-dlp"),
+            "https://media.example/video",
+            Path::new("/tmp/run"),
+            false,
+            &opts,
+            None,
+            Some(egress),
+        );
+        let args: Vec<String> =
+            cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|w| w == ["--proxy", egress]));
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            assert_eq!(explicit_env(&cmd, name), Some(Some(egress.into())), "{name}");
+        }
+        assert_eq!(explicit_env(&cmd, "NO_PROXY"), Some(None));
+        assert_eq!(explicit_env(&cmd, "no_proxy"), Some(None));
+
+        let user_opts = YtDlpOptions { proxy: Some("http://user-proxy:8080".into()), ..opts };
+        let user_cmd = build_command(
+            Path::new("yt-dlp"),
+            "https://media.example/video",
+            Path::new("/tmp/run"),
+            false,
+            &user_opts,
+            None,
+            Some(egress),
+        );
+        let args: Vec<String> =
+            user_cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|w| w == ["--proxy", "http://user-proxy:8080"]));
+        assert!(!args.windows(2).any(|w| w == ["--proxy", egress]));
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            assert_eq!(explicit_env(&user_cmd, name), None, "{name}");
+        }
     }
 
     #[cfg(unix)]
@@ -872,12 +960,25 @@ mod tests {
     #[cfg(unix)]
     fn write_fake_ytdlp_with_version(dir: &Path, version: &str, body: &str) -> PathBuf {
         let path = dir.join("yt-dlp");
+        let capture_args = dir.join("ytdlp.args").display().to_string();
+        let capture_env = dir.join("ytdlp.env").display().to_string();
         let script = format!(
             r#"#!/bin/sh
 if [ "${{1-}}" = "--version" ]; then
   printf '%s\n' '{version}'
   exit 0
 fi
+printf '%s\n' "$@" > '{capture_args}'
+{{
+  printf 'HTTP_PROXY=%s\n' "$HTTP_PROXY"
+  printf 'HTTPS_PROXY=%s\n' "$HTTPS_PROXY"
+  printf 'http_proxy=%s\n' "$http_proxy"
+  printf 'https_proxy=%s\n' "$https_proxy"
+  printf 'ALL_PROXY=%s\n' "$ALL_PROXY"
+  printf 'all_proxy=%s\n' "$all_proxy"
+  printf 'NO_PROXY=%s\n' "$NO_PROXY"
+  printf 'no_proxy=%s\n' "$no_proxy"
+}} > '{capture_env}'
 out=
 cookie_file=
 while [ "$#" -gt 0 ]; do
@@ -923,6 +1024,39 @@ dd if=/dev/zero of="$out" bs=1024 count=2 >/dev/null 2>&1
             },
         )
         .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_child_uses_shared_validating_proxy_when_user_proxy_is_absent() {
+        let root =
+            std::env::temp_dir().join(format!("falcon-ytdlp-egress-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bin = write_fake_ytdlp(&root, fake_success_body());
+        let result = run_fake_ytdlp(&root, 126, &bin).await;
+        assert!(result.is_ok(), "fake yt-dlp run failed: {result:?}");
+
+        let args: Vec<String> = std::fs::read_to_string(root.join("ytdlp.args"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let proxy_index = args.iter().position(|arg| arg == "--proxy").expect("--proxy missing");
+        let proxy = args[proxy_index + 1].clone();
+        assert!(proxy.starts_with("http://127.0.0.1:"), "{proxy}");
+
+        let env_text = std::fs::read_to_string(root.join("ytdlp.env")).unwrap();
+        let env = |name: &str| {
+            env_text.lines().find_map(|line| line.strip_prefix(format!("{name}=").as_str()))
+        };
+        for name in
+            ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]
+        {
+            assert_eq!(env(name), Some(proxy.as_str()), "{name}");
+        }
+        assert_eq!(env("NO_PROXY"), Some(""));
+        assert_eq!(env("no_proxy"), Some(""));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

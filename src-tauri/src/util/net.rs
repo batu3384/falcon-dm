@@ -29,16 +29,20 @@ pub fn allow_loopback_for_tests() -> LoopbackAllowGuard {
     LoopbackAllowGuard
 }
 
-fn loopback_exception(ip: std::net::IpAddr) -> bool {
+fn loopback_exception_active() -> bool {
     #[cfg(test)]
     {
-        ALLOW_LOOPBACK.with(|c| c.get()) && ip.is_loopback()
+        ALLOW_LOOPBACK.with(|c| c.get())
     }
     #[cfg(not(test))]
     {
-        let _ = ip;
         false
     }
+}
+
+#[cfg(test)]
+pub(crate) fn loopback_exception_active_for_tests() -> bool {
+    loopback_exception_active()
 }
 
 pub fn is_hls_url(url: &str) -> bool {
@@ -106,8 +110,8 @@ fn transition_embedded_v4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> 
 /// Covers loopback, RFC1918, link-local, unspecified, 0.0.0.0/8, multicast/broadcast,
 /// CGNAT (100.64.0.0/10), special-use IPv4, IPv6 ULA/link-local/multicast, Teredo,
 /// and IPv4-embedding IPv6 transition forms.
-fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
-    if loopback_exception(ip) {
+fn is_blocked_ip_inner(ip: std::net::IpAddr, allow_loopback: bool) -> bool {
+    if allow_loopback && ip.is_loopback() {
         return false;
     }
     match ip {
@@ -124,27 +128,44 @@ fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
                         || (s[0] == 0x2001 && s[1] == 0)
                 }
                 || transition_embedded_v4(v6)
-                    .map(|v4| is_blocked_ip(std::net::IpAddr::V4(v4)))
+                    .map(|v4| is_blocked_ip_inner(std::net::IpAddr::V4(v4), allow_loopback))
                     .unwrap_or(false)
-                || v6.to_ipv4().map(|v4| is_blocked_ip(std::net::IpAddr::V4(v4))).unwrap_or(false)
+                || v6
+                    .to_ipv4()
+                    .map(|v4| is_blocked_ip_inner(std::net::IpAddr::V4(v4), allow_loopback))
+                    .unwrap_or(false)
         }
     }
 }
 
+pub(crate) fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    is_blocked_ip_inner(ip, loopback_exception_active())
+}
+
+#[cfg(test)]
+pub(crate) fn is_blocked_ip_with_loopback(ip: std::net::IpAddr, allow_loopback: bool) -> bool {
+    is_blocked_ip_inner(ip, allow_loopback)
+}
+
 /// Literal host check: blocks "localhost" and any IP literal in a private range.
-fn is_blocked_download_host(host: &str) -> bool {
+fn is_blocked_download_host_inner(host: &str, allow_loopback: bool) -> bool {
     let h = host.trim().trim_matches('[').trim_matches(']').to_lowercase();
     if h == "localhost" || h.ends_with(".localhost") {
-        #[cfg(test)]
-        if ALLOW_LOOPBACK.with(|c| c.get()) {
-            return false;
-        }
-        return true;
+        return !allow_loopback;
     }
     if let Ok(ip) = h.parse::<std::net::IpAddr>() {
-        return is_blocked_ip(ip);
+        return is_blocked_ip_inner(ip, allow_loopback);
     }
     false
+}
+
+pub(crate) fn is_blocked_download_host(host: &str) -> bool {
+    is_blocked_download_host_inner(host, loopback_exception_active())
+}
+
+#[cfg(test)]
+pub(crate) fn is_blocked_download_host_with_loopback(host: &str, allow_loopback: bool) -> bool {
+    is_blocked_download_host_inner(host, allow_loopback)
 }
 
 /// Resolve a download host once and retain only public addresses.

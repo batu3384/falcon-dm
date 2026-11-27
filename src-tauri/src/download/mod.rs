@@ -1,4 +1,5 @@
 pub mod checksum;
+pub mod egress_proxy;
 pub mod hls;
 pub mod http;
 pub mod http_client;

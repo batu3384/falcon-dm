@@ -1329,6 +1329,8 @@ dependencies = [
  "env_logger",
  "futures",
  "getrandom 0.3.4",
+ "hyper",
+ "hyper-util",
  "keyring",
  "libc",
  "log",
