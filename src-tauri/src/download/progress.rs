@@ -22,6 +22,9 @@ struct Inner {
     app: Option<AppHandle>,
     db: Option<Database>,
     downloaded: AtomicU64,
+    /// No byte count is authoritative until a worker restores or receives bytes.
+    /// Before that, publishing zero would erase whatever the row already had.
+    counts_known: AtomicBool,
     /// Bytes received by this run only. Speed comes from here, so restoring
     /// `downloaded` on resume does not look like a burst of traffic.
     transferred: AtomicU64,
@@ -57,6 +60,7 @@ impl Progress {
                 app: app.cloned(),
                 db,
                 downloaded: AtomicU64::new(0),
+                counts_known: AtomicBool::new(false),
                 transferred: AtomicU64::new(0),
                 total: AtomicU64::new(0),
                 connections: AtomicU32::new(1),
@@ -73,6 +77,9 @@ impl Progress {
     pub fn add(&self, bytes: u64) {
         self.inner.downloaded.fetch_add(bytes, Ordering::Relaxed);
         self.inner.transferred.fetch_add(bytes, Ordering::Relaxed);
+        if bytes > 0 {
+            self.inner.counts_known.store(true, Ordering::Release);
+        }
     }
 
     /// Live traffic that does not map 1:1 to file bytes (yt-dlp reports totals).
@@ -82,6 +89,7 @@ impl Progress {
 
     pub fn set_downloaded(&self, bytes: u64) {
         self.inner.downloaded.store(bytes, Ordering::Relaxed);
+        self.inner.counts_known.store(true, Ordering::Release);
     }
 
     pub fn downloaded(&self) -> u64 {
@@ -122,6 +130,9 @@ impl Progress {
     }
 
     fn publish(&self, write_db: bool) {
+        if !self.inner.counts_known.load(Ordering::Acquire) {
+            return;
+        }
         let downloaded = self.downloaded();
         let total = self.total();
         let speed = *crate::util::lock_or_recover(&self.inner.speed);
@@ -154,7 +165,7 @@ impl Progress {
     }
 
     /// Start periodic reporting. Dropping the guard stops it and persists the
-    /// final byte counts so a paused row keeps its progress.
+    /// final byte counts when this run produced authoritative counts.
     pub fn start(&self) -> ProgressTicker {
         let progress = self.clone();
         let handle = tokio::spawn(async move {
@@ -196,16 +207,18 @@ impl Drop for ProgressTicker {
     fn drop(&mut self) {
         self.handle.abort();
         *crate::util::lock_or_recover(&self.progress.inner.speed) = 0.0;
-        if let Some(db) = &self.progress.inner.db {
-            let total = self.progress.total();
-            let downloaded = self.progress.downloaded();
-            let _ = db.update_download_progress(
-                self.progress.inner.id,
-                downloaded,
-                (total > 0).then_some(total.max(downloaded)),
-                0.0,
-                &self.progress.status(),
-            );
+        if self.progress.inner.counts_known.load(Ordering::Acquire) {
+            if let Some(db) = &self.progress.inner.db {
+                let total = self.progress.total();
+                let downloaded = self.progress.downloaded();
+                let _ = db.update_download_progress(
+                    self.progress.inner.id,
+                    downloaded,
+                    (total > 0).then_some(total.max(downloaded)),
+                    0.0,
+                    &self.progress.status(),
+                );
+            }
         }
     }
 }

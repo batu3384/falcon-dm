@@ -553,6 +553,15 @@ impl TempPaths {
     }
 }
 
+async fn load_saved_state(temp: &TempPaths, url: &str) -> Option<SavedState> {
+    let (state, part, url) = (temp.state.clone(), temp.part.clone(), url.to_string());
+    tokio::task::spawn_blocking(move || load_state(&state, &url, &part)).await.ok().flatten()
+}
+
+fn saved_downloaded(state: &SavedState) -> u64 {
+    state.segments.iter().map(|segment| segment[2]).sum()
+}
+
 /// Sequential download for servers without range support or a known size.
 /// Nothing can be resumed there, so every attempt starts at byte 0.
 async fn download_stream(
@@ -776,15 +785,11 @@ async fn open_first(
 async fn attempt(
     ctx: &JobContext,
     initial: &Url,
-    url: &str,
     dest: &mut PathBuf,
     headers: &HttpHeaders,
+    saved: Option<SavedState>,
 ) -> Result<Attempt, DownloadError> {
     let temp = TempPaths::for_dest(dest, ctx.id)?;
-    let saved = {
-        let (state, part, url) = (temp.state.clone(), temp.part.clone(), url.to_string());
-        tokio::task::spawn_blocking(move || load_state(&state, &url, &part)).await.ok().flatten()
-    };
 
     let Some(saved) = saved else {
         temp.remove().await;
@@ -884,14 +889,25 @@ pub async fn process_http(
     let mut dest = PathBuf::from(out_path);
     let parent = dest.parent().ok_or_else(|| DownloadError::fatal("Invalid output path"))?;
     tokio::fs::create_dir_all(parent).await.map_err(|e| io_error("could not create folder", &e))?;
+    // Restore before the ticker can publish or persist an empty new run: even
+    // when the resume probe fails, the row keeps the bytes the state can resume.
+    let mut saved = match TempPaths::for_dest(&dest, ctx.id) {
+        Ok(temp) => load_saved_state(&temp, url).await,
+        Err(_) => None,
+    };
+    if let Some(state) = &saved {
+        ctx.progress.set_total(state.total);
+        ctx.progress.set_downloaded(saved_downloaded(state));
+    }
     let _ticker = ctx.progress.start();
     // A void partial download is discarded once and the transfer starts clean.
     for _ in 0..2 {
         ctx.check_cancel()?;
-        match attempt(ctx, &initial, url, &mut dest, &headers).await? {
+        match attempt(ctx, &initial, &mut dest, &headers, saved.take()).await? {
             Attempt::Done(landed) => return Ok(landed),
             Attempt::Restart => {
                 log::warn!("download {}: remote file changed, restarting from zero", ctx.id);
+                ctx.progress.set_downloaded(0);
                 TempPaths::for_dest(&dest, ctx.id)?.remove().await;
             }
         }
@@ -902,6 +918,7 @@ pub async fn process_http(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::models::{Download, DownloadCategory, DownloadStatus};
     use std::sync::atomic::AtomicUsize;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -915,6 +932,8 @@ mod tests {
         cut_after: Option<(usize, usize)>,
         /// Answer 503 to the first N requests.
         unavailable: usize,
+        /// Answer this status once this many requests were already seen.
+        status_after: Option<(usize, u16)>,
         etag: Option<&'static str>,
         disposition: Option<&'static str>,
         content_type: Option<&'static str>,
@@ -952,9 +971,18 @@ mod tests {
                     };
                     let request = String::from_utf8_lossy(&buf[..n]).to_string();
                     let number = requests.fetch_add(1, Ordering::SeqCst);
-                    if number < options.unavailable {
+                    let fail_status = if number < options.unavailable {
+                        Some(503)
+                    } else {
+                        options
+                            .status_after
+                            .and_then(|(after, status)| (number >= after).then_some(status))
+                    };
+                    if let Some(status) = fail_status {
+                        let reason =
+                            if status == 404 { "Not Found" } else { "Service Unavailable" };
                         let _ = sock
-                            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .write_all(format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes())
                             .await;
                         return;
                     }
@@ -1048,6 +1076,78 @@ mod tests {
 
     fn conns(n: usize) -> HttpHeaders {
         HttpHeaders { max_connections: n, ..Default::default() }
+    }
+
+    fn insert_live_row(
+        db: &crate::storage::Database,
+        url: &str,
+        dir: &Path,
+        filename: &str,
+        total: u64,
+        downloaded: u64,
+    ) -> i64 {
+        db.insert_download(&Download {
+            id: None,
+            url: url.into(),
+            filename: filename.into(),
+            save_path: dir.to_str().unwrap().into(),
+            total_size: total,
+            downloaded_size: downloaded,
+            status: DownloadStatus::Downloading,
+            category: DownloadCategory::Other,
+            speed: 0.0,
+            segments: 2,
+            priority: 1,
+            created_at: "t".into(),
+            completed_at: None,
+            error_message: None,
+            referrer: None,
+            user_agent: None,
+            cookies: None,
+            archived: false,
+            attempts: 1,
+            retry_at: None,
+        })
+        .unwrap()
+    }
+
+    fn db_job(db: &crate::storage::Database, id: i64) -> JobContext {
+        let (_cancel, rx) = watch::channel(false);
+        JobContext::new(
+            id,
+            None,
+            Some(db.clone()),
+            rx,
+            Arc::new(crate::download::limiter::RateLimiter::new(0)),
+        )
+    }
+
+    /// Sparse part file plus a bitmap where the first of two ranges has `kept` bytes.
+    fn write_resume_artifacts(
+        dir: &Path,
+        filename: &str,
+        id: i64,
+        url: &str,
+        total: u64,
+        kept: u64,
+        validator: Option<String>,
+    ) {
+        let part = part_path_for(dir.to_str().unwrap(), filename, id).unwrap();
+        let part_file = std::fs::File::create(&part).unwrap();
+        part_file.set_len(total).unwrap();
+        drop(part_file);
+        let state = SavedState {
+            version: STATE_VERSION,
+            url: url.into(),
+            total,
+            validator,
+            segments: plan_segments(total, 2)
+                .iter()
+                .enumerate()
+                .map(|(i, (start, end))| [*start, *end, if i == 0 { kept } else { 0 }])
+                .collect(),
+        };
+        save_state(&state_path_for(dir.to_str().unwrap(), filename, id).unwrap(), &state).unwrap();
     }
 
     #[test]
@@ -1246,6 +1346,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_attempt_persists_every_byte_written_before_failure() {
+        let data = payload(8 * MIN_SEGMENT_BYTES as usize);
+        let server = serve(
+            data,
+            ServerOptions {
+                cut_after: Some((700_000, 2)),
+                status_after: Some((2, 404)),
+                ..Default::default()
+            },
+        )
+        .await;
+        let dir = scratch("failed-state");
+        let dest = dir.join("failed.bin");
+        let url = format!("{}/failed.bin", server.base);
+        let (ctx, _tx) = JobContext::for_tests(13);
+        let _g = crate::util::allow_loopback_for_tests();
+        let result = process_http(&ctx, &url, dest.to_str().unwrap(), conns(2)).await;
+        assert!(matches!(result, Err(DownloadError::Fatal(_))), "{result:?}");
+
+        let part = part_path_for(dir.to_str().unwrap(), "failed.bin", 13).unwrap();
+        let state_path = state_path_for(dir.to_str().unwrap(), "failed.bin", 13).unwrap();
+        let state = load_state(&state_path, &url, &part).expect("resume state survives failure");
+        let kept: u64 = state.segments.iter().map(|seg| seg[2]).sum();
+        assert_eq!(kept, 1_400_000, "all bytes written before the failure must be resumable");
+        assert_eq!(ctx.progress.downloaded(), kept, "reported and resumable bytes diverged");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn pause_keeps_bytes_and_resume_requests_only_the_rest() {
         let data = payload(4 * MIN_SEGMENT_BYTES as usize);
         let server = serve(
@@ -1283,6 +1412,92 @@ mod tests {
         let resumed: Vec<String> = server.ranges.lock().unwrap()[before..].to_vec();
         assert!(!resumed.iter().any(|spec| spec.starts_with("bytes=0-")), "{resumed:?}");
         assert!(!part.exists() && !state_path.exists());
+        assert_eq!(ctx.progress.downloaded(), data.len() as u64, "restored bytes counted twice");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn early_retry_failure_keeps_resumable_progress_in_db() {
+        let total = 3 * MIN_SEGMENT_BYTES + 123;
+        let kept = 700_000;
+        let server = serve(
+            payload(total as usize),
+            ServerOptions { unavailable: usize::MAX, ..Default::default() },
+        )
+        .await;
+        let dir = scratch("early-retry");
+        let dest = dir.join("retry.bin");
+        let url = format!("{}/retry.bin", server.base);
+        let _g = crate::util::allow_loopback_for_tests();
+
+        let db = crate::storage::Database::in_memory().unwrap();
+        let id = insert_live_row(&db, &url, &dir, "retry.bin", total, kept);
+        write_resume_artifacts(&dir, "retry.bin", id, &url, total, kept, None);
+        let ctx = db_job(&db, id);
+        let result = process_http(&ctx, &url, dest.to_str().unwrap(), conns(2)).await;
+        assert!(matches!(result, Err(DownloadError::Transient(_))), "{result:?}");
+
+        let row = db.get_download(id).unwrap();
+        assert_eq!(row.downloaded_size, kept, "early retry failure must not erase progress");
+        assert_eq!(row.total_size, total);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn early_failure_without_resume_state_does_not_regress_db() {
+        let total = 3 * MIN_SEGMENT_BYTES + 123;
+        let kept = 700_000;
+        let server = serve(
+            payload(total as usize),
+            ServerOptions { unavailable: usize::MAX, ..Default::default() },
+        )
+        .await;
+        let dir = scratch("no-state-retry");
+        let dest = dir.join("retry.bin");
+        let url = format!("{}/retry.bin", server.base);
+        let _g = crate::util::allow_loopback_for_tests();
+
+        let db = crate::storage::Database::in_memory().unwrap();
+        let id = insert_live_row(&db, &url, &dir, "retry.bin", total, kept);
+        let ctx = db_job(&db, id);
+        let result = process_http(&ctx, &url, dest.to_str().unwrap(), conns(2)).await;
+        assert!(matches!(result, Err(DownloadError::Transient(_))), "{result:?}");
+
+        let row = db.get_download(id).unwrap();
+        assert_eq!(
+            row.downloaded_size, kept,
+            "an attempt that never started must not regress the row"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_change_restart_resets_progress_even_when_fresh_probe_fails() {
+        let total = 3 * MIN_SEGMENT_BYTES + 123;
+        let kept = 700_000;
+        let server = serve(
+            payload(total as usize),
+            ServerOptions {
+                status_after: Some((1, 503)),
+                etag: Some("\"v2\""),
+                ..Default::default()
+            },
+        )
+        .await;
+        let dir = scratch("restart-fails");
+        let dest = dir.join("retry.bin");
+        let url = format!("{}/retry.bin", server.base);
+        let _g = crate::util::allow_loopback_for_tests();
+
+        let db = crate::storage::Database::in_memory().unwrap();
+        let id = insert_live_row(&db, &url, &dir, "retry.bin", total, kept);
+        write_resume_artifacts(&dir, "retry.bin", id, &url, total, kept, Some("\"v1\"".into()));
+        let ctx = db_job(&db, id);
+        let result = process_http(&ctx, &url, dest.to_str().unwrap(), conns(2)).await;
+        assert!(matches!(result, Err(DownloadError::Transient(_))), "{result:?}");
+
+        let row = db.get_download(id).unwrap();
+        assert_eq!(row.downloaded_size, 0, "discarded partial data must not count as progress");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
