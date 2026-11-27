@@ -57,7 +57,8 @@
   const YOUTUBE_UI_PATH_RE =
     /\/s\/search\/|\/ptracking|\/api\/stats|\/log_event|\/youtubei\/|\/timedtext|\/caption|\/ad_status|\/pagead\/|\/img\/|\/static\/|\/yts\/|\/s\/player\/|\/jsbin\//i;
 
-  // ponytail: keep in sync with backend guess_extension + DownloadCategory
+  // ponytail: keep in sync with backend guess_extension + DownloadCategory;
+  // shared.js also uses this inventory as the default browser-capture type list.
   const GRABBER_EXTENSIONS =
     'mp4|mkv|webm|mov|avi|wmv|flv|m4v|mp3|m4a|flac|ogg|wav|aac|wma|zip|rar|7z|tar|gz|bz2|xz|tgz|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|epub|exe|dmg|pkg|iso|deb|rpm|msi|app|png|jpg|jpeg|gif|webp|torrent';
 
@@ -666,6 +667,7 @@
     isBlobUrl,
     isGrabberLink,
     GRABBER_EXT_RE,
+    GRABBER_EXTENSIONS,
     BLOB_MAX_BYTES,
     collectPageBlobSources,
     isCapturableMedia,

@@ -77,6 +77,46 @@ $('notify-success-hint').textContent = t(
   'optionsNotifySuccessHint',
   'When off, only errors show notifications.',
 );
+$('capture-types-label').textContent = t('optionsCaptureTypes', 'Capture file types');
+$('capture-types-hint').textContent = t(
+  'optionsCaptureTypesHint',
+  'Extensions Falcon DM captures automatically. Separate with commas, spaces, or newlines; an empty list captures nothing.',
+);
+$('blocked-sites-label').textContent = t('optionsBlockedSites', 'Never capture on these sites');
+$('blocked-sites-hint').textContent = t(
+  'optionsBlockedSitesHint',
+  'One host per line. Use *.example.com or .example.com for example.com and its subdomains. Context-menu downloads still work.',
+);
+
+async function loadCaptureRules() {
+  try {
+    const rules = await chrome.storage.local.get({
+      falconCaptureExtensions: defaultCaptureExtensionsText(),
+      falconCaptureBlockedHosts: '',
+    });
+    $('capture-types').value = normalizeCaptureExtensions(rules.falconCaptureExtensions).text;
+    $('blocked-sites').value = normalizeCaptureBlockedHosts(rules.falconCaptureBlockedHosts).text;
+  } catch (_) {}
+}
+
+function bindCaptureRule(id, storageKey, normalize) {
+  const el = $(id);
+  const save = async (rewrite) => {
+    const normalized = normalize(el.value);
+    if (rewrite) el.value = normalized.text;
+    try {
+      await chrome.storage.local.set({ [storageKey]: normalized.text });
+    } catch (_) {
+      notice(t('optionsRulesSaveFailed', 'Could not save capture rules'));
+    }
+  };
+  el.addEventListener('input', () => void save(false));
+  el.addEventListener('change', () => void save(true));
+}
+
+bindCaptureRule('capture-types', 'falconCaptureExtensions', normalizeCaptureExtensions);
+bindCaptureRule('blocked-sites', 'falconCaptureBlockedHosts', normalizeCaptureBlockedHosts);
+void loadCaptureRules();
 
 $('pair').addEventListener('click', async () => {
   $('pair').disabled = true;

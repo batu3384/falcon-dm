@@ -245,6 +245,21 @@
   "optionsNotifySuccessHint": {
     "message": "Kapalıyken yalnızca hatalar bildirim gösterir."
   },
+  "optionsCaptureTypes": {
+    "message": "Dosya türlerini yakala"
+  },
+  "optionsCaptureTypesHint": {
+    "message": "Falcon DM'in kendiliğinden yakaladığı uzantılar. Virgül, boşluk veya yeni satırla ayırın; boş liste hiçbir şeyi yakalamaz."
+  },
+  "optionsBlockedSites": {
+    "message": "Bu sitelerde asla yakalama"
+  },
+  "optionsBlockedSitesHint": {
+    "message": "Her satıra bir site yazın. example.com ve alt alan adları için *.example.com ya da .example.com kullanın. Bağlam menüsünden yapılan göndermeler engellenmez."
+  },
+  "optionsRulesSaveFailed": {
+    "message": "Yakalama kuralları kaydedilemedi"
+  },
   "pairNotify": {
     "message": "{code} kodunu Falcon DM'de onaylayın"
   },

@@ -21,6 +21,7 @@ const chrome = {
     session: {
       get: async (defaults) => defaults,
       set: async () => {},
+      remove: async () => {},
     },
     local: {
       get: async (defaults) => defaults,
@@ -84,6 +85,95 @@ const hijack = FM.hijackPayloadForFalcon(
   'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
 );
 assert(hijack.url.includes('watch?v='), 'click-path hijack uses watch URL');
+
+const normalizedExts = vm.runInContext(
+  "normalizeCaptureExtensions(' ZIP, pdf\\n7z zip .EXE bad_ext ')",
+  sandbox,
+);
+assert(normalizedExts.text === 'zip pdf 7z exe', 'capture extensions normalize to lowercase alnum');
+assert(normalizedExts.dropped === 1, 'invalid capture extension is dropped');
+assert(
+  vm.runInContext("normalizeCaptureExtensions('').extensions.length", sandbox) === 0,
+  'empty capture extension input is safe',
+);
+const manyExts = Array.from({ length: 300 }, (_, i) => `e${i}`).join(' ');
+const cappedExts = vm.runInContext(
+  `normalizeCaptureExtensions(${JSON.stringify(manyExts)})`,
+  sandbox,
+);
+assert(cappedExts.extensions.length === 256, 'capture extension list is count-capped');
+assert(
+  vm.runInContext(
+    `normalizeCaptureExtensions(${JSON.stringify('x'.repeat(20000))}).dropped`,
+    sandbox,
+  ) === 1,
+  'extreme capture extension input is bounded',
+);
+assert(
+  vm.runInContext('defaultCaptureExtensionsText()', sandbox).includes('zip'),
+  'capture default comes from the existing extension list',
+);
+const normalizedHosts = vm.runInContext(
+  "normalizeCaptureBlockedHosts('blocked.example\\n*.Example.COM\\n.alt.org\\nnot_a_host\\nblocked.example')",
+  sandbox,
+);
+assert(
+  normalizedHosts.text === 'blocked.example\n*.example.com\n*.alt.org',
+  'blocked hosts normalize exact and wildcard rules',
+);
+assert(normalizedHosts.dropped === 1, 'invalid blocked host is dropped');
+assert(
+  vm.runInContext("captureHostMatches('cdn.example.com', '*.example.com')", sandbox),
+  'wildcard blocked host matches a subdomain',
+);
+assert(
+  vm.runInContext("captureHostMatches('example.com', '*.example.com')", sandbox),
+  'wildcard blocked host also covers the base host',
+);
+assert(
+  vm.runInContext("captureHostMatches('cdn.alt.org', '.alt.org')", sandbox),
+  'leading-dot blocked host matches a subdomain',
+);
+assert(
+  !vm.runInContext("captureHostMatches('cdn.blocked.example', 'blocked.example')", sandbox),
+  'exact blocked host does not match a subdomain',
+);
+assert(
+  !vm.runInContext("captureHostMatches('evilexample.com', '*.example.com')", sandbox),
+  'wildcard blocked host keeps a dot boundary',
+);
+assert(
+  vm.runInContext("captureFileExtension('https://cdn.example.com/file%2Ezip?x=1')", sandbox) === 'zip',
+  'capture extension decoding handles escaped URL names',
+);
+assert(
+  vm.runInContext(
+    "shouldCaptureBrowserDownload({ filename: 'a.zip', url: 'https://cdn.example.com/a.zip' }, { extensions: ['zip'], blockedHosts: [] })",
+    sandbox,
+  ),
+  'listed extension allows automatic capture',
+);
+assert(
+  !vm.runInContext(
+    "shouldCaptureBrowserDownload({ filename: 'a.zip', url: 'https://cdn.example.com/a.zip', referrer: 'https://cdn.example.com/' }, { extensions: ['zip'], blockedHosts: ['*.example.com'] })",
+    sandbox,
+  ),
+  'blocked wildcard host denies automatic capture',
+);
+assert(
+  !vm.runInContext(
+    "shouldCaptureBrowserDownload({ filename: 'a.zip', url: 'https://blocked.example/a.zip' }, { extensions: ['zip'], blockedHosts: ['blocked.example'] })",
+    sandbox,
+  ),
+  'blocked download host denies automatic capture without a referrer',
+);
+assert(
+  !vm.runInContext(
+    "shouldCaptureBrowserDownload({ filename: 'a.zip', url: 'https://cdn.example.com/a.zip' }, { extensions: [], blockedHosts: [] })",
+    sandbox,
+  ),
+  'empty capture extension list captures nothing',
+);
 
 const watchJob = FM.overlayEnqueuePayload('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
   url: 'https://rr1---sn.googlevideo.com/videoplayback?itag=18',
@@ -410,6 +500,439 @@ async function runPopupGrab(state) {
   const connected = await runPopupGrab('connected');
   assert(connected.grabs.length === 1, 'popup grab sends grab_tab_media when connected');
   assert(connected.grabs[0].tabId === 42, `popup passes tabId 42, got ${connected.grabs[0].tabId}`);
+}
+
+{
+  const html = readFileSync(path.join(__dirname, 'options.html'), 'utf8').replace(
+    /<script src="[^"]+"><\/script>/g,
+    '',
+  );
+  const localStore = { falconCaptureBlockedHosts: 'blocked.example' };
+  const storageListeners = [];
+  const storageGet = (store, query) => {
+    if (typeof query === 'string') {
+      return Object.hasOwn(store, query) ? { [query]: store[query] } : {};
+    }
+    if (query && typeof query === 'object' && !Array.isArray(query)) {
+      const out = {};
+      for (const [key, fallback] of Object.entries(query)) {
+        out[key] = Object.hasOwn(store, key) ? store[key] : fallback;
+      }
+      return out;
+    }
+    return { ...store };
+  };
+  const dom = new JSDOM(html, {
+    url: 'chrome-extension://abcdefghijklmnopqrstuvwxyzabcdef/options.html',
+    pretendToBeVisual: true,
+    runScripts: 'dangerously',
+    beforeParse(win) {
+      win.chrome = {
+        runtime: {
+          id: 'abcdefghijklmnopqrstuvwxyzabcdef',
+          lastError: null,
+          sendMessage(payload, cb) {
+            const result =
+              payload.action === 'check_status'
+                ? { state: 'connected', paused: false, failClosed: true, notifySuccess: false }
+                : { ok: true };
+            if (cb) win.setTimeout(() => cb(result), 0);
+          },
+          onMessage: { addListener() {} },
+        },
+        i18n: { getMessage: () => '', getUILanguage: () => 'en' },
+        storage: {
+          local: {
+            get: async (query) => storageGet(localStore, query),
+            set: async (values) => {
+              const changes = {};
+              for (const [key, value] of Object.entries(values)) {
+                changes[key] = { oldValue: localStore[key], newValue: value };
+                localStore[key] = value;
+              }
+              for (const listener of storageListeners) listener(changes, 'local');
+            },
+            remove: async (key) => delete localStore[key],
+          },
+          session: {
+            get: async (query) => query,
+            set: async () => {},
+            remove: async () => {},
+          },
+          onChanged: {
+            addListener(fn) {
+              storageListeners.push(fn);
+            },
+          },
+        },
+      };
+    },
+  });
+  const win = dom.window;
+  await withDomGlobals(win, async () => {
+    loadScripts(win, ['media-utils.js', 'shared.js', 'options.js']);
+    await tick(50);
+    const types = win.document.getElementById('capture-types');
+    const blocked = win.document.getElementById('blocked-sites');
+    assert(types && blocked, 'options capture-rule textareas exist');
+    assert(types.value.includes('zip'), 'options shows the default capture extensions');
+    assert(blocked.value === 'blocked.example', 'options loads the blocked-site list');
+
+    types.value = 'ZIP, pdf\n7z bad_ext';
+    types.dispatchEvent(new win.Event('input', { bubbles: true }));
+    await tick(20);
+    assert(
+      localStore.falconCaptureExtensions === 'zip pdf 7z',
+      `options persists normalized extensions live, got ${localStore.falconCaptureExtensions}`,
+    );
+    types.dispatchEvent(new win.Event('change', { bubbles: true }));
+    await tick(20);
+    assert(types.value === 'zip pdf 7z', 'options rewrites extensions to canonical form on change');
+
+    blocked.value = 'example.com\n*.Example.COM\nnot_a_host';
+    blocked.dispatchEvent(new win.Event('input', { bubbles: true }));
+    await tick(20);
+    assert(
+      localStore.falconCaptureBlockedHosts === 'example.com\n*.example.com',
+      `options persists normalized blocked hosts live, got ${localStore.falconCaptureBlockedHosts}`,
+    );
+  });
+  win.close();
+}
+
+function makeBackgroundHarness(initialLocal = {}) {
+  const localStore = { apiToken: 'flow-token', ...initialLocal };
+  const sessionStore = {};
+  const storageListeners = [];
+  const listeners = {};
+  const fetchCalls = [];
+  const cancels = [];
+  const erased = [];
+  const rows = new Map();
+
+  const storageGet = (store, query) => {
+    if (typeof query === 'string') {
+      return Object.hasOwn(store, query) ? { [query]: store[query] } : {};
+    }
+    if (Array.isArray(query)) {
+      const out = {};
+      for (const key of query) if (Object.hasOwn(store, key)) out[key] = store[key];
+      return out;
+    }
+    if (query && typeof query === 'object') {
+      const out = {};
+      for (const [key, fallback] of Object.entries(query)) {
+        out[key] = Object.hasOwn(store, key) ? store[key] : fallback;
+      }
+      return out;
+    }
+    return { ...store };
+  };
+  const storageSet = (store, values, area) => {
+    const changes = {};
+    for (const [key, value] of Object.entries(values)) {
+      changes[key] = { oldValue: store[key], newValue: value };
+      store[key] = value;
+    }
+    for (const listener of storageListeners) listener(changes, area);
+  };
+  const storageRemove = (store, keys, area) => {
+    const changes = {};
+    for (const key of Array.isArray(keys) ? keys : [keys]) {
+      changes[key] = { oldValue: store[key], newValue: undefined };
+      delete store[key];
+    }
+    for (const listener of storageListeners) listener(changes, area);
+  };
+  const rowFor = (id) => {
+    if (!rows.has(id)) rows.set(id, { id, state: 'in_progress', filename: '' });
+    return rows.get(id);
+  };
+
+  const chromeMock = {
+    storage: {
+      local: {
+        get: async (query) => storageGet(localStore, query),
+        set: async (values) => storageSet(localStore, values, 'local'),
+        remove: async (keys) => storageRemove(localStore, keys, 'local'),
+      },
+      session: {
+        get: async (query) => storageGet(sessionStore, query),
+        set: async (values) => storageSet(sessionStore, values, 'session'),
+        remove: async (keys) => storageRemove(sessionStore, keys, 'session'),
+      },
+      onChanged: {
+        addListener(fn) {
+          storageListeners.push(fn);
+        },
+      },
+    },
+    action: {
+      setBadgeBackgroundColor() {},
+      setBadgeText() {},
+    },
+    downloads: {
+      onDeterminingFilename: {
+        addListener(fn) {
+          listeners.determiningFilename = fn;
+        },
+      },
+      onCreated: {
+        addListener(fn) {
+          listeners.created = fn;
+        },
+      },
+      onChanged: {
+        addListener(fn) {
+          listeners.downloadChanged = fn;
+        },
+      },
+      search: async ({ id }) => (rows.has(id) ? [rows.get(id)] : []),
+      cancel(id, cb) {
+        cancels.push(id);
+        rowFor(id).state = 'interrupted';
+        if (cb) cb();
+      },
+      erase(query, cb) {
+        erased.push(query.id);
+        if (cb) cb();
+      },
+      removeFile(id, cb) {
+        rowFor(id).state = 'interrupted';
+        if (cb) cb();
+      },
+      download(_options, cb) {
+        if (cb) cb(900);
+      },
+    },
+    tabs: {
+      onRemoved: { addListener() {} },
+      onUpdated: { addListener() {} },
+      query: async () => [],
+      create() {},
+      remove() {},
+      sendMessage(_tabId, _message, cb) {
+        if (cb) cb({ ok: true });
+        return Promise.resolve({ ok: true });
+      },
+    },
+    windows: {
+      getLastFocused: async () => ({ id: 1, type: 'normal', focused: true }),
+    },
+    webRequest: {
+      onHeadersReceived: { addListener() {} },
+    },
+    contextMenus: {
+      removeAll(cb) {
+        if (cb) cb();
+      },
+      create() {},
+      onClicked: {
+        addListener(fn) {
+          listeners.contextMenuClicked = fn;
+        },
+      },
+    },
+    runtime: {
+      id: 'abcdefghijklmnopqrstuvwxyzabcdef',
+      lastError: null,
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listeners.message = fn;
+        },
+      },
+    },
+    cookies: {
+      getAll: async () => [],
+    },
+    scripting: {
+      executeScript: async () => [{ result: [] }],
+    },
+    notifications: {
+      create() {},
+    },
+    i18n: { getMessage: () => '' },
+  };
+
+  const jsonResponse = (status, body) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  });
+  const fetchMock = async (url, options = {}) => {
+    let body = null;
+    try {
+      body = options.body ? JSON.parse(options.body) : null;
+    } catch (_) {}
+    fetchCalls.push({ url: String(url), options, body });
+    const target = String(url);
+    if (target.endsWith('/api/health')) return jsonResponse(200, { ok: true });
+    if (target.endsWith('/api/ping')) return jsonResponse(200, { ok: true });
+    if (target.endsWith('/api/add')) return jsonResponse(200, { ok: true, id: 77 });
+    return jsonResponse(404, {});
+  };
+
+  const sandbox2 = {
+    chrome: chromeMock,
+    console,
+    URL,
+    setTimeout,
+    clearTimeout,
+    fetch: fetchMock,
+    AbortController,
+    Map,
+    Set,
+    Promise,
+    navigator: { userAgent: 'flow-test' },
+    crypto: globalThis.crypto,
+  };
+  sandbox2.globalThis = sandbox2;
+  sandbox2.self = sandbox2;
+  sandbox2.importScripts = (...files) => {
+    for (const file of files) {
+      vm.runInContext(readFileSync(path.join(__dirname, file), 'utf8'), sandbox2, {
+        filename: file,
+      });
+    }
+  };
+  vm.createContext(sandbox2);
+  vm.runInContext(readFileSync(path.join(__dirname, 'background.js'), 'utf8'), sandbox2, {
+    filename: 'background.js',
+  });
+  return { sandbox: sandbox2, chrome: chromeMock, listeners, fetchCalls, cancels, erased };
+}
+
+async function backgroundReady(harness) {
+  for (let i = 0; i < 30; i++) {
+    if (vm.runInContext('prefsHydrated', harness.sandbox)) return;
+    await tick(5);
+  }
+  throw new Error('background preferences did not hydrate');
+}
+
+async function fireDeterminingFilename(harness, item) {
+  let suggested = false;
+  harness.listeners.determiningFilename(item, () => {
+    suggested = true;
+  });
+  await tick(60);
+  return suggested;
+}
+
+{
+  const harness = makeBackgroundHarness({
+    falconCaptureExtensions: 'zip',
+    falconCaptureBlockedHosts: 'blocked.example\n*.wild.example',
+  });
+  await backgroundReady(harness);
+
+  assert(
+    await fireDeterminingFilename(harness, {
+      id: 1,
+      url: 'https://files.other.example/file.zip',
+      finalUrl: 'https://files.other.example/file.zip',
+      referrer: 'https://blocked.example/page',
+      filename: 'file.zip',
+    }),
+    'exact blocked host still calls suggest',
+  );
+  assert(
+    await fireDeterminingFilename(harness, {
+      id: 2,
+      url: 'https://files.other.example/file.zip',
+      finalUrl: 'https://files.other.example/file.zip',
+      referrer: 'https://cdn.wild.example/page',
+      filename: 'file.zip',
+    }),
+    'wildcard blocked host still calls suggest',
+  );
+  assert(harness.cancels.length === 0, 'blocked hosts never hijack the browser download');
+  assert(
+    !harness.fetchCalls.some((call) => call.url.endsWith('/api/add')),
+    'blocked hosts never enqueue in Falcon',
+  );
+
+  assert(
+    await fireDeterminingFilename(harness, {
+      id: 3,
+      url: 'https://files.other.example/file.zip',
+      finalUrl: 'https://files.other.example/file.zip',
+      referrer: 'https://else.example/page',
+      filename: 'file.zip',
+    }),
+    'unblocked listed capture calls suggest',
+  );
+  assert(harness.cancels.includes(3), 'unblocked listed file is hijacked');
+  assert(
+    harness.fetchCalls.some(
+      (call) => call.url.endsWith('/api/add') && call.body?.url === 'https://files.other.example/file.zip',
+    ),
+    'unblocked listed file enqueues in Falcon',
+  );
+
+  harness.listeners.created({
+    id: 10,
+    url: 'https://files.other.example/backup.zip',
+    finalUrl: 'https://files.other.example/backup.zip',
+    referrer: 'https://cdn.wild.example/page',
+    filename: '',
+  });
+  await tick(600);
+  assert(!harness.cancels.includes(10), 'created-download backup path also honors the blocklist');
+
+  await harness.chrome.storage.local.set({
+    falconCaptureBlockedHosts: 'else.example\n*.wild.example',
+  });
+  await fireDeterminingFilename(harness, {
+    id: 11,
+    url: 'https://files.other.example/live.zip',
+    finalUrl: 'https://files.other.example/live.zip',
+    referrer: 'https://else.example/page',
+    filename: 'live.zip',
+  });
+  assert(!harness.cancels.includes(11), 'edited blocked-host list updates live capture decisions');
+
+  await harness.listeners.contextMenuClicked({
+    menuItemId: 'download_with_falcon',
+    linkUrl: 'https://cdn.wild.example/manual.xyz',
+    pageUrl: 'https://cdn.wild.example/page',
+  });
+  assert(
+    harness.fetchCalls.some(
+      (call) => call.url.endsWith('/api/add') && call.body?.url === 'https://cdn.wild.example/manual.xyz',
+    ),
+    'manual context-menu send bypasses the never-capture blocklist',
+  );
+}
+
+{
+  const harness = makeBackgroundHarness();
+  await backgroundReady(harness);
+  const item = (id, name) => ({
+    id,
+    url: `https://files.example.com/download?id=${id}`,
+    finalUrl: `https://files.example.com/download?id=${id}`,
+    referrer: 'https://files.example.com/page',
+    filename: name,
+  });
+
+  await fireDeterminingFilename(harness, item(1, 'first.zip'));
+  assert(harness.cancels.includes(1), 'default capture extension list allows zip');
+
+  await harness.chrome.storage.local.set({ falconCaptureExtensions: 'mp4' });
+  assert(
+    vm.runInContext("captureExtensions.join(',')", harness.sandbox) === 'mp4',
+    'storage edit updates the live capture extension cache',
+  );
+  await fireDeterminingFilename(harness, item(2, 'second.zip'));
+  assert(!harness.cancels.includes(2), 'edited capture extension list stops zip hijacks');
+  await fireDeterminingFilename(harness, item(3, 'movie.mp4'));
+  assert(harness.cancels.includes(3), 'edited capture extension list allows mp4 hijacks');
+  await harness.chrome.storage.local.set({ falconCaptureExtensions: '' });
+  await fireDeterminingFilename(harness, item(4, 'third.zip'));
+  assert(!harness.cancels.includes(4), 'stored empty capture extension list disables automatic capture');
 }
 
 // Code pairing: 202 (waiting) → 200 (approved) stores the token; 403 forgets the code.

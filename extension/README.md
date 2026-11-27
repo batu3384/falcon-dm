@@ -13,7 +13,7 @@ Chrome / Edge (Manifest V3). Sends browser downloads and page media to the Falco
 | File | Role |
 | --- | --- |
 | `background.js` | Service worker: download capture, context menus, message router |
-| `shared.js` | State, badge, health checks, content-script injection |
+| `shared.js` | State, capture rules, badge, health checks, content-script injection |
 | `pairing.js` | Code pairing with the app (`/api/pair`) |
 | `api.js` | Authenticated calls (`/api/add`, `/api/intercept`, `/api/upload`, `/api/downloads`) |
 | `media-utils.js` | URL rules, media detection, YouTube quality presets (shared by worker, popup, page) |
@@ -25,6 +25,7 @@ Chrome / Edge (Manifest V3). Sends browser downloads and page media to the Falco
 - Private, loopback and non-HTTP(S) URLs are never sent.
 - Cookies are attached only for the download's own HTTPS origin (YouTube cookies only for googlevideo streams).
 - The popup switch **Send browser downloads to Falcon DM** controls capture; when off, the browser downloads files itself.
+- Options can limit automatic capture by file type and never capture chosen sites; explicit context-menu sends still work on those sites.
 - A captured download that cannot reach Falcon DM is blocked by default. Enabling **Let Chrome download when Falcon DM is closed** in the options page hands it back to the browser instead.
 
 ## Tests

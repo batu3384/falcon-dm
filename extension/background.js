@@ -200,6 +200,17 @@ function hijackKey(item) {
   return `${item.url || ''}\0${item.referrer || ''}`;
 }
 
+function automaticCaptureAllowed(item) {
+  try {
+    return shouldCaptureBrowserDownload(item, {
+      extensions: captureExtensions,
+      blockedHosts: captureBlockedHosts,
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
 function hijackRecentlyHandled(item) {
   const prev = hijackDedup.get(hijackKey(item));
   return !!(prev && Date.now() - prev < HIJACK_DEDUP_MS);
@@ -229,6 +240,7 @@ function scheduleCreatedBackup(item) {
   const timeoutId = setTimeout(() => {
     awaitingFilename.delete(item.id);
     if (interceptPaused) return;
+    if (!automaticCaptureAllowed(item)) return;
     if (hijackWatchIds.has(item.id) || abortedBrowserIds.has(item.id)) return;
     if (hijackInFlight.has(hijackKey(item))) return;
     markHijackStarted(item);
@@ -438,6 +450,11 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
       suggest();
       return;
     }
+    if (!automaticCaptureAllowed(item)) {
+      clearAwaitingFilename(item.id);
+      suggest();
+      return;
+    }
     clearAwaitingFilename(item.id);
     // Chrome's real name is available HERE — stash before any cancel/erase.
     stashPendingChromeFilename(item);
@@ -474,6 +491,7 @@ chrome.downloads.onCreated.addListener((item) => {
   (async () => {
     await prefsReady;
     if (interceptPaused) return;
+    if (!automaticCaptureAllowed(item)) return;
     if (hijackWatchIds.has(item.id) || abortedBrowserIds.has(item.id) || hijackInFlight.has(hijackKey(item))) {
       abortAndEraseBrowserDownload(item.id);
       return;

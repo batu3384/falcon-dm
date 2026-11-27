@@ -38,6 +38,187 @@ let interceptFailClosed = true; // default fail-closed: Chrome does not keep hij
 let notifySuccess = false; // success popups are opt-in — errors always notify
 const INJECTED = new Set(); // tab ids that already have the on-demand content script
 
+const CAPTURE_RULES_MAX_CHARS = 8192;
+const CAPTURE_EXTENSION_MAX_COUNT = 256;
+const CAPTURE_HOST_MAX_COUNT = 256;
+
+function defaultCaptureExtensionsText() {
+  const fm = typeof FalconMedia !== 'undefined' ? FalconMedia : null;
+  return ((fm && fm.GRABBER_EXTENSIONS) || '')
+    .split('|')
+    .filter(Boolean)
+    .join(' ');
+}
+
+/** Lowercase alphanumeric extension list; separators are commas, whitespace, or newlines. */
+function normalizeCaptureExtensions(input) {
+  const raw = String(input ?? '')
+    .slice(0, CAPTURE_RULES_MAX_CHARS)
+    .toLowerCase();
+  const out = [];
+  const seen = new Set();
+  let dropped = 0;
+  for (const token of raw.split(/[\s,]+/)) {
+    const ext = token.replace(/^\.+/, '');
+    if (!ext) continue;
+    if (!/^[a-z0-9]{1,24}$/.test(ext) || out.length >= CAPTURE_EXTENSION_MAX_COUNT) {
+      dropped += 1;
+      continue;
+    }
+    if (seen.has(ext)) continue;
+    seen.add(ext);
+    out.push(ext);
+  }
+  return { text: out.join(' '), extensions: out, dropped };
+}
+
+function canonicalCaptureHost(host) {
+  return String(host || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.+$/g, '');
+}
+
+function isValidCaptureHost(host) {
+  if (!host || host.length > 253) return false;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) return ipv4.slice(1).every((part) => Number(part) <= 255);
+  return host
+    .split('.')
+    .every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+}
+
+/** One host per line; exact entries match exactly, *.domain / .domain include subdomains. */
+function normalizeCaptureBlockedHosts(input) {
+  const raw = String(input ?? '')
+    .slice(0, CAPTURE_RULES_MAX_CHARS)
+    .toLowerCase();
+  const out = [];
+  const seen = new Set();
+  let dropped = 0;
+  for (const line of raw.split(/\r?\n/)) {
+    let value = line.trim();
+    if (!value) continue;
+    let wildcard = false;
+    if (value.startsWith('*.')) {
+      wildcard = true;
+      value = value.slice(2);
+    } else if (value.startsWith('.')) {
+      wildcard = true;
+      value = value.slice(1);
+    }
+    value = canonicalCaptureHost(value);
+    if (!isValidCaptureHost(value) || out.length >= CAPTURE_HOST_MAX_COUNT) {
+      dropped += 1;
+      continue;
+    }
+    const rule = `${wildcard ? '*.' : ''}${value}`;
+    if (seen.has(rule)) continue;
+    seen.add(rule);
+    out.push(rule);
+  }
+  return { text: out.join('\n'), hosts: out, dropped };
+}
+
+/** Wildcards cover the base host too, matching browser match-pattern user expectations. */
+function captureHostMatches(host, rule) {
+  const h = canonicalCaptureHost(host);
+  let r = canonicalCaptureHost(rule);
+  if (!h || !r) return false;
+  if (r.startsWith('.')) r = `*.${r.slice(1)}`;
+  if (r.startsWith('*.')) {
+    const base = r.slice(2);
+    return h === base || h.endsWith(`.${base}`);
+  }
+  return h === r;
+}
+
+function captureUrlHost(value) {
+  try {
+    return canonicalCaptureHost(new URL(value).hostname);
+  } catch (_) {
+    return '';
+  }
+}
+
+function captureDownloadBlocked(item, blockedHosts) {
+  const rules = Array.isArray(blockedHosts) ? blockedHosts : [];
+  if (!rules.length) return false;
+  const hosts = [item && item.referrer, item && item.finalUrl, item && item.url]
+    .map((value) => captureUrlHost(value))
+    .filter(Boolean);
+  return hosts.some((host) => rules.some((rule) => captureHostMatches(host, rule)));
+}
+
+function captureFileExtension(value) {
+  let raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^https?:/i.test(raw)) {
+    try {
+      raw = new URL(raw).pathname;
+    } catch (_) {}
+  }
+  let base = raw.split(/[?#]/)[0].split(/[/\\]/).pop() || '';
+  try {
+    base = decodeURIComponent(base);
+  } catch (_) {}
+  const match = base.match(/\.([a-z0-9]{1,24})$/i);
+  return match ? match[1].toLowerCase() : '';
+}
+
+function captureDownloadExtension(item) {
+  for (const candidate of [item && item.filename, item && item.finalUrl, item && item.url]) {
+    const ext = captureFileExtension(candidate);
+    if (ext) return ext;
+  }
+  return '';
+}
+
+/** Automatic browser capture only; explicit context-menu sends intentionally bypass this gate. */
+function shouldCaptureBrowserDownload(item, rules = {}) {
+  const extensions = Array.isArray(rules.extensions) ? rules.extensions : captureExtensions;
+  const blockedHosts = Array.isArray(rules.blockedHosts) ? rules.blockedHosts : captureBlockedHosts;
+  const ext = captureDownloadExtension(item);
+  if (!ext || !extensions.includes(ext)) return false;
+  return !captureDownloadBlocked(item, blockedHosts);
+}
+
+const initialCaptureExtensions = normalizeCaptureExtensions(defaultCaptureExtensionsText());
+let captureExtensions = initialCaptureExtensions.extensions;
+let captureBlockedHosts = [];
+let captureExtensionsDirty = false;
+let captureBlockedHostsDirty = false;
+
+function applyCaptureExtensions(input) {
+  const normalized = normalizeCaptureExtensions(input);
+  captureExtensions = normalized.extensions;
+  return normalized;
+}
+
+function applyCaptureBlockedHosts(input) {
+  const normalized = normalizeCaptureBlockedHosts(input);
+  captureBlockedHosts = normalized.hosts;
+  return normalized;
+}
+
+try {
+  if (chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      if (changes.falconCaptureExtensions) {
+        captureExtensionsDirty = true;
+        applyCaptureExtensions(
+          changes.falconCaptureExtensions.newValue ?? defaultCaptureExtensionsText(),
+        );
+      }
+      if (changes.falconCaptureBlockedHosts) {
+        captureBlockedHostsDirty = true;
+        applyCaptureBlockedHosts(changes.falconCaptureBlockedHosts.newValue || '');
+      }
+    });
+  }
+} catch (_) {}
+
 // Writers set dirty so an in-flight hydrate get() cannot clobber a live toggle.
 let pauseDirty = false;
 let failClosedDirty = false;
@@ -67,6 +248,10 @@ const prefsReady = (async () => {
     const { falconNotifySuccess } = await chrome.storage.local.get({
       falconNotifySuccess: false,
     });
+    const captureRulesBag = await chrome.storage.local.get({
+      falconCaptureExtensions: defaultCaptureExtensionsText(),
+      falconCaptureBlockedHosts: '',
+    });
     const localPauseBag = await chrome.storage.local.get('falconInterceptPaused');
     const hasLocalPause = Object.hasOwn(localPauseBag, 'falconInterceptPaused');
     // Session is a one-shot migrate from the old SW-only pause. Explicit local
@@ -85,6 +270,8 @@ const prefsReady = (async () => {
     }
     if (!failClosedDirty) interceptFailClosed = !!falconInterceptFailClosed;
     if (!notifySuccessDirty) notifySuccess = !!falconNotifySuccess;
+    if (!captureExtensionsDirty) applyCaptureExtensions(captureRulesBag.falconCaptureExtensions);
+    if (!captureBlockedHostsDirty) applyCaptureBlockedHosts(captureRulesBag.falconCaptureBlockedHosts);
     if (connectionState === 'offline') {
       connectionState = falconConnectionState || 'offline';
     }

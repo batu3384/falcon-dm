@@ -245,6 +245,21 @@
   "optionsNotifySuccessHint": {
     "message": "When off, only errors show notifications."
   },
+  "optionsCaptureTypes": {
+    "message": "Capture file types"
+  },
+  "optionsCaptureTypesHint": {
+    "message": "Extensions Falcon DM captures automatically. Separate with commas, spaces, or newlines; an empty list captures nothing."
+  },
+  "optionsBlockedSites": {
+    "message": "Never capture on these sites"
+  },
+  "optionsBlockedSitesHint": {
+    "message": "One host per line. Use *.example.com or .example.com for example.com and its subdomains. Context-menu downloads still work."
+  },
+  "optionsRulesSaveFailed": {
+    "message": "Could not save capture rules"
+  },
   "pairNotify": {
     "message": "Approve code {code} in Falcon DM"
   },

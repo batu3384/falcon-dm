@@ -71,10 +71,14 @@ assert(popup.includes("state !== 'connected'"), 'overlay opens only when connect
 assert(!popup.includes('innerHTML'), 'popup builds DOM nodes, never HTML strings');
 
 // Options.
-for (const id of ['pair', 'copy-id', 'extension-id', 'capture', 'fallback', 'notice']) {
+for (const id of ['pair', 'copy-id', 'extension-id', 'capture', 'fallback', 'capture-types', 'blocked-sites', 'notice']) {
   assert(optionsHtml.includes(`id="${id}"`), `options #${id}`);
 }
 assert(options.includes("send('set_fail_closed'"), 'options toggles the offline fallback');
+assert(optionsHtml.includes('shared.js'), 'options reuses the shared capture-rule parser');
+assert(options.includes('falconCaptureExtensions') && options.includes('falconCaptureBlockedHosts'), 'options persists capture rules');
+assert(background.includes('shouldCaptureBrowserDownload'), 'automatic capture honors editable rules');
+assert(shared.includes('captureHostMatches') && shared.includes('normalizeCaptureExtensions'), 'shared capture-rule helpers');
 
 // Look and feel: system font, no remote assets.
 for (const [name, html] of [['popup', popupHtml], ['options', optionsHtml]]) {
