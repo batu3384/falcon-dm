@@ -6,23 +6,31 @@ import { create } from 'zustand';
 
 export type ToastKind = 'success' | 'error' | 'info';
 
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
 export interface Toast {
   id: number;
   kind: ToastKind;
   msg: string;
+  action?: ToastAction;
 }
 
 interface ToastState {
   toasts: Toast[];
-  showToast: (kind: ToastKind, msg: string) => void;
+  showToast: (kind: ToastKind, msg: string, action?: ToastAction) => void;
   dismiss: (id: number) => void;
 }
 
 export const useToastStore = create<ToastState>((set) => ({
   toasts: [],
-  showToast: (kind, msg) => {
+  showToast: (kind, msg, action) => {
     const id = Date.now() + Math.random();
-    set((prev) => ({ toasts: [...prev.toasts, { id, kind, msg }] }));
+    set((prev) => ({
+      toasts: [...prev.toasts, { id, kind, msg, ...(action ? { action } : {}) }],
+    }));
     setTimeout(() => {
       set((prev) => ({ toasts: prev.toasts.filter((t) => t.id !== id) }));
     }, 3500);

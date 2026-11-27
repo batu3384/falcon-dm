@@ -3,6 +3,7 @@ import {
   applyProgressToRow,
   mergeFetchedRow,
   totalLiveSpeed,
+  queuePositions,
   useDownloadsStore,
   DOWNLOAD_PAGE_SIZE,
 } from './downloads';
@@ -77,6 +78,19 @@ describe('row merge rules', () => {
 
   it('sums only positive speeds', () => {
     expect(totalLiveSpeed({ 1: 100, 2: 0, 3: 50 })).toBe(150);
+  });
+
+  it('orders queue positions by priority descending, then oldest id first', () => {
+    const older = makeRow({ id: 10, priority: 1, status: 'Queued' });
+    const newer = makeRow({ id: 30, priority: 1, status: 'Queued' });
+    const urgent = makeRow({ id: 20, priority: 4, status: 'Queued' });
+    const running = makeRow({ id: 5, priority: 9, status: 'Downloading' });
+
+    const positions = queuePositions([newer, running, older, urgent]);
+    expect(positions.get(urgent.id)).toBe(1);
+    expect(positions.get(older.id)).toBe(2);
+    expect(positions.get(newer.id)).toBe(3);
+    expect(positions.has(running.id)).toBe(false);
   });
 });
 

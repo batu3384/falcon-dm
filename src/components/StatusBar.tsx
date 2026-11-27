@@ -39,7 +39,7 @@ export default function StatusBar() {
           title={t('status_bar.edit_limit')}
         >
           <Gauge size={12} aria-hidden={true} />
-          {t('status_bar.limit', { limit: formatSpeed(limit * 1024, lang) })}
+          {t('status_bar.limit', { limit: formatSpeed(limit * 1000, lang) })}
         </button>
       )}
       {schedule?.active && schedule.start_time && schedule.stop_time && (

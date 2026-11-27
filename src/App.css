@@ -572,6 +572,25 @@ svg {
   font-variant-numeric: tabular-nums;
 }
 
+.queue-pos {
+  display: inline-flex;
+  align-items: center;
+  height: 15px;
+  padding: 0 5px;
+  margin-right: 5px;
+  border-radius: 4px;
+  background: var(--bg-field);
+  color: var(--text-2);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  vertical-align: -1px;
+}
+
+.list:focus-within .row.selected .queue-pos {
+  background: rgba(255, 255, 255, 0.18);
+}
+
 .row-meta .bad {
   color: var(--red);
 }
@@ -1971,6 +1990,17 @@ svg {
   border-radius: 50%;
   background: transparent;
   color: rgba(255, 255, 255, 0.7);
+}
+
+.toast .toast-action {
+  flex: none;
+  width: auto;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-weight: 600;
 }
 
 .toast button:hover {

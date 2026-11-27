@@ -30,4 +30,13 @@ describe('useToastStore', () => {
     useToastStore.getState().dismiss(id);
     expect(useToastStore.getState().toasts).toHaveLength(0);
   });
+
+  it('keeps an optional clickable action with the toast', () => {
+    const run = vi.fn();
+    useToastStore.getState().showToast('info', 'update', { label: 'Download', run });
+    const action = useToastStore.getState().toasts[0].action;
+    expect(action?.label).toBe('Download');
+    action?.run();
+    expect(run).toHaveBeenCalledOnce();
+  });
 });

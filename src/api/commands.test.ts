@@ -28,6 +28,11 @@ describe('localizeDownloadError', () => {
       'errors.ytdlp_path_invalid',
     );
     expect(localizeDownloadError('ERR_HLS_LIVE', t)).toBe('errors.hls_live');
+    expect(localizeDownloadError('ERR_PARTIAL_RESPONSE', t)).toBe('errors.partial_response');
+    expect(localizeDownloadError('ERR_CONTENT_ENCODING', t)).toBe('errors.content_encoding');
+    expect(localizeDownloadError('ERR_VIDEO_UNAVAILABLE', t)).toBe('errors.video_unavailable');
+    expect(localizeDownloadError('ERR_VIDEO_PRIVATE', t)).toBe('errors.video_private');
+    expect(localizeDownloadError('ERR_LOGIN_REQUIRED', t)).toBe('errors.login_required');
   });
 
   it('groups HTTP status codes by what the user can do', () => {

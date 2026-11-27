@@ -8,8 +8,8 @@ const UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
 
 export function formatBytes(bytes: number, lang?: string, decimals = 1): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), UNITS.length - 1);
-  const value = bytes / 1024 ** i;
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1000)), UNITS.length - 1);
+  const value = bytes / 1000 ** i;
   const digits = i === 0 ? 0 : value >= 100 ? 0 : decimals;
   const text = new Intl.NumberFormat(localeOf(lang), {
     maximumFractionDigits: digits,

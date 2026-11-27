@@ -4,7 +4,7 @@ import { makeRow } from '../test/fixtures';
 
 const t = (key: string, options?: Record<string, unknown>) =>
   options ? `${key}${JSON.stringify(options)}` : key;
-const MB = 1024 * 1024;
+const MB = 1000 * 1000;
 
 describe('rowStatusLine', () => {
   it('shows bytes, speed and time left while downloading', () => {

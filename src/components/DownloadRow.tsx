@@ -10,6 +10,8 @@ import { FileIcon } from './FileIcon';
 interface DownloadRowProps {
   row: DownloadModel;
   selected: boolean;
+  /** 1-based start order while the row is queued. */
+  queuePosition?: number;
   /** Re-render once a second for retry countdowns. */
   now: number;
   onToggle: (row: DownloadModel) => void;
@@ -17,7 +19,15 @@ interface DownloadRowProps {
   onMenu: (row: DownloadModel, x: number, y: number) => void;
 }
 
-function DownloadRowInner({ row, selected, now, onToggle, onReveal, onMenu }: DownloadRowProps) {
+function DownloadRowInner({
+  row,
+  selected,
+  queuePosition,
+  now,
+  onToggle,
+  onReveal,
+  onMenu,
+}: DownloadRowProps) {
   const { t, i18n } = useTranslation();
   const caps = getDownloadCapabilities(row.status);
   const line = rowStatusLine(row, t, i18n.language, now);
@@ -46,6 +56,20 @@ function DownloadRowInner({ row, selected, now, onToggle, onReveal, onMenu }: Do
           </div>
         )}
         <span className="row-meta" title={line.text}>
+          {row.status === 'Queued' && queuePosition !== undefined && (
+            <>
+              <span
+                className="queue-pos"
+                title={t('row.queue_position', { position: queuePosition })}
+                aria-hidden="true"
+              >
+                #{queuePosition}
+              </span>
+              <span className="sr-only">
+                {t('row.queue_position', { position: queuePosition })}
+              </span>
+            </>
+          )}
           <span className={line.tone}>{line.text}</span>
         </span>
       </div>

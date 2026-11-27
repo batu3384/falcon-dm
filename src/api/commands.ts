@@ -51,6 +51,11 @@ const ERROR_CODES: Record<string, string> = {
   ERR_HLS_LIVE: 'errors.hls_live',
   ERR_REMOTE_CHANGED: 'errors.remote_changed',
   ERR_FILE_MISSING: 'errors.file_missing',
+  ERR_PARTIAL_RESPONSE: 'errors.partial_response',
+  ERR_CONTENT_ENCODING: 'errors.content_encoding',
+  ERR_VIDEO_UNAVAILABLE: 'errors.video_unavailable',
+  ERR_VIDEO_PRIVATE: 'errors.video_private',
+  ERR_LOGIN_REQUIRED: 'errors.login_required',
   'invalid url': 'errors.invalid_url',
   'not a real media url': 'errors.junk_media_url',
   'Server returned an error page instead of a file': 'errors.error_page',
@@ -239,4 +244,9 @@ export async function readClipboard(): Promise<string> {
 
 export async function setUiLanguage(lang: string): Promise<void> {
   await invoke('set_ui_language', { lang });
+}
+
+/** Force the native window appearance for a manual theme ('system' clears it). */
+export async function setWindowAppearance(theme: string): Promise<void> {
+  await invoke('set_window_appearance', { theme });
 }

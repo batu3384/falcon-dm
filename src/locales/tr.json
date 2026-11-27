@@ -63,7 +63,8 @@
     "connecting": "Bağlanıyor…",
     "retrying": "{{seconds}} sn sonra yeniden denenecek ({{attempt}}/{{max}})",
     "percent": "%{{value}}",
-    "progress_label": "{{name}} ilerlemesi"
+    "progress_label": "{{name}} ilerlemesi",
+    "queue_position": "Kuyruk konumu {{position}}"
   },
   "list": {
     "loading": "İndirmeler yükleniyor",
@@ -220,6 +221,7 @@
     "checking": "Denetleniyor…",
     "update_current": "Falcon DM {{version}} güncel.",
     "update_available": "Falcon DM {{version}} kullanılabilir.",
+    "update_download": "İndir",
     "update_failed": "Güncellemeler denetlenemedi.",
     "troubleshooting": "Sorun giderme:",
     "show_logs": "Günlükleri Göster",
@@ -375,6 +377,8 @@
     "video_private": "Bu video gizli.",
     "login_required": "Site oturum açmanızı istiyor. Ayarlar'dan Chrome oturumunu etkinleştirin veya bağlantıyı denetleyin.",
     "remote_changed": "İndirme sırasında dosya sunucuda değişti.",
+    "partial_response": "Sunucu dosyanın yalnızca bir bölümünü gönderdi. Bağlantı bozuk veya süresi geçmiş olabilir.",
+    "content_encoding": "Sunucu yanıtı sıkıştırılmış gönderdi, bu yüzden dosya indirilemedi.",
     "file_missing": "Dosya artık diskte değil.",
     "error_page": "Sunucu dosya yerine bir hata sayfası gönderdi.",
     "empty_file": "Sunucu boş bir dosya gönderdi.",

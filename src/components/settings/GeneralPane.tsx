@@ -27,10 +27,23 @@ export function GeneralPane({
       if (!result.update_available) {
         showToast('success', t('settings.update_current', { version: result.current_version }));
       } else {
-        showToast('info', t('settings.update_available', { version: result.latest_version ?? '' }));
-        if (result.release_url && isFalconGithubReleaseUrl(result.release_url)) {
-          await openUrl(result.release_url);
-        }
+        const releaseUrl = result.release_url;
+        const action =
+          releaseUrl && isFalconGithubReleaseUrl(releaseUrl)
+            ? {
+                label: t('settings.update_download'),
+                run: () => {
+                  void openUrl(releaseUrl).catch(() =>
+                    showToast('error', t('settings.update_failed')),
+                  );
+                },
+              }
+            : undefined;
+        showToast(
+          'info',
+          t('settings.update_available', { version: result.latest_version ?? '' }),
+          action,
+        );
       }
     } catch {
       showToast('error', t('settings.update_failed'));

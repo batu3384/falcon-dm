@@ -182,7 +182,7 @@ function App() {
       showToast(
         'info',
         kbps > 0
-          ? t('app.limit_on', { limit: formatSpeed(kbps * 1024, i18n.language) })
+          ? t('app.limit_on', { limit: formatSpeed(kbps * 1000, i18n.language) })
           : t('app.limit_off'),
       );
     } catch (e) {
@@ -415,6 +415,18 @@ function App() {
                 <Info size={15} aria-hidden={true} />
               )}
               <span>{toast.msg}</span>
+              {toast.action && (
+                <button
+                  type="button"
+                  className="toast-action"
+                  onClick={() => {
+                    dismissToast(toast.id);
+                    toast.action?.run();
+                  }}
+                >
+                  {toast.action.label}
+                </button>
+              )}
               <button
                 type="button"
                 aria-label={t('common.dismiss')}

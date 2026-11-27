@@ -97,7 +97,7 @@ export default function Toolbar({ onPauseAll, onResumeAll, onToggleSpeedLimit }:
           title={
             limited
               ? t('toolbar.speed_limit_on', {
-                  limit: formatSpeed((stats?.speed_limit_kbps ?? 0) * 1024, i18n.language),
+                  limit: formatSpeed((stats?.speed_limit_kbps ?? 0) * 1000, i18n.language),
                 })
               : t('toolbar.speed_limit_off')
           }

@@ -4,6 +4,7 @@ import { useToastStore } from '../../store/toast';
 import * as api from '../../api/commands';
 import { Check, FormRow } from './FormRow';
 import { NumberField } from './NumberField';
+import { lastSpeedLimit, rememberSpeedLimit } from '../../lib/speedLimit';
 import type { PaneProps, ScheduleDraft } from './types';
 
 const CATEGORY_FOLDERS = [
@@ -112,7 +113,11 @@ export function DownloadsPane({
         <Check
           id="set-limit-on"
           checked={limit > 0}
-          onChange={(on) => update({ speed_limit_kbps: on ? 1024 : 0 })}
+          onChange={(on) => {
+            // Mirror the toolbar toggle: the value turned off is the value restored.
+            if (!on) rememberSpeedLimit(limit);
+            update({ speed_limit_kbps: on ? lastSpeedLimit() : 0 });
+          }}
           label={t('settings.speed_limit_label')}
         />
         {limit > 0 && (

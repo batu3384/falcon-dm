@@ -63,7 +63,8 @@
     "connecting": "Connecting…",
     "retrying": "Retrying in {{seconds}} s (attempt {{attempt}} of {{max}})",
     "percent": "{{value}}%",
-    "progress_label": "Progress of {{name}}"
+    "progress_label": "Progress of {{name}}",
+    "queue_position": "Queue position {{position}}"
   },
   "list": {
     "loading": "Loading downloads",
@@ -220,6 +221,7 @@
     "checking": "Checking…",
     "update_current": "Falcon DM {{version}} is up to date.",
     "update_available": "Falcon DM {{version}} is available.",
+    "update_download": "Download",
     "update_failed": "Could not check for updates.",
     "troubleshooting": "Troubleshooting:",
     "show_logs": "Show Logs",
@@ -375,6 +377,8 @@
     "video_private": "This video is private.",
     "login_required": "The site requires sign-in. Turn on Chrome sign-in in Settings or check the link.",
     "remote_changed": "The file changed on the server during the download.",
+    "partial_response": "The server sent only part of the file. The link may be broken or expired.",
+    "content_encoding": "The server compressed the response, so the file could not be downloaded.",
     "file_missing": "The file is no longer on disk.",
     "error_page": "The server sent an error page instead of the file.",
     "empty_file": "The server sent an empty file.",

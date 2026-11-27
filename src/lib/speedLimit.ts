@@ -1,7 +1,8 @@
 import * as api from '../api/commands';
 
 const LAST_KEY = 'falcon_speed_limit_last';
-export const DEFAULT_LIMIT_KBPS = 1024;
+// Decimal like the rest of the app: exactly 1 MB/s.
+export const DEFAULT_LIMIT_KBPS = 1000;
 
 /** The limit the toolbar toggle restores (last non-zero value, else 1 MB/s). */
 export function lastSpeedLimit(): number {

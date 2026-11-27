@@ -15,12 +15,13 @@ import {
   Inbox,
 } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { useDownloadsStore } from '../store/downloads';
+import { queuePositions, useDownloadsStore } from '../store/downloads';
 import { useUiStore } from '../store/ui';
 import type { DownloadModel } from '../types';
 import type { ViewId } from '../lib/downloadView';
 import { getDownloadCapabilities } from '../lib/downloadCapabilities';
 import { useDownloadActions } from '../lib/useDownloadActions';
+import { downloadRowShortcut } from '../lib/rowShortcuts';
 import { DownloadRow } from './DownloadRow';
 import { ContextMenu } from './ContextMenu';
 import { buildDownloadMenu } from './downloadMenu';
@@ -92,6 +93,7 @@ export default function DownloadList() {
     () => rows.filter((row) => selectedIds.has(row.id)),
     [rows, selectedIds],
   );
+  const positions = useMemo(() => queuePositions(rows), [rows]);
 
   const openMenu = useCallback(
     (row: DownloadModel, x: number, y: number) => {
@@ -117,8 +119,36 @@ export default function DownloadList() {
     virtualizer.scrollToIndex(target);
   };
 
+  const openMenuForSelection = () => {
+    if (!selectedRows.length) return;
+    const row =
+      rows.find((candidate) => candidate.id === primaryId) ?? selectedRows[selectedRows.length - 1];
+    const el = document.getElementById(`dl-row-${row.id}`);
+    const rect = el?.getBoundingClientRect();
+    setMenu({ rows: selectedRows, x: (rect?.left ?? 40) + 40, y: rect?.bottom ?? 80 });
+  };
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (isEditable(e.target) || rows.length === 0) return;
+    const shortcut = downloadRowShortcut(e);
+    if (shortcut && selectedRows.length) {
+      if (shortcut === 'menu') {
+        e.preventDefault();
+        openMenuForSelection();
+        return;
+      }
+      const row = selectedRows.length === 1 ? selectedRows[0] : null;
+      if (shortcut === 'reveal' && row) {
+        e.preventDefault();
+        void actions.reveal(row);
+        return;
+      }
+      if (shortcut === 'open' && row && getDownloadCapabilities(row.status).open) {
+        e.preventDefault();
+        void actions.open(row);
+        return;
+      }
+    }
     const cursorId = e.shiftKey && cursorRef.current !== null ? cursorRef.current : primaryId;
     const current = rows.findIndex((row) => row.id === cursorId);
     const meta = e.metaKey || e.ctrlKey;
@@ -174,10 +204,7 @@ export default function DownloadList() {
       case 'F10':
         if ((e.key === 'ContextMenu' || e.shiftKey) && selectedRows.length) {
           e.preventDefault();
-          const row = selectedRows[selectedRows.length - 1];
-          const el = document.getElementById(`dl-row-${row.id}`);
-          const rect = el?.getBoundingClientRect();
-          setMenu({ rows: selectedRows, x: (rect?.left ?? 40) + 40, y: rect?.bottom ?? 80 });
+          openMenuForSelection();
         }
         return;
     }
@@ -260,6 +287,7 @@ export default function DownloadList() {
               <DownloadRow
                 row={row}
                 selected={selected}
+                queuePosition={positions.get(row.id)}
                 now={row.retry_at != null ? now : 0}
                 onToggle={onToggle}
                 onReveal={onReveal}

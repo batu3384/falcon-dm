@@ -49,6 +49,14 @@ function insertById(rows: DownloadModel[], row: DownloadModel): DownloadModel[] 
   return [...rows.slice(0, index), row, ...rows.slice(index)];
 }
 
+/** 1-based start order of queued rows, matching the backend's priority DESC, id ASC order. */
+export function queuePositions(rows: DownloadModel[]): Map<number, number> {
+  const queued = rows
+    .filter((row) => row.status === 'Queued')
+    .sort((a, b) => b.priority - a.priority || a.id - b.id);
+  return new Map(queued.map((row, index) => [row.id, index + 1]));
+}
+
 function setByteRestarted(ids: Set<number>, id: number, restarted: boolean): Set<number> {
   if (ids.has(id) === restarted) return ids;
   const next = new Set(ids);

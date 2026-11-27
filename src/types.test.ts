@@ -20,22 +20,24 @@ describe('formatBytes', () => {
     expect(formatBytes(-5)).toBe('0 B');
     expect(formatBytes(Number.NaN)).toBe('0 B');
   });
-  it('uses binary units with one decimal below 100', () => {
+  it('uses decimal units with one decimal below 100', () => {
     expect(formatBytes(512)).toBe('512 B');
+    expect(formatBytes(999)).toBe('999 B');
+    expect(formatBytes(1000)).toBe('1 KB');
     expect(formatBytes(1536)).toBe('1.5 KB');
-    expect(formatBytes(5 * 1024 * 1024)).toBe('5 MB');
-    expect(formatBytes(150 * 1024 * 1024)).toBe('150 MB');
-    expect(formatBytes(1024 ** 5 * 3)).toBe('3,072 TB');
+    expect(formatBytes(5 * 1000 * 1000)).toBe('5 MB');
+    expect(formatBytes(150 * 1000 * 1000)).toBe('150 MB');
+    expect(formatBytes(1000 ** 5 * 3)).toBe('3,000 TB');
   });
   it('uses the Turkish decimal comma', () => {
-    expect(formatBytes(1536, 'tr')).toBe('1,5 KB');
+    expect(formatBytes(1750, 'tr')).toBe('1,8 KB');
   });
 });
 
 describe('formatSpeed / formatDuration', () => {
   it('localizes the per-second unit', () => {
-    expect(formatSpeed(2048, 'en')).toBe('2 KB/s');
-    expect(formatSpeed(2048, 'tr')).toBe('2 KB/sn');
+    expect(formatSpeed(2500, 'en')).toBe('2.5 KB/s');
+    expect(formatSpeed(2500, 'tr')).toBe('2,5 KB/sn');
   });
   it('formats remaining time', () => {
     expect(formatDuration(0)).toBe('');
