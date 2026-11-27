@@ -125,11 +125,23 @@ impl JobContext {
             .and_then(|row| row.expected_hash);
         let temp_owned = temp.to_path_buf();
         let dest_owned = dest.to_path_buf();
+        let id = self.id;
         let landed = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
+            // A rejected temp can never be resumed: its resume state is only
+            // meaningful next to the partial bytes, so both are dropped or a
+            // retry would trip over an orphan.
+            let drop_temp_and_state = || {
+                let _ = std::fs::remove_file(&temp_owned);
+                if let Some(state) =
+                    crate::download::http::hidden_sibling(&dest_owned, id, "state")
+                {
+                    let _ = std::fs::remove_file(state);
+                }
+            };
             if let Err(reason) =
                 validate_completed_file_named_with_hints(&temp_owned, &dest_owned, hints)
             {
-                let _ = std::fs::remove_file(&temp_owned);
+                drop_temp_and_state();
                 return Err(reason);
             }
             // Verify before the move: bytes that fail the check never reach
@@ -140,7 +152,7 @@ impl JobContext {
                 if let Err(reason) =
                     crate::download::checksum::verify_file_hash(&temp_owned, &expected)
                 {
-                    let _ = std::fs::remove_file(&temp_owned);
+                    drop_temp_and_state();
                     return Err(reason);
                 }
             }
@@ -329,9 +341,12 @@ mod tests {
         let wrong = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let (_db, ctx, id) = hashed_job(&root, "file.bin", Some(wrong));
         let temp = write_temp(&root, "file.bin", id, payload);
+        let state = root.join(format!(".file.bin.{id}.falcon.state"));
+        std::fs::write(&state, b"{}").unwrap();
         let result = ctx.finalize(&temp, &root.join("file.bin")).await;
         assert_eq!(result, Err(DownloadError::Fatal("ERR_CHECKSUM_MISMATCH".into())));
         assert!(!temp.exists(), "untrusted bytes must not survive as a partial file");
+        assert!(!state.exists(), "the orphaned state must not survive either");
         assert!(!root.join("file.bin").exists(), "nothing may land in the target folder");
         std::fs::remove_dir_all(root).unwrap();
     }
