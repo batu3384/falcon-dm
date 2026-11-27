@@ -12,11 +12,15 @@ use crate::util::{sanitize_filename, sanitize_header_value, sanitize_ytdlp_forma
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 pub const DEFAULT_VIDEO_FORMAT: &str =
     "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/bv*+ba/b";
+
+// `?` makes a missing live_status non-rejecting; missing is_live already passes `!is_live`.
+const LIVE_MATCH_FILTER: &str = "!is_live & live_status !=? is_live & live_status !=? is_upcoming";
 
 #[derive(Clone, Default)]
 pub struct YtDlpOptions {
@@ -74,20 +78,31 @@ fn parse_u64(field: &str) -> Option<u64> {
 
 #[derive(Debug, PartialEq)]
 enum Line {
-    Meta { total: Option<u64>, title: Option<String> },
+    Meta { total: Option<u64>, title: Option<String>, live: bool },
     Download { finished: bool, downloaded: u64, total: Option<u64>, format: String },
     PostProcess { name: String },
     Other,
 }
 
+fn live_stream_metadata(live_status: &str, is_live: &str) -> bool {
+    matches!(live_status.trim().to_ascii_lowercase().as_str(), "is_live" | "is_upcoming")
+        || matches!(is_live.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+}
+
 fn parse_line(line: &str) -> Line {
     let line = line.trim();
     if let Some(rest) = line.strip_prefix("FALCON_META|") {
-        let (total, title) = rest.split_once('|').unwrap_or((rest, ""));
+        let mut fields = rest.splitn(4, '|');
+        let (Some(total), Some(live_status), Some(is_live), Some(title)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Line::Other;
+        };
         let title = title.trim();
         return Line::Meta {
             total: parse_u64(total),
             title: (!title.is_empty() && title != "NA").then(|| title.to_string()),
+            live: live_stream_metadata(live_status, is_live),
         };
     }
     if let Some(rest) = line.strip_prefix("FALCON_DL|") {
@@ -191,9 +206,24 @@ fn classify_failure(detail: &str) -> DownloadError {
         "ssl",
     ];
     let message = format!("yt-dlp: {detail}");
+    if lower.contains("this live event will begin") {
+        return DownloadError::fatal("ERR_HLS_LIVE");
+    }
+    if lower.contains("video unavailable") {
+        return DownloadError::fatal("ERR_VIDEO_UNAVAILABLE");
+    }
+    if lower.contains("private video") {
+        return DownloadError::fatal("ERR_VIDEO_PRIVATE");
+    }
+    if lower.contains("sign in to confirm") {
+        return DownloadError::fatal("ERR_LOGIN_REQUIRED");
+    }
     if lower.contains("ffmpeg") && (lower.contains("not installed") || lower.contains("not found"))
     {
         return DownloadError::fatal("ERR_FFMPEG_MISSING");
+    }
+    if lower.contains("http error 403") {
+        return DownloadError::fatal("HTTP 403");
     }
     // 403/404/410 do not heal by waiting; 408 and 429 do.
     if let Some(rest) = lower.split("http error ").nth(1) {
@@ -238,6 +268,22 @@ fn resolve_output(run_dir: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "yt-dlp output file not found".into())
 }
 
+/// ffmpeg writes yt-dlp's postprocess result as `output.temp.<ext>` and renames
+/// it only at the end, so its size is the one progress signal available.
+async fn postprocess_output_size(run_dir: &Path) -> u64 {
+    let Ok(mut entries) = tokio::fs::read_dir(run_dir).await else {
+        return 0;
+    };
+    let mut bytes = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("output.temp.") {
+            bytes += entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    bytes
+}
+
 fn build_command(
     bin: &Path,
     url: &str,
@@ -261,7 +307,11 @@ fn build_command(
         .arg("--progress-template")
         .arg("postprocess:FALCON_PP|%(progress.status)s|%(progress.postprocessor)s")
         .arg("--print")
-        .arg("before_dl:FALCON_META|%(filesize,filesize_approx)s|%(title)s")
+        // pre_process is emitted before yt-dlp's own filter and downloader. The
+        // filter is a same-process backstop if this parent is slow to read the pipe.
+        .arg("pre_process:FALCON_META|%(filesize,filesize_approx)s|%(live_status)s|%(is_live)s|%(title)s")
+        .arg("--match-filters")
+        .arg(LIVE_MATCH_FILTER)
         .arg("--no-simulate")
         .args(["-f", &format])
         .arg("--no-mtime")
@@ -340,6 +390,10 @@ pub async fn process_ytdlp(
     let mut tail: VecDeque<String> = VecDeque::with_capacity(40);
     let mut title: Option<String> = None;
     let mut cancel = ctx.cancel.clone();
+    let mut postprocess_tick = tokio::time::interval(Duration::from_millis(250));
+    postprocess_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut postprocessing = false;
+    let mut postprocess_bytes = 0u64;
 
     while out_open || err_open {
         let line = tokio::select! {
@@ -351,6 +405,16 @@ pub async fn process_ytdlp(
                 Ok(Some(line)) => line,
                 _ => { err_open = false; continue; }
             },
+            _ = postprocess_tick.tick(), if postprocessing => {
+                let bytes = postprocess_output_size(&run_dir).await;
+                if bytes != postprocess_bytes {
+                    postprocess_bytes = bytes;
+                    if bytes > 0 {
+                        ctx.progress.set_downloaded(bytes);
+                    }
+                }
+                continue;
+            }
             _ = cancelled(&mut cancel) => {
                 let _ = child.kill().await;
                 // The work dir stays: the next run resumes yt-dlp's part files.
@@ -358,7 +422,11 @@ pub async fn process_ytdlp(
             }
         };
         match parse_line(&line) {
-            Line::Meta { total, title: found } => {
+            Line::Meta { total, title: found, live } => {
+                if live {
+                    let _ = child.kill().await;
+                    return Err(DownloadError::fatal("ERR_HLS_LIVE"));
+                }
                 tracker.expected_total = total.filter(|t| *t > 0);
                 title = found;
                 if let Some(total) = tracker.expected_total {
@@ -373,6 +441,7 @@ pub async fn process_ytdlp(
             }
             Line::PostProcess { name } => {
                 if name != "MoveFiles" {
+                    postprocessing = true;
                     ctx.progress.set_merging();
                 }
             }
@@ -438,10 +507,21 @@ mod tests {
     #[test]
     fn progress_lines_parse_and_garbage_is_ignored() {
         assert_eq!(
-            parse_line("FALCON_META|533067|Me at the zoo"),
-            Line::Meta { total: Some(533_067), title: Some("Me at the zoo".into()) }
+            parse_line("FALCON_META|533067|not_live|False|Me at the zoo"),
+            Line::Meta { total: Some(533_067), title: Some("Me at the zoo".into()), live: false }
         );
-        assert_eq!(parse_line("FALCON_META|NA|NA"), Line::Meta { total: None, title: None });
+        assert_eq!(
+            parse_line("FALCON_META|NA|NA|NA|NA"),
+            Line::Meta { total: None, title: None, live: false }
+        );
+        assert_eq!(
+            parse_line("FALCON_META|8192|is_live|True|Live stream"),
+            Line::Meta { total: Some(8192), title: Some("Live stream".into()), live: true }
+        );
+        assert_eq!(
+            parse_line("FALCON_META|8192|not_live|False|Title | with pipes"),
+            Line::Meta { total: Some(8192), title: Some("Title | with pipes".into()), live: false }
+        );
         assert_eq!(
             parse_line("FALCON_DL|downloading|130048|223779|NA|395"),
             Line::Download {
@@ -468,6 +548,16 @@ mod tests {
         assert_eq!(parse_line("FALCON_PP|finished|Merger"), Line::Other);
         assert_eq!(parse_line("[youtube] abc: Downloading webpage"), Line::Other);
         assert_eq!(parse_line("FALCON_DL|broken"), Line::Other);
+    }
+
+    #[test]
+    fn only_current_or_upcoming_live_metadata_is_rejected() {
+        assert!(live_stream_metadata("is_live", "False"));
+        assert!(live_stream_metadata("is_upcoming", "False"));
+        assert!(live_stream_metadata("not_live", "True"));
+        assert!(!live_stream_metadata("was_live", "False"));
+        assert!(!live_stream_metadata("not_live", "False"));
+        assert!(!live_stream_metadata("NA", "NA"));
     }
 
     #[test]
@@ -524,11 +614,26 @@ mod tests {
             classify_failure("HTTP Error 429: Too Many Requests"),
             DownloadError::Transient(_)
         ));
-        assert!(matches!(classify_failure("Video unavailable"), DownloadError::Fatal(_)));
-        assert!(matches!(
+        assert_eq!(
+            classify_failure("[youtube] abc: Video unavailable"),
+            DownloadError::fatal("ERR_VIDEO_UNAVAILABLE")
+        );
+        assert_eq!(
+            classify_failure("[youtube] abc: Private video"),
+            DownloadError::fatal("ERR_VIDEO_PRIVATE")
+        );
+        assert_eq!(
+            classify_failure("[youtube] abc: Sign in to confirm you're not a bot"),
+            DownloadError::fatal("ERR_LOGIN_REQUIRED")
+        );
+        assert_eq!(
             classify_failure("unable to download video data: HTTP Error 403: Forbidden"),
-            DownloadError::Fatal(_)
-        ));
+            DownloadError::fatal("HTTP 403")
+        );
+        assert_eq!(
+            classify_failure("[youtube] abc: This live event will begin in 7 hours"),
+            DownloadError::fatal("ERR_HLS_LIVE")
+        );
         assert!(matches!(
             classify_failure("Requested format is not available"),
             DownloadError::Fatal(_)
@@ -600,10 +705,156 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--limit-rate", "512K"]));
         assert!(args.windows(2).any(|w| w == ["-N", "8"]));
         assert!(args.iter().any(|a| a == "--merge-output-format"));
+        assert!(args.iter().any(|a| {
+            a.starts_with("pre_process:FALCON_META|")
+                && a.contains("%(live_status)s")
+                && a.contains("%(is_live)s")
+        }));
+        assert!(args.windows(2).any(|w| {
+            w[0] == "--match-filters"
+                && w[1].contains("!is_live")
+                && w[1].contains("live_status !=? is_live")
+                && w[1].contains("live_status !=? is_upcoming")
+        }));
 
         let audio =
             build_command(Path::new("yt-dlp"), "https://x", Path::new("/tmp/run"), true, &opts);
         assert!(!audio.as_std().get_args().any(|a| a == "--merge-output-format"));
+    }
+
+    #[cfg(unix)]
+    fn write_fake_ytdlp(dir: &Path, body: &str) -> PathBuf {
+        let path = dir.join("yt-dlp");
+        let script = format!(
+            r#"#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift; out="$1" ;;
+  esac
+  shift || break
+done
+out=$(printf '%s' "$out" | sed 's/%(ext)s/mp4/g')
+{body}
+"#
+        );
+        std::fs::write(&path, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn fake_success_body() -> &'static str {
+        r#"printf 'FALCON_DL|finished|2048|2048|NA|best\n'
+dd if=/dev/zero of="$out" bs=1024 count=2 >/dev/null 2>&1
+"#
+    }
+
+    #[cfg(unix)]
+    async fn run_fake_ytdlp(root: &Path, id: i64, bin: &Path) -> Result<PathBuf, DownloadError> {
+        let (ctx, _cancel) = JobContext::for_tests(id);
+        process_ytdlp(
+            &ctx,
+            "https://www.youtube.com/watch?v=fake",
+            root.join("video.mp4").to_str().unwrap(),
+            YtDlpOptions {
+                ytdlp_path: Some(bin.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_metadata_aborts_before_output_is_written() {
+        for (id, live_status, is_live) in [(91, "is_live", "True"), (92, "is_upcoming", "False")] {
+            let root =
+                std::env::temp_dir().join(format!("falcon-ytdlp-live-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let bin = write_fake_ytdlp(
+                &root,
+                &format!(
+                    "printf 'FALCON_META|8192|{live_status}|{is_live}|Live stream\\n'\nsleep 1\n{}",
+                    fake_success_body()
+                ),
+            );
+            let result = run_fake_ytdlp(&root, id, &bin).await;
+            assert_eq!(result, Err(DownloadError::fatal("ERR_HLS_LIVE")));
+            assert!(
+                !run_dir_for(root.to_str().unwrap(), id).join("output.mp4").exists(),
+                "live output must not be written"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finished_live_streams_download_normally() {
+        let root = std::env::temp_dir().join(format!("falcon-ytdlp-vod-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bin = write_fake_ytdlp(
+            &root,
+            &format!(
+                "printf 'FALCON_META|2048|was_live|False|Finished live stream\\n'\n{}",
+                fake_success_body()
+            ),
+        );
+        let result = run_fake_ytdlp(&root, 93, &bin).await;
+        assert!(result.is_ok(), "finished live stream was rejected: {result:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn postprocess_temp_file_growth_is_reported_as_bytes() {
+        let root = std::env::temp_dir().join(format!("falcon-ytdlp-pp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bin = write_fake_ytdlp(
+            &root,
+            r#"printf 'FALCON_META|4096|not_live|False|Merge me\n'
+printf 'FALCON_DL|finished|4096|4096|NA|best\n'
+printf 'FALCON_PP|started|Merger\n'
+tmp="$(dirname "$out")/output.temp.mp4"
+rm -f "$tmp"
+dd if=/dev/zero bs=1024 count=1 >> "$tmp" 2>/dev/null
+sleep 0.2
+dd if=/dev/zero bs=1024 count=1 >> "$tmp" 2>/dev/null
+sleep 0.2
+dd if=/dev/zero bs=1024 count=1 >> "$tmp" 2>/dev/null
+sleep 0.2
+dd if=/dev/zero bs=1024 count=1 >> "$tmp" 2>/dev/null
+printf 'FALCON_PP|finished|Merger\n'
+mv "$tmp" "$out"
+"#,
+        );
+        let (ctx, _cancel) = JobContext::for_tests(94);
+        let progress = ctx.progress.clone();
+        let out_path = root.join("video.mp4").to_string_lossy().into_owned();
+        let opts = YtDlpOptions {
+            ytdlp_path: Some(bin.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let worker = tokio::spawn(async move {
+            process_ytdlp(&ctx, "https://www.youtube.com/watch?v=fake", &out_path, opts).await
+        });
+        let mut intermediate = std::collections::BTreeSet::new();
+        while !worker.is_finished() {
+            let bytes = progress.downloaded();
+            if (1..4096).contains(&bytes) {
+                intermediate.insert(bytes);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let result = worker.await.unwrap();
+        assert!(result.is_ok(), "fake merge failed: {result:?}");
+        assert!(
+            intermediate.len() >= 2,
+            "postprocess bytes did not grow visibly; samples: {intermediate:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
