@@ -23,8 +23,8 @@ const numberFormat = new Intl.NumberFormat(lang === 'tr' ? 'tr-TR' : 'en-US', {
 function formatBytes(bytes) {
   if (!bytes || bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / 1024 ** i;
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1000)), units.length - 1);
+  const value = bytes / 1000 ** i;
   return `${i === 0 ? Math.round(value) : numberFormat.format(value >= 100 ? Math.round(value) : value)} ${units[i]}`;
 }
 

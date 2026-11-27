@@ -74,8 +74,8 @@
     const u = ['B', 'KB', 'MB', 'GB'];
     let i = 0;
     let v = n;
-    while (v >= 1024 && i < u.length - 1) {
-      v /= 1024;
+    while (v >= 1000 && i < u.length - 1) {
+      v /= 1000;
       i++;
     }
     return `${v.toFixed(i > 0 ? 1 : 0)} ${u[i]}`;
