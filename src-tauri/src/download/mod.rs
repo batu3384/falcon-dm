@@ -1,3 +1,4 @@
+pub mod checksum;
 pub mod hls;
 pub mod http;
 pub mod http_client;

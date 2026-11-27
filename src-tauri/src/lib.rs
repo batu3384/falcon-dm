@@ -196,6 +196,9 @@ pub(crate) struct ExternalDownloadPayload {
     /// yt-dlp `-f` selector (preferred over `#falconfmt=` fragment).
     pub format: Option<String>,
     pub save_path: Option<String>,
+    /// Lenient checksum input (bare hex or `algo:`-prefixed); canonicalized
+    /// to `algo:hex` in `enqueue_download`, rejected when unparseable.
+    pub expected_hash: Option<String>,
 }
 
 /// A selector with no video stream (`bestaudio[ext=m4a]/bestaudio`).
@@ -228,6 +231,18 @@ pub(crate) async fn enqueue_download(
     if is_junk_media_url(&payload.url) {
         return Err("not a real media url".into());
     }
+    // Fail closed: a checksum the user typed but we cannot parse must not
+    // silently drop the integrity check they asked for.
+    let expected_hash = payload
+        .expected_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| {
+            download::checksum::parse_expected_hash(raw)
+                .ok_or_else(|| "ERR_CHECKSUM_INVALID".to_string())
+        })
+        .transpose()?;
 
     let watch_url = util::youtube_page_url_for_download(&payload.url, payload.referrer.as_deref());
     let base = watch_url.clone().unwrap_or_else(|| normalize_media_url(payload.url.trim()));
@@ -308,6 +323,7 @@ pub(crate) async fn enqueue_download(
         archived: false,
         attempts: 0,
         retry_at: None,
+        expected_hash,
     };
 
     let insert_result = state.db.insert_download_deduped(&mut dl).map_err(|e| e.to_string())?;
@@ -385,6 +401,7 @@ pub(crate) async fn ingest_uploaded_file(
         archived: false,
         attempts: 0,
         retry_at: None,
+        expected_hash: None,
     };
     let insert_result = state.db.insert_download_deduped(&mut dl).map_err(|e| e.to_string())?;
     let id = insert_result.id();

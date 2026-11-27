@@ -144,6 +144,11 @@ pub struct Download {
     /// Unix ms before which the queue must not restart this row (retry backoff).
     #[serde(default)]
     pub retry_at: Option<i64>,
+    /// User-supplied integrity check in canonical `algo:hex` form (`sha256:` or
+    /// `md5:`). Verified against the finished file inside finalize: a mismatch
+    /// fails the download, so Completed + a hash here means the file matched.
+    #[serde(default)]
+    pub expected_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

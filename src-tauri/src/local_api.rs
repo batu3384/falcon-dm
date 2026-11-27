@@ -130,6 +130,7 @@ pub(crate) async fn handle_api_add(
                 title: payload.title,
                 format: payload.format,
                 save_path: None,
+                expected_hash: None,
             },
         )
         .await,
@@ -171,6 +172,7 @@ pub(crate) async fn handle_intercept(
                 title: payload.title,
                 format: payload.format,
                 save_path: None,
+                expected_hash: None,
             },
         )
         .await,
@@ -471,6 +473,7 @@ mod tests {
             archived: false,
             attempts: 0,
             retry_at: None,
+            expected_hash: None,
         };
         let json = serde_json::to_string(&ApiDownload::from(row)).unwrap();
         assert!(!json.contains("secret.example"), "{json}");

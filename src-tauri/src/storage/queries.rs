@@ -9,7 +9,7 @@ use std::collections::HashSet;
 /// Column order `row_to_download` expects.
 const DOWNLOAD_COLUMNS: &str = "id, url, filename, save_path, total_size, downloaded_size, \
      status, category, speed, segments, priority, created_at, completed_at, error_message, \
-     referrer, user_agent, cookies, archived, attempts, retry_at";
+     referrer, user_agent, cookies, archived, attempts, retry_at, expected_hash";
 
 fn like_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
@@ -57,8 +57,8 @@ impl Database {
             "INSERT INTO downloads (
                 url, filename, save_path, total_size, downloaded_size, status, category,
                 speed, segments, priority, created_at, completed_at, error_message,
-                referrer, user_agent, cookies, archived
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                referrer, user_agent, cookies, archived, expected_hash
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 download.url,
                 download.filename,
@@ -77,6 +77,7 @@ impl Database {
                 download.user_agent,
                 seal_cookies(download.cookies.as_deref()),
                 download.archived as i64,
+                download.expected_hash,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -141,8 +142,8 @@ impl Database {
             "INSERT INTO downloads (
                 url, filename, save_path, total_size, downloaded_size, status, category,
                 speed, segments, priority, created_at, completed_at, error_message,
-                referrer, user_agent, cookies, archived
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                referrer, user_agent, cookies, archived, expected_hash
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 download.url,
                 download.filename,
@@ -161,6 +162,7 @@ impl Database {
                 download.user_agent,
                 seal_cookies(download.cookies.as_deref()),
                 download.archived as i64,
+                download.expected_hash,
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -214,8 +216,9 @@ impl Database {
                 referrer = ?14,
                 user_agent = ?15,
                 cookies = ?16,
-                archived = ?17
-            WHERE id = ?18",
+                archived = ?17,
+                expected_hash = ?18
+            WHERE id = ?19",
             params![
                 download.url,
                 download.filename,
@@ -234,6 +237,7 @@ impl Database {
                 download.user_agent,
                 seal_cookies(download.cookies.as_deref()),
                 download.archived as i64,
+                download.expected_hash,
                 id,
             ],
         )?;
@@ -449,6 +453,27 @@ impl Database {
             "UPDATE downloads SET retry_at = NULL, attempts = 0
              WHERE id = ?1 AND status = 'Queued' AND retry_at IS NOT NULL",
             params![id],
+        )?;
+        Ok(rows == 1)
+    }
+
+    /// Swap the link of a stopped download (expired signatures are the common
+    /// case) and clear the retry state. A Failed row requeues; a Paused row
+    /// stays paused because the user chose to pause it. `keep_cookies = false`
+    /// drops the session: the caller recomputes whether the new origin may
+    /// receive the old one's cookies. The `WHERE` clause is the race guard: a
+    /// row that started running since the caller looked does not match, so a
+    /// live worker never has its URL swapped mid-flight.
+    pub fn refresh_url_if_stopped(&self, id: i64, url: &str, keep_cookies: bool) -> Result<bool> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let rows = conn.execute(
+            "UPDATE downloads
+             SET url = ?1,
+                 status = CASE WHEN status = 'Failed' THEN 'Queued' ELSE status END,
+                 error_message = NULL, attempts = 0, retry_at = NULL, speed = 0.0,
+                 cookies = CASE WHEN ?3 THEN cookies ELSE NULL END
+             WHERE id = ?2 AND status IN ('Failed', 'Paused')",
+            params![url, id, keep_cookies],
         )?;
         Ok(rows == 1)
     }
@@ -802,6 +827,7 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
     let archived: bool = row.get::<_, i64>(17)? != 0;
     let attempts: i64 = row.get(18)?;
     let retry_at: Option<i64> = row.get(19)?;
+    let expected_hash: Option<String> = row.get(20)?;
 
     Ok(Download {
         id: Some(id),
@@ -830,6 +856,7 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
         archived,
         attempts: attempts.clamp(0, i64::from(u32::MAX)) as u32,
         retry_at,
+        expected_hash,
     })
 }
 
@@ -860,6 +887,7 @@ mod tests {
             archived: false,
             attempts: 0,
             retry_at: None,
+            expected_hash: None,
         }
     }
 
@@ -916,6 +944,134 @@ mod tests {
         let mut blob = row("blob:https://example.com/uuid", "blob.bin", save);
         db.insert_download_deduped(&mut blob).unwrap();
         assert_eq!(blob.url, "blob:https://example.com/uuid");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A row that burned its retry budget: failed, backoff set, error recorded.
+    fn failed_row(db: &Database, url: &str, name: &str, dir: &str) -> i64 {
+        let mut download = row(url, name, dir);
+        let id = match db.insert_download_deduped(&mut download).unwrap() {
+            InsertDownloadResult::Created(id) => id,
+            InsertDownloadResult::Existing(_) => panic!("fixture must create a row"),
+        };
+        assert!(db
+            .schedule_retry(id, &[DownloadStatus::Queued], 3, 9_999_999, "HTTP 403")
+            .unwrap());
+        assert!(db
+            .set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Failed)
+            .unwrap());
+        id
+    }
+
+    #[test]
+    fn refresh_url_requeues_failed_row_and_clears_retry_state() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-refresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap();
+        let id = failed_row(&db, "https://cdn.example.com/expired.bin", "f.bin", save);
+
+        let fresh = "https://cdn.example.com/fresh.bin?sig=new";
+        assert!(db.refresh_url_if_stopped(id, fresh, true).unwrap());
+        let row = db.get_download(id).unwrap();
+        assert_eq!(row.url, fresh);
+        assert_eq!(row.status, DownloadStatus::Queued, "a failed row must requeue");
+        assert_eq!(row.error_message, None);
+        assert_eq!(row.attempts, 0);
+        assert_eq!(row.retry_at, None);
+        assert_eq!(row.speed, 0.0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_url_drops_cookies_only_when_told_to() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-refresh-c-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap();
+
+        let mut with_cookies = row("https://cdn.example.com/a.bin", "c.bin", save);
+        with_cookies.cookies = Some("sid=secret".into());
+        let id = match db.insert_download_deduped(&mut with_cookies).unwrap() {
+            InsertDownloadResult::Created(id) => id,
+            InsertDownloadResult::Existing(_) => panic!("fixture must create a row"),
+        };
+        assert!(db
+            .set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Failed)
+            .unwrap());
+
+        // Same-origin refresh keeps the session; cross-host drops it.
+        assert!(db.refresh_url_if_stopped(id, "https://cdn.example.com/b.bin", true).unwrap());
+        assert_eq!(db.get_download(id).unwrap().cookies.as_deref(), Some("sid=secret"));
+        assert!(db
+            .set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Failed)
+            .unwrap());
+        assert!(db.refresh_url_if_stopped(id, "https://else.example.net/b.bin", false).unwrap());
+        assert_eq!(db.get_download(id).unwrap().cookies, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_url_keeps_paused_row_paused() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-refresh-p-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap();
+        let mut download = row("https://cdn.example.com/old.bin", "p.bin", save);
+        let id = match db.insert_download_deduped(&mut download).unwrap() {
+            InsertDownloadResult::Created(id) => id,
+            InsertDownloadResult::Existing(_) => panic!("fixture must create a row"),
+        };
+        assert!(db
+            .set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Paused)
+            .unwrap());
+
+        assert!(db.refresh_url_if_stopped(id, "https://cdn.example.com/new.bin", true).unwrap());
+        let row = db.get_download(id).unwrap();
+        assert_eq!(row.url, "https://cdn.example.com/new.bin");
+        assert_eq!(row.status, DownloadStatus::Paused, "a paused row stays user-paused");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_url_rejects_live_queued_and_completed_rows() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-refresh-r-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap();
+        for (index, status) in [
+            DownloadStatus::Downloading,
+            DownloadStatus::Merging,
+            DownloadStatus::Queued,
+            DownloadStatus::Completed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut download = row(
+                &format!("https://cdn.example.com/{index}.bin"),
+                &format!("r{index}.bin"),
+                save,
+            );
+            let id = match db.insert_download_deduped(&mut download).unwrap() {
+                InsertDownloadResult::Created(id) => id,
+                InsertDownloadResult::Existing(_) => panic!("fixture must create a row"),
+            };
+            assert!(db.set_status_if_current(id, &[DownloadStatus::Queued], &status).unwrap());
+            assert!(
+                !db.refresh_url_if_stopped(id, "https://cdn.example.com/swapped.bin", true)
+                    .unwrap(),
+                "{status:?} must reject a url refresh"
+            );
+            assert_eq!(
+                db.get_download(id).unwrap().url,
+                format!("https://cdn.example.com/{index}.bin"),
+                "{status:?} row url must be untouched"
+            );
+        }
+        assert!(!db
+            .refresh_url_if_stopped(999_999, "https://cdn.example.com/x.bin", true)
+            .unwrap());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

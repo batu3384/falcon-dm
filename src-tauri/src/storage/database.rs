@@ -173,6 +173,9 @@ impl Database {
                  ALTER TABLE downloads ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
                  ALTER TABLE downloads ADD COLUMN retry_at INTEGER;",
             ),
+            // v5 — optional user-supplied checksum (`algo:hex`, sha256 or md5)
+            // verified against the finished file before it moves into place.
+            M::up("ALTER TABLE downloads ADD COLUMN expected_hash TEXT;"),
         ]);
         migrations.to_latest(&mut conn).map_err(|e| {
             DatabaseError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
@@ -207,6 +210,7 @@ mod tests {
             archived: false,
             attempts: 0,
             retry_at: None,
+            expected_hash: None,
         }
     }
 
@@ -898,6 +902,83 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v4_database_migrates_to_v5_without_losing_rows() {
+        let temp_dir = std::env::temp_dir().join(format!("falcon_v4_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        {
+            // Schema as shipped at v4 (retry columns present, no expected_hash).
+            let conn = rusqlite::Connection::open(temp_dir.join("falcon_dm.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE downloads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL,
+                    filename TEXT NOT NULL, save_path TEXT NOT NULL,
+                    total_size INTEGER DEFAULT 0, downloaded_size INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'Queued', category TEXT DEFAULT 'Other',
+                    speed REAL DEFAULT 0.0, segments INTEGER DEFAULT 8,
+                    priority INTEGER DEFAULT 1, created_at TEXT NOT NULL,
+                    completed_at TEXT, error_message TEXT, referrer TEXT,
+                    user_agent TEXT, cookies TEXT,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    attempts INTEGER NOT NULL DEFAULT 0, retry_at INTEGER);
+                 CREATE INDEX idx_downloads_status ON downloads(status);
+                 CREATE INDEX idx_downloads_category ON downloads(category);
+                 CREATE INDEX idx_downloads_archived ON downloads(archived);
+                 CREATE UNIQUE INDEX idx_downloads_active_url_unique ON downloads(url)
+                   WHERE status IN ('Queued', 'Downloading', 'Paused', 'Merging')
+                     AND archived = 0;
+                 INSERT INTO downloads (url, filename, save_path, status, created_at)
+                   VALUES ('https://example.com/v4.zip', 'v4.zip', '/tmp', 'Completed',
+                           '2026-07-30T13:00:00Z');
+                 INSERT INTO downloads (url, filename, save_path, status, created_at)
+                   VALUES ('https://example.com/v4b.zip', 'v4b.zip', '/tmp', 'Queued',
+                           '2026-07-30T13:01:00Z');
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+        let db = Database::init(&temp_dir).expect("v4 → v5 migration");
+        let rows = db.get_downloads(&DownloadFilter::default()).unwrap();
+        assert_eq!(rows.len(), 2, "both pre-migration rows must survive");
+        assert!(rows.iter().all(|row| row.expected_hash.is_none()));
+        let conn = db.conn.get().unwrap();
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'expected_hash'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1, "v5 must add the expected_hash column");
+        let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert!(version >= 5, "user_version should reach 5, got {version}");
+        drop(conn);
+        drop(db);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn expected_hash_roundtrips_insert_read_and_full_update() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("hashed.bin");
+        download.expected_hash =
+            Some("sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into());
+        let id = db.insert_download(&download).unwrap();
+        let row = db.get_download(id).unwrap();
+        assert_eq!(row.expected_hash.as_deref(), download.expected_hash.as_deref());
+
+        // A full-row write (move_download uses it) must not drop the hash.
+        db.update_download(id, &row).unwrap();
+        assert_eq!(
+            db.get_download(id).unwrap().expected_hash.as_deref(),
+            download.expected_hash.as_deref()
+        );
+
+        // Rows without a hash stay NULL, not an empty string.
+        let plain = db.insert_download(&create_test_download("plain.bin")).unwrap();
+        assert_eq!(db.get_download(plain).unwrap().expected_hash, None);
     }
 
     #[test]

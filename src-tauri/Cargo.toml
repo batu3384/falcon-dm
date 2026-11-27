@@ -70,6 +70,10 @@ tauri-plugin-single-instance = "2.5.5"
 tauri-plugin-window-state = "2.5.0"
 libc = "0.2"
 percent-encoding = "2"
+# sha2 + md-5: streaming checksum verification of finished files. Both stay on
+# the digest-0.10 line so one generic hasher covers SHA-256 and MD5.
+sha2 = "0.10"
+md-5 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

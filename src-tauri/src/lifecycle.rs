@@ -18,9 +18,9 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
@@ -261,12 +261,128 @@ impl SleepAssertion {
     }
 }
 
+/// Fires once when observed worker activity reaches a fully empty queue.
+#[derive(Default)]
+struct CompletionDrainDetector {
+    activity_version: u64,
+    armed: bool,
+}
+
+impl CompletionDrainDetector {
+    fn observe(
+        &mut self,
+        activity_version: u64,
+        active_count: u64,
+        queued_count: u64,
+        paused_count: u64,
+    ) -> bool {
+        if activity_version != self.activity_version {
+            self.activity_version = activity_version;
+            self.armed = true;
+        }
+        if active_count > 0 || !self.armed {
+            return false;
+        }
+        self.armed = false;
+        queued_count == 0 && paused_count == 0
+    }
+}
+
+fn validate_completion_script(
+    raw_path: &str,
+    allowed_roots: &[std::path::PathBuf],
+) -> Result<std::path::PathBuf, String> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err("Completion script path is empty".into());
+    }
+    let expanded = util::expand_tilde(raw_path);
+    if !expanded.is_absolute() {
+        return Err("Completion script path must be absolute".into());
+    }
+    let path =
+        expanded.canonicalize().map_err(|e| format!("Completion script does not exist: {e}"))?;
+    let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if !metadata.is_file() {
+        return Err("Completion script must be a file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err("Completion script is not executable".into());
+        }
+    }
+    let allowed = allowed_roots
+        .iter()
+        .any(|root| root.canonicalize().ok().is_some_and(|canonical| path.starts_with(canonical)));
+    if !allowed {
+        return Err("Completion script is outside the allowed locations".into());
+    }
+    Ok(path)
+}
+
+fn completion_script_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home);
+    }
+    roots.push(std::path::PathBuf::from("/opt/homebrew/bin"));
+    roots.push(std::path::PathBuf::from("/usr/local/bin"));
+    roots
+}
+
+/// Reap the child without blocking the queue loop; nothing is routed through a shell.
+fn spawn_detached(label: &str, command: &mut std::process::Command) -> Result<(), String> {
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Could not start {label}: {e}"))?;
+    let label = label.to_string();
+    std::thread::spawn(move || match child.wait() {
+        Ok(status) if !status.success() => log::warn!("{label} exited with {status}"),
+        Err(e) => log::warn!("{label} could not be reaped: {e}"),
+        _ => {}
+    });
+    Ok(())
+}
+
+fn execute_completion_action(settings: &Settings) -> Result<(), String> {
+    match settings.completion_action.as_str() {
+        "none" => Ok(()),
+        "sleep" => {
+            #[cfg(target_os = "macos")]
+            {
+                let mut command = std::process::Command::new("/usr/bin/osascript");
+                command.arg("-e").arg("tell application \"System Events\" to sleep");
+                spawn_detached("system sleep", &mut command)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err("Sleep completion action is only supported on macOS".into())
+            }
+        }
+        "script" => {
+            let script = validate_completion_script(
+                &settings.completion_script,
+                &completion_script_roots(),
+            )?;
+            let mut command = std::process::Command::new(script);
+            spawn_detached("completion script", &mut command)
+        }
+        other => Err(format!("Unknown completion action: {other}")),
+    }
+}
+
 fn spawn_queue_loop(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         #[cfg(target_os = "macos")]
         let mut sleep_assertion = SleepAssertion::default();
+        let mut completion_drain = CompletionDrainDetector::default();
         loop {
             interval.tick().await;
             // One panic must not freeze download management.
@@ -281,13 +397,101 @@ fn spawn_queue_loop(app_handle: tauri::AppHandle) {
                 Ok(Err(e)) => log::warn!("queue tick failed: {e}"),
                 Err(panic) => log::error!("queue tick panicked, continuing: {panic:?}"),
             }
+
+            let state = app_handle.state::<AppState>();
+            let active_count = state.queue.active_ids().len() as u64;
             #[cfg(target_os = "macos")]
-            sleep_assertion.update(!app_handle.state::<AppState>().queue.active_ids().is_empty());
+            sleep_assertion.update(active_count > 0);
+            let Ok(stats) = state.db.download_stats() else {
+                log::warn!("completion action check could not read download stats");
+                continue;
+            };
+            // Drain semantics: Completed and Failed both count as done; Queued or
+            // Paused rows mean work remains, consume that drain, and only new worker
+            // activity can arm the one-shot action again.
+            if completion_drain.observe(
+                state.queue.activity_version(),
+                active_count,
+                stats.queued,
+                stats.paused,
+            ) {
+                let settings = util::lock_or_recover(&state.settings).clone();
+                if settings.completion_action != "none" {
+                    log::info!("queue drained; running completion action");
+                    if let Err(e) = execute_completion_action(&settings) {
+                        log::warn!("completion action did not start: {e}");
+                    }
+                }
+            }
         }
     });
 }
 
 const TRAY_ID: &str = "main";
+
+/// Decimal like `DEFAULT_LIMIT_KBPS` in src/lib/speedLimit.ts: exactly 1 MB/s.
+const DEFAULT_SPEED_LIMIT_KBPS: u32 = 1000;
+
+/// `(new limit, new memory)` for one speed-limit toggle. Turning off captures
+/// the live value; turning on restores the memory or the 1 MB/s default.
+fn speed_limit_toggle_next(current: u32, last: u32) -> (u32, u32) {
+    if current > 0 {
+        (0, current)
+    } else {
+        let restore = if last > 0 { last } else { DEFAULT_SPEED_LIMIT_KBPS };
+        (restore, restore)
+    }
+}
+
+/// Tray mirror of the toolbar snail toggle: same settings field, same live
+/// application through `QueueManager::apply_settings`. The frontend picks the
+/// change up on its stats poll.
+fn apply_speed_limit_toggle(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let mut settings = util::lock_or_recover(&state.settings).clone();
+    let (next, last) =
+        speed_limit_toggle_next(settings.speed_limit_kbps, settings.speed_limit_last_kbps);
+    settings.speed_limit_kbps = next;
+    settings.speed_limit_last_kbps = last;
+    if let Err(e) = settings.save(&app_data_dir()) {
+        log::error!("tray speed limit toggle could not save settings: {e}");
+        return;
+    }
+    state.queue.apply_settings(&settings);
+    *util::lock_or_recover(&state.settings) = settings;
+}
+
+fn rebuild_tray_menu(app: &AppHandle) -> Result<(), String> {
+    let lang = util::lock_or_recover(&app.state::<AppState>().ui_lang).clone();
+    let menu = tray_menu(app, &lang).map_err(|e| e.to_string())?;
+    app.tray_by_id(TRAY_ID)
+        .ok_or_else(|| "tray icon missing".to_string())?
+        .set_menu(Some(menu))
+        .map_err(|e| e.to_string())
+}
+
+/// The checkmark must follow limit changes from anywhere (Settings pane,
+/// toolbar toggle, tray). There is no settings-changed hook, so a cheap poll
+/// rebuilds the menu only when the state actually flips.
+fn spawn_tray_speed_limit_sync(app_handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last: Option<bool> = None;
+        loop {
+            interval.tick().await;
+            let state = app_handle.state::<AppState>();
+            let on = util::lock_or_recover(&state.settings).speed_limit_kbps > 0;
+            if last == Some(on) {
+                continue;
+            }
+            last = Some(on);
+            if let Err(e) = rebuild_tray_menu(&app_handle) {
+                log::warn!("tray speed limit sync could not rebuild the menu: {e}");
+            }
+        }
+    });
+}
 
 fn locale_is_turkish(lang: &str) -> bool {
     lang.trim().split(['-', '_', '.']).next().is_some_and(|tag| tag.eq_ignore_ascii_case("tr"))
@@ -298,11 +502,21 @@ fn tray_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
     let item = |id: &str, en: &str, turkish: &str| {
         MenuItem::with_id(app, id, if tr { turkish } else { en }, true, None::<&str>)
     };
+    let limit_on = util::lock_or_recover(&app.state::<AppState>().settings).speed_limit_kbps > 0;
     let show_i = item("show", "Show Falcon DM", "Falcon DM'i Göster")?;
+    let new_i = item("new", "New Download", "Yeni İndirme")?;
     let pause_i = item("pause", "Pause All", "Tümünü Duraklat")?;
     let resume_i = item("resume", "Resume All", "Tümünü Sürdür")?;
+    let speed_i = CheckMenuItem::with_id(
+        app,
+        "speedlimit",
+        if tr { "Hız Sınırı" } else { "Speed Limit" },
+        true,
+        limit_on,
+        None::<&str>,
+    )?;
     let quit_i = item("quit", "Quit", "Çıkış")?;
-    Menu::with_items(app, &[&show_i, &pause_i, &resume_i, &quit_i])
+    Menu::with_items(app, &[&show_i, &new_i, &pause_i, &resume_i, &speed_i, &quit_i])
 }
 
 fn setup_tray(app: &tauri::App, lang: &str) -> tauri::Result<()> {
@@ -314,6 +528,10 @@ fn setup_tray(app: &tauri::App, lang: &str) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "quit" => app.exit(0),
             "show" => crate::show_main_window(app),
+            "new" => {
+                crate::show_main_window(app);
+                let _ = app.emit("open-new-download", ());
+            }
             "pause" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -322,6 +540,15 @@ fn setup_tray(app: &tauri::App, lang: &str) -> tauri::Result<()> {
             }
             "resume" => {
                 crate::resume_all(app);
+            }
+            "speedlimit" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    apply_speed_limit_toggle(&app);
+                    if let Err(e) = rebuild_tray_menu(&app) {
+                        log::warn!("tray speed limit toggle could not rebuild the menu: {e}");
+                    }
+                });
             }
             _ => {}
         })
@@ -428,6 +655,7 @@ pub fn run() {
             }
 
             setup_tray(app, &system_lang)?;
+            spawn_tray_speed_limit_sync(app_handle.clone());
             spawn_local_api(app_handle.clone());
             spawn_queue_loop(app_handle);
             Ok(())
@@ -457,6 +685,7 @@ pub fn run() {
             crate::commands::get_stats,
             crate::commands::move_download,
             crate::commands::archive_download,
+            crate::commands::refresh_download_url,
             crate::commands::open_folder,
             crate::commands::open_file,
             crate::commands::check_for_updates,
@@ -577,12 +806,8 @@ pub fn set_window_appearance(app: AppHandle, theme: Option<String>) -> Result<()
 
 #[tauri::command]
 pub fn set_ui_language(app: AppHandle, lang: String) -> Result<(), String> {
-    *util::lock_or_recover(&app.state::<AppState>().ui_lang) = lang.clone();
-    let menu = tray_menu(&app, &lang).map_err(|e| e.to_string())?;
-    app.tray_by_id(TRAY_ID)
-        .ok_or_else(|| "tray icon missing".to_string())?
-        .set_menu(Some(menu))
-        .map_err(|e| e.to_string())
+    *util::lock_or_recover(&app.state::<AppState>().ui_lang) = lang;
+    rebuild_tray_menu(&app)
 }
 
 #[cfg(test)]
@@ -624,6 +849,20 @@ mod tests {
         assert!(locale_is_turkish("tr_TR.UTF-8"));
         assert!(!locale_is_turkish("en"));
         assert!(!locale_is_turkish("en_US"));
+    }
+
+    #[test]
+    fn speed_limit_toggle_captures_and_restores_memory() {
+        // Off with no memory: the 1 MB/s default, which becomes the memory.
+        assert_eq!(speed_limit_toggle_next(0, 0), (1000, 1000));
+        // Off with a memory: restore exactly that value.
+        assert_eq!(speed_limit_toggle_next(0, 500), (500, 500));
+        // On: zero the limit but capture the live value for the next restore.
+        assert_eq!(speed_limit_toggle_next(500, 0), (0, 500));
+        assert_eq!(speed_limit_toggle_next(250, 500), (0, 250));
+        // A full round trip returns to the remembered value.
+        let (off, memory) = speed_limit_toggle_next(500, 0);
+        assert_eq!(speed_limit_toggle_next(off, memory), (500, 500));
     }
 
     #[test]
@@ -672,5 +911,109 @@ mod tests {
         assert!(temp.join("hls-7.falcondm-temp").exists());
         assert!(!temp.join("hls-3.falcondm-temp").exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completion_drain_fires_once_per_active_generation() {
+        let mut detector = CompletionDrainDetector::default();
+        assert!(!detector.observe(0, 0, 0, 0), "a queue that was never active must not fire");
+        assert!(!detector.observe(1, 1, 0, 0));
+        assert!(detector.observe(1, 0, 0, 0), "the first empty drain fires");
+        assert!(!detector.observe(1, 0, 0, 0), "the same drain must not fire twice");
+        assert!(!detector.observe(2, 1, 0, 0));
+        assert!(detector.observe(2, 0, 0, 0), "new activity re-arms the detector");
+    }
+
+    #[test]
+    fn queued_or_paused_work_consumes_a_drain_without_firing() {
+        let mut queued = CompletionDrainDetector::default();
+        assert!(!queued.observe(1, 1, 0, 0));
+        assert!(!queued.observe(1, 0, 1, 0), "queued work means the queue has not drained");
+        assert!(
+            !queued.observe(1, 0, 0, 0),
+            "removing that queued row later must not retroactively fire"
+        );
+
+        let mut paused = CompletionDrainDetector::default();
+        assert!(!paused.observe(1, 1, 0, 0));
+        assert!(!paused.observe(1, 0, 0, 1), "manually paused work suppresses the action");
+        assert!(!paused.observe(1, 0, 0, 0));
+    }
+
+    #[cfg(unix)]
+    fn executable_script(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = root.join(name);
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_script_validation_accepts_an_executable_inside_an_allowed_root() {
+        let root = std::env::temp_dir().join(format!("falcon-script-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = executable_script(&root, "done.sh");
+        let validated =
+            validate_completion_script(script.to_str().unwrap(), std::slice::from_ref(&root))
+                .unwrap();
+        assert_eq!(validated, script.canonicalize().unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_script_validation_rejects_missing_nonexecutable_and_outside_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("falcon-script-{}", uuid::Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!("falcon-script-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        assert!(validate_completion_script("", std::slice::from_ref(&root)).is_err());
+        assert!(validate_completion_script(
+            root.join("missing.sh").to_str().unwrap(),
+            std::slice::from_ref(&root),
+        )
+        .is_err());
+
+        let not_executable = root.join("plain.sh");
+        std::fs::write(&not_executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&not_executable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(validate_completion_script(
+            not_executable.to_str().unwrap(),
+            std::slice::from_ref(&root)
+        )
+        .is_err());
+
+        let outside_script = executable_script(&outside, "outside.sh");
+        assert!(validate_completion_script(
+            outside_script.to_str().unwrap(),
+            std::slice::from_ref(&root)
+        )
+        .is_err());
+        assert!(validate_completion_script(root.to_str().unwrap(), std::slice::from_ref(&root))
+            .is_err());
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_script_validation_follows_symlinks_before_the_root_check() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("falcon-script-{}", uuid::Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!("falcon-script-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_script = executable_script(&outside, "outside.sh");
+        let link = root.join("linked.sh");
+        symlink(&outside_script, &link).unwrap();
+        assert!(validate_completion_script(link.to_str().unwrap(), std::slice::from_ref(&root))
+            .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 }

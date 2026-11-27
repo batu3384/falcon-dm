@@ -112,6 +112,14 @@ impl JobContext {
     ) -> Result<PathBuf, DownloadError> {
         self.check_cancel()?;
         let reserved = dest.parent().map(|dir| self.reserved_names(dir)).unwrap_or_default();
+        // The expectation lives on the row, not in the job setup, so every
+        // engine (HTTP, HLS, yt-dlp) is covered without queue plumbing. Read
+        // it fresh: nothing about verification depends on the worker's start.
+        let expected_hash = self
+            .db
+            .as_ref()
+            .and_then(|db| db.get_download(self.id).ok())
+            .and_then(|row| row.expected_hash);
         let temp_owned = temp.to_path_buf();
         let dest_owned = dest.to_path_buf();
         let landed = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
@@ -120,6 +128,18 @@ impl JobContext {
             {
                 let _ = std::fs::remove_file(&temp_owned);
                 return Err(reason);
+            }
+            // Verify before the move: bytes that fail the check never reach
+            // the target folder. The temp is deleted because corrupt segments
+            // can neither be trusted nor incrementally repaired — a retry
+            // must re-download cleanly.
+            if let Some(expected) = expected_hash {
+                if let Err(reason) =
+                    crate::download::checksum::verify_file_hash(&temp_owned, &expected)
+                {
+                    let _ = std::fs::remove_file(&temp_owned);
+                    return Err(reason);
+                }
             }
             move_file_unique(&temp_owned, &dest_owned, &reserved)
         })
@@ -235,6 +255,104 @@ mod tests {
             result,
             Err(DownloadError::Fatal("Server returned an error page instead of a file".into()))
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Row carrying `expected_hash`, plus the JobContext a real worker would get.
+    fn hashed_job(
+        root: &Path,
+        filename: &str,
+        expected_hash: Option<&str>,
+    ) -> (crate::storage::Database, JobContext, i64) {
+        use crate::storage::models::{Download, DownloadStatus};
+        let db = crate::storage::Database::in_memory().unwrap();
+        let id = db
+            .insert_download(&Download {
+                id: None,
+                url: "https://example.com/x".into(),
+                filename: filename.into(),
+                save_path: root.to_str().unwrap().into(),
+                total_size: 0,
+                downloaded_size: 0,
+                status: DownloadStatus::Downloading,
+                category: DownloadCategory::Other,
+                speed: 0.0,
+                segments: 1,
+                priority: 1,
+                created_at: "t".into(),
+                completed_at: None,
+                error_message: None,
+                referrer: None,
+                user_agent: None,
+                cookies: None,
+                archived: false,
+                attempts: 0,
+                retry_at: None,
+                expected_hash: expected_hash.map(str::to_string),
+            })
+            .unwrap();
+        let (_cancel, rx) = watch::channel(false);
+        let ctx = JobContext::new(id, None, Some(db.clone()), rx, Arc::new(RateLimiter::new(0)));
+        (db, ctx, id)
+    }
+
+    fn write_temp(root: &Path, filename: &str, id: i64, payload: &[u8]) -> PathBuf {
+        let temp = root.join(format!(".{filename}.{id}.falcon.part"));
+        std::fs::write(&temp, payload).unwrap();
+        temp
+    }
+
+    #[tokio::test]
+    async fn finalize_fails_and_deletes_temp_when_checksum_mismatches() {
+        let root = scratch("sum-mismatch");
+        let payload = b"the actual file bytes";
+        // sha256 of different bytes (the empty string).
+        let wrong = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let (_db, ctx, id) = hashed_job(&root, "file.bin", Some(wrong));
+        let temp = write_temp(&root, "file.bin", id, payload);
+        let result = ctx.finalize(&temp, &root.join("file.bin")).await;
+        assert_eq!(result, Err(DownloadError::Fatal("ERR_CHECKSUM_MISMATCH".into())));
+        assert!(!temp.exists(), "untrusted bytes must not survive as a partial file");
+        assert!(!root.join("file.bin").exists(), "nothing may land in the target folder");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalize_lands_file_when_sha256_matches() {
+        let root = scratch("sum-match");
+        let payload = b"abc";
+        let (db, ctx, id) = hashed_job(
+            &root,
+            "file.bin",
+            Some("sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        );
+        let temp = write_temp(&root, "file.bin", id, payload);
+        let landed = ctx.finalize(&temp, &root.join("file.bin")).await.unwrap();
+        assert_eq!(std::fs::read(&landed).unwrap(), payload);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalize_lands_file_when_md5_matches() {
+        let root = scratch("sum-md5");
+        let payload = b"abc";
+        let (_db, ctx, id) =
+            hashed_job(&root, "file.bin", Some("md5:900150983cd24fb0d6963f7d28e17f72"));
+        let temp = write_temp(&root, "file.bin", id, payload);
+        let landed = ctx.finalize(&temp, &root.join("file.bin")).await.unwrap();
+        assert_eq!(std::fs::read(&landed).unwrap(), payload);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalize_without_a_hash_behaves_as_before() {
+        let root = scratch("sum-none");
+        let payload = b"anything at all";
+        let (_db, ctx, id) = hashed_job(&root, "file.bin", None);
+        let temp = write_temp(&root, "file.bin", id, payload);
+        let landed = ctx.finalize(&temp, &root.join("file.bin")).await.unwrap();
+        assert_eq!(std::fs::read(&landed).unwrap(), payload);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

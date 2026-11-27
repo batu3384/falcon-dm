@@ -287,6 +287,7 @@ mod tests {
                 archived: false,
                 attempts: 0,
                 retry_at: None,
+                expected_hash: None,
             })
             .unwrap();
         let progress = Progress::new(None, Some(db.clone()), id);

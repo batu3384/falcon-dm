@@ -4,12 +4,13 @@ use crate::pairing::PendingPair;
 use crate::settings::Settings;
 use crate::storage::models::{Download, DownloadFilter, DownloadStatus};
 use crate::util::{
-    app_data_dir, free_disk_space, full_file_path, lock_or_recover, move_file_exclusive,
-    resolve_download_target, sanitize_filename, validate_open_path, LEGACY_DEFAULT_API_TOKEN,
+    app_data_dir, free_disk_space, full_file_path, is_junk_media_url, lock_or_recover,
+    move_file_exclusive, normalize_media_url, resolve_download_target, sanitize_filename,
+    validate_enqueue_url, validate_open_path, LEGACY_DEFAULT_API_TOKEN,
 };
 use crate::{
-    current_settings, emit_row, enqueue_download, parse_extension_id, remove_download_artifacts,
-    resolve_download_save_path, AppState, ExternalDownloadPayload,
+    canonical_store_url, current_settings, emit_row, enqueue_download, parse_extension_id,
+    remove_download_artifacts, resolve_download_save_path, AppState, ExternalDownloadPayload,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -25,6 +26,7 @@ pub async fn add_download(
     cookies: Option<String>,
     cookie_url: Option<String>,
     format: Option<String>,
+    expected_hash: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Download, String> {
     let blank = |value: Option<String>| value.filter(|v| !v.trim().is_empty());
@@ -40,6 +42,7 @@ pub async fn add_download(
             title: None,
             format: blank(format),
             save_path: blank(save_path),
+            expected_hash: blank(expected_hash),
         },
     )
     .await?;
@@ -541,6 +544,118 @@ pub async fn archive_download(
     }
 }
 
+/// Validate and canonicalize a replacement link exactly like an enqueue:
+/// same SSRF rules (literal hosts only, no DNS — refreshing must work
+/// offline), same junk-media rejection, same transient-range stripping, one
+/// canonical spelling so the resume-state comparison compares equal strings.
+fn canonical_refresh_url(raw: &str) -> Result<String, String> {
+    if let Err(reason) = validate_enqueue_url(raw) {
+        return Err(if reason == "ERR_UNSUPPORTED_MAGNET" { reason } else { "invalid url".into() });
+    }
+    if is_junk_media_url(raw) {
+        return Err("not a real media url".into());
+    }
+    Ok(canonical_store_url(&normalize_media_url(raw.trim())))
+}
+
+fn write_state_bytes(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("state.tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
+/// Byte-exact resume only engages when the `.falcon.state` file names the same
+/// URL as the row (http.rs `read_state` compares them), so a refresh must
+/// carry the state file over to the new link. Only the `url` key is touched;
+/// the validator stays — it is what detects a different entity on the new
+/// link and makes the engine restart from zero. Returns the original bytes
+/// for rollback, `None` when there is nothing usable to preserve.
+fn rewrite_state_url(save_path: &str, filename: &str, id: i64, url: &str) -> Option<Vec<u8>> {
+    let path = crate::download::http::state_path_for(save_path, filename, id)?;
+    let original = std::fs::read(&path).ok()?;
+    let mut value: serde_json::Value = serde_json::from_slice(&original).ok()?;
+    {
+        let object = value.as_object_mut()?;
+        match object.get("url").and_then(|existing| existing.as_str()) {
+            Some(existing) if existing != url => {
+                object.insert("url".into(), serde_json::Value::String(url.to_string()));
+            }
+            // In sync already — or foreign json the engine would ignore anyway.
+            _ => return None,
+        }
+    }
+    let bytes = serde_json::to_vec(&value).ok()?;
+    write_state_bytes(&path, &bytes).ok()?;
+    Some(original)
+}
+
+fn restore_state_file(save_path: &str, filename: &str, id: i64, original: &[u8]) {
+    if let Some(path) = crate::download::http::state_path_for(save_path, filename, id) {
+        let _ = write_state_bytes(&path, original);
+    }
+}
+
+/// Enqueue only stores cookies whose origin matches the download, so the row's
+/// old URL is the provenance of its session. A refreshed link may keep the
+/// cookies only under the same rule — otherwise a cross-host paste would leak
+/// the old site's session to an attacker-controlled host.
+fn refresh_keeps_cookies(old_url: &str, new_url: &str) -> bool {
+    crate::cookie_url_matches_download(new_url, Some(old_url))
+}
+
+/// Replace the link of a stopped download with a fresh one. The `.part` file
+/// and its resume state are preserved, so a refresh of an expired signed link
+/// continues byte-exactly; when the new link serves a different entity, the
+/// engine's validator machinery discards the partial data and starts over.
+#[tauri::command]
+pub async fn refresh_download_url(
+    app: AppHandle,
+    id: i64,
+    new_url: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let url = canonical_refresh_url(&new_url)?;
+    let row = state.db.get_download(id).map_err(|e| e.to_string())?;
+    if !matches!(row.status, DownloadStatus::Failed | DownloadStatus::Paused) {
+        return Err("Only failed or paused downloads can be refreshed".into());
+    }
+    // A freshly paused row can still have a worker flushing its final resume
+    // state; rewriting underneath it would be overwritten with the old URL.
+    // Wait for the slot to release — never signal it: a download the user
+    // just resumed must keep running (the gate below rejects it instead).
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state.queue.is_active(id) {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .is_ok();
+    if !drained {
+        return Err("Download is still stopping; try refreshing it again shortly".into());
+    }
+    // State first: a stopped row cannot start before the requeue below, so no
+    // worker ever reads a half-migrated pair. The atomic update is the gate —
+    // when it loses a race, the state file goes back byte-exactly.
+    let backup = rewrite_state_url(&row.save_path, &row.filename, id, &url);
+    if !state
+        .db
+        .refresh_url_if_stopped(id, &url, refresh_keeps_cookies(&row.url, &url))
+        .map_err(|e| e.to_string())?
+    {
+        if let Some(original) = backup {
+            restore_state_file(&row.save_path, &row.filename, id, &original);
+        }
+        return Err("Download state changed before refresh".into());
+    }
+    emit_row(&app, &state.db, id);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Result<(), String> {
     let current = current_settings(&state);
@@ -692,6 +807,121 @@ fn read_clipboard_blocking() -> Result<String, String> {
     #[cfg(not(target_os = "macos"))]
     {
         Err("clipboard read is only available on macOS".into())
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::{canonical_refresh_url, restore_state_file, rewrite_state_url};
+
+    #[test]
+    fn canonical_refresh_url_normalizes_case_port_and_transient_params() {
+        assert_eq!(
+            canonical_refresh_url("HTTPS://CDN.EXAMPLE.COM:443/a.bin").as_deref(),
+            Ok("https://cdn.example.com/a.bin")
+        );
+        // Signed query bytes survive; only transient byte-range params are cut.
+        assert_eq!(
+            canonical_refresh_url(
+                "https://rr1---sn.example.com/videoplayback?itag=18&sig=abc%2Bd%2F%3D&range=0-100&sq=1"
+            )
+            .as_deref(),
+            Ok("https://rr1---sn.example.com/videoplayback?itag=18&sig=abc%2Bd%2F%3D")
+        );
+    }
+
+    #[test]
+    fn refresh_keeps_cookies_only_when_the_new_link_may_receive_them() {
+        use super::refresh_keeps_cookies;
+        let old = "https://cdn.example.com/file.bin?sig=old";
+        // Same host, fresh signature: cookies still belong to this origin.
+        assert!(refresh_keeps_cookies(old, "https://cdn.example.com/file.bin?sig=new"));
+        assert!(refresh_keeps_cookies(old, "https://cdn.example.com/other/path.bin"));
+        // A different host must never receive the old host's session cookies.
+        assert!(!refresh_keeps_cookies(old, "https://evil.example.net/file.bin"));
+        assert!(!refresh_keeps_cookies(old, "https://sub.cdn.example.com/file.bin"));
+        // Scheme downgrade must not carry them either.
+        assert!(!refresh_keeps_cookies(old, "http://cdn.example.com/file.bin"));
+        // YouTube page cookies legitimately flow to googlevideo streams.
+        assert!(refresh_keeps_cookies(
+            "https://www.youtube.com/watch?v=abc",
+            "https://rr1---sn-x.googlevideo.com/videoplayback?itag=18"
+        ));
+    }
+
+    #[test]
+    fn canonical_refresh_url_rejects_unsafe_and_junk_links() {
+        assert_eq!(
+            canonical_refresh_url("magnet:?xt=urn:btih:abc").unwrap_err(),
+            "ERR_UNSUPPORTED_MAGNET"
+        );
+        assert_eq!(canonical_refresh_url("http://127.0.0.1/x").unwrap_err(), "invalid url");
+        assert_eq!(canonical_refresh_url("ftp://example.com/x").unwrap_err(), "invalid url");
+        assert_eq!(canonical_refresh_url("not a url").unwrap_err(), "invalid url");
+        assert_eq!(
+            canonical_refresh_url("https://www.youtube.com/generate_204").unwrap_err(),
+            "not a real media url"
+        );
+    }
+
+    fn state_fixture(dir: &std::path::Path) -> (String, String) {
+        let save = dir.to_str().unwrap().to_string();
+        (save, "file.bin".to_string())
+    }
+
+    fn write_state(dir: &std::path::Path, id: i64, json: &str) -> std::path::PathBuf {
+        let (save, name) = state_fixture(dir);
+        let path = crate::download::http::state_path_for(&save, &name, id).unwrap();
+        std::fs::write(&path, json).unwrap();
+        path
+    }
+
+    #[test]
+    fn rewrite_state_url_swaps_only_the_url_and_returns_original_bytes() {
+        let dir = std::env::temp_dir().join(format!("falcon-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = r#"{"version":1,"url":"https://cdn.example.com/expired","total":100,"validator":"\"etag-1\"","segments":[[0,99,40]],"future_field":true}"#;
+        let path = write_state(&dir, 7, original);
+        let (save, name) = state_fixture(&dir);
+
+        let backup =
+            rewrite_state_url(&save, &name, 7, "https://cdn.example.com/fresh").expect("rewritten");
+        assert_eq!(backup, original.as_bytes(), "rollback needs the exact prior bytes");
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten["url"], "https://cdn.example.com/fresh");
+        assert_eq!(rewritten["validator"], "\"etag-1\"");
+        assert_eq!(rewritten["segments"], serde_json::json!([[0, 99, 40]]));
+        assert_eq!(rewritten["future_field"], true, "unknown keys survive engine upgrades");
+
+        // Rollback restores the file byte-exactly.
+        restore_state_file(&save, &name, 7, &backup);
+        assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rewrite_state_url_leaves_missing_foreign_and_synced_files_alone() {
+        let dir = std::env::temp_dir().join(format!("falcon-state-none-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (save, name) = state_fixture(&dir);
+
+        // No state file at all: nothing to preserve, no error.
+        assert!(rewrite_state_url(&save, &name, 3, "https://cdn.example.com/x").is_none());
+
+        // Corrupt json is foreign to the engine too — untouched.
+        let path = write_state(&dir, 3, "not json");
+        assert!(rewrite_state_url(&save, &name, 3, "https://cdn.example.com/x").is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), b"not json");
+
+        // Already in sync: no rewrite, no churn.
+        write_state(
+            &dir,
+            3,
+            r#"{"version":1,"url":"https://cdn.example.com/x","total":1,"segments":[[0,0,0]]}"#,
+        );
+        assert!(rewrite_state_url(&save, &name, 3, "https://cdn.example.com/x").is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

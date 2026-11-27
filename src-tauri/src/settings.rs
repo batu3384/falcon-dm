@@ -6,6 +6,17 @@ use std::fs;
 use url::Url;
 use uuid::Uuid;
 
+/// Monday through Sunday. Missing legacy settings deserialize to this all-active mask.
+pub const ALL_SCHEDULE_DAYS: [bool; 7] = [true; 7];
+
+fn default_schedule_days() -> [bool; 7] {
+    ALL_SCHEDULE_DAYS
+}
+
+fn default_completion_action() -> String {
+    "none".into()
+}
+
 // ponytail: per-site download profile. Matched against parsed URL origin
 // boundaries, so an attacker-controlled hostname cannot inherit another
 // site's cookies or headers.
@@ -72,6 +83,11 @@ pub struct Settings {
     pub api_token: String,
     #[serde(default)]
     pub speed_limit_kbps: u32,
+    /// Last non-zero limit, the backend equivalent of the frontend's
+    /// `falcon_speed_limit_last` localStorage memory. The tray toggle restores
+    /// it; the UI never sends it, so `preserve_command_owned_fields` owns it.
+    #[serde(default)]
+    pub speed_limit_last_kbps: u32,
     #[serde(default)]
     pub category_paths: HashMap<String, String>,
     #[serde(default)]
@@ -80,6 +96,15 @@ pub struct Settings {
     pub schedule_start: Option<String>,
     #[serde(default)]
     pub schedule_stop: Option<String>,
+    /// Monday-through-Sunday mask for the daily download window.
+    #[serde(default = "default_schedule_days")]
+    pub schedule_days: [bool; 7],
+    /// `none` | `sleep` | `script`; runs once when the active queue drains.
+    #[serde(default = "default_completion_action")]
+    pub completion_action: String,
+    /// Directly executable completion script (no shell interpolation).
+    #[serde(default)]
+    pub completion_script: String,
     /// Chrome/Edge extension IDs allowed to call the local API.
     #[serde(default)]
     pub allowed_extension_ids: Vec<String>,
@@ -111,10 +136,14 @@ impl Default for Settings {
             proxy: None,
             api_token: Uuid::new_v4().to_string(),
             speed_limit_kbps: 0,
+            speed_limit_last_kbps: 0,
             category_paths: HashMap::new(),
             schedule_active: false,
             schedule_start: None,
             schedule_stop: None,
+            schedule_days: ALL_SCHEDULE_DAYS,
+            completion_action: default_completion_action(),
+            completion_script: String::new(),
             allowed_extension_ids: Vec::new(),
             ytdlp_path: String::new(),
             ytdlp_use_browser_cookies: false,
@@ -129,8 +158,12 @@ impl Settings {
         self.max_concurrent_downloads = self.max_concurrent_downloads.clamp(1, 32);
         self.max_connections_per_server = self.max_connections_per_server.clamp(1, 16);
         self.speed_limit_kbps = self.speed_limit_kbps.min(1_048_576);
+        self.speed_limit_last_kbps = self.speed_limit_last_kbps.min(1_048_576);
         if !matches!(self.theme.as_str(), "system" | "light" | "dark") {
             self.theme = "system".into();
+        }
+        if !matches!(self.completion_action.as_str(), "none" | "sleep" | "script") {
+            self.completion_action = "none".into();
         }
         if self.proxy.as_ref().is_some_and(|proxy| proxy.trim().is_empty()) {
             self.proxy = None;
@@ -181,6 +214,13 @@ impl Settings {
     /// Pairing writes the allowlist; Settings / speed-toggle snapshots must not.
     pub fn preserve_command_owned_fields(&mut self, current: &Settings) {
         self.allowed_extension_ids = current.allowed_extension_ids.clone();
+        // The tray toggle owns the last-used memory; the UI round-trip never
+        // carries it. A nonzero limit the UI just saved becomes the new memory.
+        self.speed_limit_last_kbps = if self.speed_limit_kbps > 0 {
+            self.speed_limit_kbps
+        } else {
+            current.speed_limit_last_kbps
+        };
     }
 
     /// Live schedule lives on the queue. Stale Settings mutex must not win.
@@ -399,6 +439,28 @@ mod tests {
     }
 
     #[test]
+    fn speed_limit_memory_survives_ui_round_trips() {
+        let current =
+            Settings { speed_limit_kbps: 0, speed_limit_last_kbps: 500, ..Default::default() };
+        // A UI save carrying no limit keeps the backend memory.
+        let mut off = Settings { speed_limit_kbps: 0, ..Default::default() };
+        off.preserve_command_owned_fields(&current);
+        assert_eq!(off.speed_limit_last_kbps, 500);
+
+        // A nonzero limit the user just saved becomes the new memory.
+        let mut on = Settings { speed_limit_kbps: 250, ..Default::default() };
+        on.preserve_command_owned_fields(&current);
+        assert_eq!(on.speed_limit_last_kbps, 250);
+    }
+
+    #[test]
+    fn speed_limit_memory_is_capped_like_the_limit() {
+        let mut settings = Settings { speed_limit_last_kbps: 9_999_999, ..Default::default() };
+        settings.clamp_runtime_bounds();
+        assert_eq!(settings.speed_limit_last_kbps, 1_048_576);
+    }
+
+    #[test]
     fn blank_profile_cookies_survive_rename_not_delete() {
         let current = vec![
             DownloadProfile {
@@ -502,5 +564,36 @@ mod tests {
         assert!(loaded.load_corrupt);
         assert_eq!(fs::read_to_string(dir.join("settings.json")).unwrap(), raw);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_settings_default_to_all_days_and_no_completion_action() {
+        let raw = r#"{
+            "theme": "system",
+            "default_download_path": "/Users/demo/Downloads",
+            "max_concurrent_downloads": 3,
+            "max_connections_per_server": 8,
+            "proxy": null,
+            "schedule_active": true,
+            "schedule_start": "23:00",
+            "schedule_stop": "07:00"
+        }"#;
+        let dir = std::env::temp_dir().join(format!("falcon-settings-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.json"), raw).unwrap();
+        let settings = Settings::load(&dir);
+        assert_eq!(settings.schedule_days, [true; 7]);
+        assert_eq!(settings.completion_action, "none");
+        assert_eq!(settings.completion_script, "");
+        let persisted = fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(persisted.contains("\"schedule_days\""), "the migration is written back");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_completion_action_falls_back_to_none() {
+        let mut settings = Settings { completion_action: "poweroff".into(), ..Default::default() };
+        settings.clamp_runtime_bounds();
+        assert_eq!(settings.completion_action, "none");
     }
 }

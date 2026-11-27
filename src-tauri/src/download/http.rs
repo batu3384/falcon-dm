@@ -1325,6 +1325,7 @@ mod tests {
             archived: false,
             attempts: 1,
             retry_at: None,
+            expected_hash: None,
         })
         .unwrap()
     }
@@ -2336,6 +2337,104 @@ mod tests {
         );
         assert_eq!(std::fs::read(&landed).unwrap(), data);
         assert_eq!(std::fs::read(&dest).unwrap(), b"foreign");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Row whose only job is to carry an expected checksum for finalize.
+    fn insert_hashed_row(
+        db: &crate::storage::Database,
+        dir: &Path,
+        filename: &str,
+        expected_hash: &str,
+    ) -> i64 {
+        db.insert_download(&Download {
+            id: None,
+            url: "http://127.0.0.1/x".into(),
+            filename: filename.into(),
+            save_path: dir.to_str().unwrap().into(),
+            total_size: 0,
+            downloaded_size: 0,
+            status: DownloadStatus::Downloading,
+            category: DownloadCategory::Other,
+            speed: 0.0,
+            segments: 2,
+            priority: 1,
+            created_at: "t".into(),
+            completed_at: None,
+            error_message: None,
+            referrer: None,
+            user_agent: None,
+            cookies: None,
+            archived: false,
+            attempts: 0,
+            retry_at: None,
+            expected_hash: Some(expected_hash.into()),
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn download_completes_when_checksum_matches() {
+        let data = payload(6 * MIN_SEGMENT_BYTES as usize + 77);
+        let server =
+            serve(data.clone(), ServerOptions { etag: Some("\"v1\""), ..Default::default() }).await;
+        let dir = scratch("sum-ok");
+        let dest = dir.join("file.bin");
+        let db = crate::storage::Database::in_memory().unwrap();
+        let expected = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&data);
+            let mut hex = String::new();
+            for byte in hasher.finalize() {
+                hex.push_str(&format!("{byte:02x}"));
+            }
+            format!("sha256:{hex}")
+        };
+        let id = insert_hashed_row(&db, &dir, "file.bin", &expected);
+        let ctx = db_job(&db, id);
+        let _g = crate::util::allow_loopback_for_tests();
+        let landed = process_http(
+            &ctx,
+            &format!("{}/file.bin", server.base),
+            dest.to_str().unwrap(),
+            conns(4),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&landed).unwrap(), data);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_fails_and_saves_nothing() {
+        let data = payload(4000);
+        let server = serve(data.clone(), ServerOptions::default()).await;
+        let dir = scratch("sum-bad");
+        let dest = dir.join("file.bin");
+        let db = crate::storage::Database::in_memory().unwrap();
+        // sha256 of the empty string — never matches real bytes.
+        let id = insert_hashed_row(
+            &db,
+            &dir,
+            "file.bin",
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        );
+        let ctx = db_job(&db, id);
+        let _g = crate::util::allow_loopback_for_tests();
+        let result = process_http(
+            &ctx,
+            &format!("{}/file.bin", server.base),
+            dest.to_str().unwrap(),
+            conns(2),
+        )
+        .await;
+        assert_eq!(result, Err(DownloadError::Fatal("ERR_CHECKSUM_MISMATCH".into())));
+        assert!(!dest.exists(), "untrusted bytes must not land in the target folder");
+        assert!(
+            !part_path_for(dir.to_str().unwrap(), "file.bin", id).unwrap().exists(),
+            "the partial file cannot be resumed — its bytes are untrusted"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

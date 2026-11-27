@@ -3,7 +3,7 @@ use crate::download::job::JobContext;
 use crate::download::limiter::RateLimiter;
 use crate::download::ytdlp::YtDlpOptions;
 use crate::download::DownloadError;
-use crate::settings::Settings;
+use crate::settings::{Settings, ALL_SCHEDULE_DAYS};
 use crate::storage::{
     models::{Download, DownloadFilter, DownloadStatus},
     Database,
@@ -12,7 +12,7 @@ use crate::util::{
     is_dash_url, is_googlevideo_url, is_hls_url, is_youtube_watch_url, lock_or_recover,
     split_falcon_format, youtube_page_url_for_download, ytdlp_source_url_for_download,
 };
-use chrono::{Local, NaiveTime};
+use chrono::{Datelike, Local, NaiveTime, Weekday};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -67,18 +67,36 @@ pub fn validate_schedule(opts: &ScheduleOptions) -> Result<(), String> {
     Ok(())
 }
 
-/// True when `now` is outside the allowed download window.
-pub(crate) fn outside_schedule(opts: &ScheduleOptions, now: NaiveTime) -> bool {
+/// True when `now` is outside the allowed download window. Overnight windows
+/// belong to the weekday on which they start, so Tuesday 03:00 can be inside
+/// Monday 23:00 → 07:00 even when Tuesday itself is disabled.
+pub(crate) fn outside_schedule(
+    opts: &ScheduleOptions,
+    days: &[bool; 7],
+    weekday: Weekday,
+    now: NaiveTime,
+) -> bool {
     if !opts.active {
         return false;
     }
     let parse = |value: &Option<String>| {
         value.as_deref().and_then(|s| NaiveTime::parse_from_str(s, "%H:%M").ok())
     };
+    let day_index = weekday.num_days_from_monday() as usize;
     match (parse(&opts.start_time), parse(&opts.stop_time)) {
-        (Some(start), Some(stop)) if start <= stop => now < start || now >= stop,
+        (Some(start), Some(stop)) if start <= stop => {
+            !days[day_index] || now < start || now >= stop
+        }
         // Overnight window (23:00 → 07:00).
-        (Some(start), Some(stop)) => now < start && now >= stop,
+        (Some(start), Some(stop)) => {
+            if now >= start {
+                !days[day_index]
+            } else if now < stop {
+                !days[(day_index + 6) % 7]
+            } else {
+                true
+            }
+        }
         _ => false,
     }
 }
@@ -139,6 +157,8 @@ struct QueueSlots {
     active: HashMap<i64, ActiveJob>,
     removing: HashMap<i64, usize>,
     shutting_down: bool,
+    /// Monotonic worker-generation counter; even a very fast download is observed.
+    activity_version: u64,
 }
 
 type SharedSlots = Arc<Mutex<QueueSlots>>;
@@ -153,6 +173,7 @@ struct QueueOptions {
 
 pub struct QueueManager {
     schedule: Mutex<ScheduleOptions>,
+    schedule_days: Mutex<[bool; 7]>,
     max_concurrent: AtomicUsize,
     max_connections: AtomicUsize,
     options: Mutex<QueueOptions>,
@@ -174,6 +195,7 @@ impl QueueManager {
                 stop_time: None,
                 active: false,
             }),
+            schedule_days: Mutex::new(ALL_SCHEDULE_DAYS),
             max_concurrent: AtomicUsize::new(3),
             max_connections: AtomicUsize::new(8),
             options: Mutex::new(QueueOptions::default()),
@@ -190,6 +212,14 @@ impl QueueManager {
         lock_or_recover(&self.schedule).clone()
     }
 
+    pub fn set_schedule_days(&self, days: [bool; 7]) {
+        *lock_or_recover(&self.schedule_days) = days;
+    }
+
+    pub fn get_schedule_days(&self) -> [bool; 7] {
+        *lock_or_recover(&self.schedule_days)
+    }
+
     /// Apply user settings. The speed limit reaches running HTTP/HLS workers at
     /// once; connections and proxy apply from the next start or retry.
     pub fn apply_settings(&self, settings: &Settings) {
@@ -198,6 +228,7 @@ impl QueueManager {
         self.max_connections
             .store((settings.max_connections_per_server as usize).clamp(1, 16), Ordering::SeqCst);
         self.limiter.set_kbps(settings.speed_limit_kbps);
+        self.set_schedule_days(settings.schedule_days);
         let trimmed = |value: &str| {
             let value = value.trim();
             (!value.is_empty()).then(|| value.to_string())
@@ -223,6 +254,14 @@ impl QueueManager {
 
     pub fn active_ids(&self) -> Vec<i64> {
         lock_or_recover(&self.slots).active.keys().copied().collect()
+    }
+
+    pub(crate) fn activity_version(&self) -> u64 {
+        lock_or_recover(&self.slots).activity_version
+    }
+
+    fn note_activity(&self) {
+        lock_or_recover(&self.slots).activity_version += 1;
     }
 
     /// Once shutdown begins, no queued row may claim a new worker slot.
@@ -346,7 +385,9 @@ impl QueueManager {
         }
         live.retain(|row| row.id.is_some_and(|id| running.contains(&id)));
 
-        if outside_schedule(&schedule, Local::now().time()) {
+        let now = Local::now();
+        let schedule_days = self.get_schedule_days();
+        if outside_schedule(&schedule, &schedule_days, now.weekday(), now.time()) {
             for id in running {
                 self.request_stop(id, StopReason::Requeue);
             }
@@ -457,6 +498,7 @@ impl QueueManager {
             lock_or_recover(&self.slots).active.remove(&id);
             return false;
         }
+        self.note_activity();
         crate::emit_row(app, db, id);
 
         let out_path = crate::util::full_file_path(&row.save_path, &row.filename);
@@ -690,6 +732,7 @@ mod tests {
             archived: false,
             attempts: 0,
             retry_at: None,
+            expected_hash: None,
         }
     }
 
@@ -843,6 +886,7 @@ mod tests {
                 archived: false,
                 attempts: 0,
                 retry_at: None,
+                expected_hash: None,
             })
             .unwrap();
         let qm = QueueManager::new();
@@ -918,26 +962,63 @@ mod tests {
     #[test]
     fn schedule_window_handles_daytime_and_overnight() {
         let t = |s: &str| NaiveTime::parse_from_str(s, "%H:%M").unwrap();
+        let all_days = [true; 7];
         let day = ScheduleOptions {
             start_time: Some("09:00".into()),
             stop_time: Some("17:00".into()),
             active: true,
         };
-        assert!(outside_schedule(&day, t("08:59")));
-        assert!(!outside_schedule(&day, t("09:00")));
-        assert!(!outside_schedule(&day, t("16:59")));
-        assert!(outside_schedule(&day, t("17:00")));
+        assert!(outside_schedule(&day, &all_days, chrono::Weekday::Mon, t("08:59")));
+        assert!(!outside_schedule(&day, &all_days, chrono::Weekday::Mon, t("09:00")));
+        assert!(!outside_schedule(&day, &all_days, chrono::Weekday::Mon, t("16:59")));
+        assert!(outside_schedule(&day, &all_days, chrono::Weekday::Mon, t("17:00")));
         let night = ScheduleOptions {
             start_time: Some("23:00".into()),
             stop_time: Some("07:00".into()),
             active: true,
         };
-        assert!(!outside_schedule(&night, t("23:30")));
-        assert!(!outside_schedule(&night, t("03:00")));
-        assert!(outside_schedule(&night, t("07:00")));
-        assert!(outside_schedule(&night, t("12:00")));
+        assert!(!outside_schedule(&night, &all_days, chrono::Weekday::Mon, t("23:30")));
+        assert!(!outside_schedule(&night, &all_days, chrono::Weekday::Tue, t("03:00")));
+        assert!(outside_schedule(&night, &all_days, chrono::Weekday::Tue, t("07:00")));
+        assert!(outside_schedule(&night, &all_days, chrono::Weekday::Tue, t("12:00")));
         let off = ScheduleOptions { active: false, ..night };
-        assert!(!outside_schedule(&off, t("12:00")));
+        assert!(!outside_schedule(&off, &all_days, chrono::Weekday::Tue, t("12:00")));
+    }
+
+    #[test]
+    fn daytime_schedule_respects_the_selected_weekday() {
+        let t = |s: &str| NaiveTime::parse_from_str(s, "%H:%M").unwrap();
+        let monday_only = [true, false, false, false, false, false, false];
+        let day = ScheduleOptions {
+            start_time: Some("09:00".into()),
+            stop_time: Some("17:00".into()),
+            active: true,
+        };
+        assert!(!outside_schedule(&day, &monday_only, chrono::Weekday::Mon, t("10:00")));
+        assert!(outside_schedule(&day, &monday_only, chrono::Weekday::Tue, t("10:00")));
+        assert!(outside_schedule(&day, &[false; 7], chrono::Weekday::Mon, t("10:00")));
+    }
+
+    #[test]
+    fn overnight_schedule_belongs_to_the_weekday_it_started_on() {
+        let t = |s: &str| NaiveTime::parse_from_str(s, "%H:%M").unwrap();
+        let monday_only = [true, false, false, false, false, false, false];
+        let night = ScheduleOptions {
+            start_time: Some("23:00".into()),
+            stop_time: Some("07:00".into()),
+            active: true,
+        };
+        // Monday evening starts the window; Tuesday morning is its tail.
+        assert!(!outside_schedule(&night, &monday_only, chrono::Weekday::Mon, t("23:30")));
+        assert!(!outside_schedule(&night, &monday_only, chrono::Weekday::Tue, t("03:00")));
+        assert!(outside_schedule(&night, &monday_only, chrono::Weekday::Tue, t("07:00")));
+        // Tuesday evening and Wednesday morning do not belong to a Monday window.
+        assert!(outside_schedule(&night, &monday_only, chrono::Weekday::Tue, t("23:30")));
+        assert!(outside_schedule(&night, &monday_only, chrono::Weekday::Wed, t("03:00")));
+        // Monday 03:00 is only inside when Sunday is also enabled.
+        assert!(outside_schedule(&night, &monday_only, chrono::Weekday::Mon, t("03:00")));
+        let sunday_and_monday = [true, false, false, false, false, false, true];
+        assert!(!outside_schedule(&night, &sunday_and_monday, chrono::Weekday::Mon, t("03:00")));
     }
 
     #[test]
