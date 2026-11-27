@@ -18,10 +18,11 @@ use crate::download::job::JobContext;
 use crate::download::limiter::{cancelled, sleep_or_cancel};
 use crate::download::DownloadError;
 use crate::util::{
-    free_disk_space, is_generic_download_filename, lock_or_recover, validate_fetch_url_async,
+    free_disk_space, is_generic_download_filename, lock_or_recover, same_file_inode,
+    validate_completed_file_named_with_hints, validate_fetch_url_async, FinalizeHints,
 };
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, RETRY_AFTER};
+use reqwest::header::{HeaderMap, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -41,10 +42,34 @@ const FLUSH_BYTES: usize = 512 * 1024;
 /// Consecutive failures without progress before a connection gives up.
 const SEGMENT_MAX_FAILURES: u32 = 4;
 const STATE_SAVE_EVERY: Duration = Duration::from_secs(3);
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook invoked inside every persist, cloned on the runtime thread
+    /// before the blocking task spawns. Lets a test imitate a slow disk.
+    static PERSIST_TEST_HOOK: std::cell::RefCell<Option<Arc<dyn Fn() + Send + Sync>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Test override for the periodic save interval (milliseconds, 0 = off).
+    static STATE_SAVE_EVERY_TEST_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn state_save_every() -> Duration {
+    #[cfg(test)]
+    {
+        let ms = STATE_SAVE_EVERY_TEST_MS.with(|c| c.get());
+        if ms > 0 {
+            return Duration::from_millis(ms);
+        }
+    }
+    STATE_SAVE_EVERY
+}
 const STATE_VERSION: u32 = 1;
 /// Head-room kept free on the volume.
 const DISK_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
 const REMOTE_CHANGED: &str = "ERR_REMOTE_CHANGED";
+/// Stable codes the UI localizes; the English sentence lives in the locales.
+const PARTIAL_RESPONSE: &str = "ERR_PARTIAL_RESPONSE";
+const CONTENT_ENCODING: &str = "ERR_CONTENT_ENCODING";
 
 fn hidden_sibling(destination: &Path, download_id: i64, suffix: &str) -> Option<PathBuf> {
     let parent = destination.parent()?;
@@ -149,9 +174,10 @@ pub(crate) fn plan_segments(total: u64, connections: usize) -> Vec<(u64, u64)> {
         .collect()
 }
 
-fn load_state(path: &Path, url: &str, part: &Path) -> Option<SavedState> {
+/// Parse and validate a state file: right version, same download, and ranges
+/// tiling `[0, total)` exactly. Says nothing about the `.part` file itself.
+fn read_state(path: &Path, url: &str) -> Option<SavedState> {
     let state: SavedState = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    let part_len = std::fs::metadata(part).ok()?.len();
     let mut tiles: Vec<[u64; 3]> = state.segments.clone();
     tiles.sort_by_key(|tile| tile[0]);
     let mut cursor = 0u64;
@@ -162,18 +188,33 @@ fn load_state(path: &Path, url: &str, part: &Path) -> Option<SavedState> {
         }
         cursor = end + 1;
     }
-    (state.version == STATE_VERSION
-        && state.url == url
-        && state.total > 0
-        && cursor == state.total
-        && part_len == state.total)
+    (state.version == STATE_VERSION && state.url == url && state.total > 0 && cursor == state.total)
         .then_some(state)
 }
 
+fn load_state(path: &Path, url: &str, part: &Path) -> Option<SavedState> {
+    let part_len = std::fs::metadata(part).ok()?.len();
+    let state = read_state(path, url)?;
+    (part_len == state.total).then_some(state)
+}
+
+/// A valid state whose every range is complete, without requiring the `.part`
+/// file: proof that a crashed finalize had already delivered all bytes.
+fn load_complete_state_without_part(path: &Path, url: &str) -> Option<SavedState> {
+    let state = read_state(path, url)?;
+    state.segments.iter().all(|[start, end, done]| *done == end - start + 1).then_some(state)
+}
+
 fn save_state(path: &Path, state: &SavedState) -> Result<(), String> {
+    use std::io::Write;
     let tmp = path.with_extension("state.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(state).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(state).map_err(|e| e.to_string())?;
+    {
+        let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(&bytes).map_err(|e| e.to_string())?;
+        // Durable before the rename, so a crash never leaves a half-written state.
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
@@ -286,18 +327,34 @@ impl Shared {
         Some(tail)
     }
 
-    async fn persist(&self, state_path: &Path) {
+    /// Start a state save in the blocking pool. Callers decide when to await
+    /// the handle — the periodic saver must never pause the worker select loop.
+    fn spawn_persist(
+        &self,
+        state_path: &Path,
+    ) -> tokio::task::JoinHandle<Result<(), DownloadError>> {
         let file = self.file.clone();
         // Snapshot first, then sync: the state never claims bytes the disk lacks.
         let snapshot = self.snapshot();
         let path = state_path.to_path_buf();
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = file.sync_data();
-            if let Err(error) = save_state(&path, &snapshot) {
-                log::warn!("resume state not saved: {error}");
+        #[cfg(test)]
+        let hook = PERSIST_TEST_HOOK.with(|h| h.borrow().clone());
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(hook) = hook {
+                hook();
             }
+            // A failed sync means the state file would claim bytes the disk may
+            // not have. Skip the save; the error ends the download instead.
+            file.sync_data().map_err(|e| io_error("sync failed", &e))?;
+            save_state(&path, &snapshot).map_err(DownloadError::fatal)
         })
-        .await;
+    }
+
+    async fn persist(&self, state_path: &Path) -> Result<(), DownloadError> {
+        self.spawn_persist(state_path)
+            .await
+            .map_err(|e| DownloadError::fatal(format!("persist task failed: {e}")))?
     }
 }
 
@@ -314,14 +371,57 @@ fn retry_after(response: &Response) -> Option<Duration> {
     Some(Duration::from_secs(seconds.clamp(1, 30)))
 }
 
+/// Requests ask for `identity` only. A server that compresses anyway breaks
+/// the byte-range math (and even a plain stream would store gzip bytes under
+/// the original name), so its responses are unusable for a download manager.
+fn check_content_encoding(headers: &HeaderMap) -> Result<(), DownloadError> {
+    let Some(value) = headers.get(reqwest::header::CONTENT_ENCODING) else {
+        return Ok(());
+    };
+    let Ok(encoded) = value.to_str() else {
+        return Err(DownloadError::fatal(CONTENT_ENCODING));
+    };
+    let encoded = encoded.trim();
+    if encoded.is_empty() || encoded.eq_ignore_ascii_case("identity") {
+        return Ok(());
+    }
+    Err(DownloadError::fatal(CONTENT_ENCODING))
+}
+
+/// The response labels itself as HTML: a strong hint that a small "file" is
+/// really an error page, even when its size technically matches.
+fn response_is_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/html"))
+}
+
 /// Does this response carry the bytes starting at `pos` of the same entity?
-fn check_range_response(response: &Response, pos: u64, total: u64) -> Result<(), DownloadError> {
+/// `validator` is the entity tag the partial file was downloaded under: a
+/// server may legally ignore If-Range, so the response's own validator is the
+/// only proof the entity did not change underneath us.
+fn check_range_response(
+    response: &Response,
+    pos: u64,
+    total: u64,
+    validator: Option<&str>,
+) -> Result<(), DownloadError> {
     let status = response.status();
     if status == StatusCode::PARTIAL_CONTENT {
         return match parse_content_range(response.headers()) {
             Some((start, _, entity_total))
                 if start == pos && entity_total.is_none_or(|t| t == total) =>
             {
+                check_content_encoding(response.headers())?;
+                if let (Some(expected), Some(actual)) =
+                    (validator, entity_validator(response.headers()))
+                {
+                    if actual != expected {
+                        return Err(DownloadError::fatal(REMOTE_CHANGED));
+                    }
+                }
                 Ok(())
             }
             _ => Err(DownloadError::fatal(REMOTE_CHANGED)),
@@ -361,7 +461,7 @@ async fn open_range(
         // The caller races this against cancel, so the wait is interruptible.
         tokio::time::sleep(wait).await;
     }
-    check_range_response(&response, pos, shared.total)?;
+    check_range_response(&response, pos, shared.total, shared.validator.as_deref())?;
     *client = Some((host_of(&final_url), used));
     *lock_or_recover(&shared.final_url) = final_url;
     Ok(response)
@@ -690,7 +790,7 @@ async fn run_ranged(
     ctx.progress.set_total(job.total);
     ctx.progress.set_downloaded(already);
     ctx.progress.set_connections(connections as u32);
-    shared.persist(&temp.state).await;
+    shared.persist(&temp.state).await?;
 
     let results = {
         let mut ready = Some((ready_segment, ready_response, Some((ready_host, ready_client))));
@@ -698,17 +798,49 @@ async fn run_ranged(
             (0..connections).map(|_| run_connection(&shared, ctx, ready.take())),
         );
         tokio::pin!(workers);
-        let mut save = tokio::time::interval(STATE_SAVE_EVERY);
+        let mut save = tokio::time::interval(state_save_every());
         save.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         save.tick().await;
-        loop {
+        // Saves run in the blocking pool beside the workers: a slow disk must
+        // never pause network reads or cancellation. At most one is in flight;
+        // a tick that finds one still running simply skips its own save.
+        let mut in_flight: Option<tokio::task::JoinHandle<Result<(), DownloadError>>> = None;
+        let results = loop {
             tokio::select! {
                 results = &mut workers => break results,
-                _ = save.tick() => shared.persist(&temp.state).await,
+                _ = save.tick() => {
+                    if in_flight.as_ref().is_some_and(|handle| handle.is_finished()) {
+                        // Awaiting a finished task returns at once, so the
+                        // workers are not paused here either.
+                        match in_flight.take().unwrap().await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => return Err(error),
+                            Err(join) => {
+                                return Err(DownloadError::fatal(format!(
+                                    "persist task failed: {join}"
+                                )))
+                            }
+                        }
+                    }
+                    if in_flight.is_none() {
+                        in_flight = Some(shared.spawn_persist(&temp.state));
+                    }
+                }
+            }
+        };
+        // Serialize with the final save below: both write the same tmp file.
+        if let Some(handle) = in_flight.take() {
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(join) => {
+                    return Err(DownloadError::fatal(format!("persist task failed: {join}")))
+                }
             }
         }
+        results
     };
-    shared.persist(&temp.state).await;
+    shared.persist(&temp.state).await?;
 
     if !shared.complete() {
         ctx.check_cancel()?;
@@ -732,7 +864,8 @@ async fn run_ranged(
     ctx.progress.set_merging();
     let file = shared.file.clone();
     blocking(move || file.sync_all(), "sync failed").await?;
-    let landed = ctx.finalize(&temp.part, dest).await?;
+    let hints = FinalizeHints { expected_size: Some(total), ..Default::default() };
+    let landed = ctx.finalize_with_hints(&temp.part, dest, hints).await?;
     let _ = tokio::fs::remove_file(&temp.state).await;
     Ok(Attempt::Done(landed))
 }
@@ -799,6 +932,7 @@ async fn attempt(
         if !status.is_success() {
             return Err(DownloadError::from_status(status.as_u16()));
         }
+        check_content_encoding(opened.response.headers())?;
         if let Some(name) = dest
             .file_name()
             .and_then(|n| n.to_str())
@@ -807,33 +941,41 @@ async fn attempt(
             *dest = ctx.rename(dest, &name);
         }
         let temp = TempPaths::for_dest(dest, ctx.id)?;
-        // Ranged only when the server proves it: 206 from byte 0 with a total.
-        let total = (status == StatusCode::PARTIAL_CONTENT)
-            .then(|| parse_content_range(opened.response.headers()))
-            .flatten()
-            .and_then(|(start, _, total)| if start == 0 { total } else { None })
-            .filter(|total| *total > 0);
-        let Some(total) = total else {
-            ensure_disk_space(dest, opened.response.content_length().unwrap_or(0))?;
-            download_stream(ctx, opened.response, &temp.part).await?;
-            ctx.progress.set_merging();
-            return Ok(Attempt::Done(ctx.finalize(&temp.part, dest).await?));
+        if status == StatusCode::PARTIAL_CONTENT {
+            // Ranged only when the server proves it: 206 from byte 0 with a
+            // concrete total. Anything else is a truncated portion, never the
+            // file — fail closed instead of streaming it into place.
+            let total = parse_content_range(opened.response.headers())
+                .and_then(|(start, _, total)| if start == 0 { total } else { None })
+                .filter(|total| *total > 0);
+            let Some(total) = total else {
+                return Err(DownloadError::fatal(PARTIAL_RESPONSE));
+            };
+            ensure_disk_space(dest, total)?;
+            let job = RangedJob {
+                initial: initial.clone(),
+                validator: entity_validator(opened.response.headers()),
+                segments: plan_segments(total, headers.max_connections)
+                    .into_iter()
+                    .map(|(start, end)| [start, end, 0])
+                    .collect(),
+                final_url: opened.final_url,
+                headers,
+                total,
+                ready: (0, opened.response, opened.client),
+                fresh: true,
+            };
+            return run_ranged(ctx, job, dest, &temp).await;
+        }
+        ensure_disk_space(dest, opened.response.content_length().unwrap_or(0))?;
+        // Capture the response facts before the body stream consumes it.
+        let hints = FinalizeHints {
+            expected_size: opened.response.content_length(),
+            response_is_html: response_is_html(opened.response.headers()),
         };
-        ensure_disk_space(dest, total)?;
-        let job = RangedJob {
-            initial: initial.clone(),
-            validator: entity_validator(opened.response.headers()),
-            segments: plan_segments(total, headers.max_connections)
-                .into_iter()
-                .map(|(start, end)| [start, end, 0])
-                .collect(),
-            final_url: opened.final_url,
-            headers,
-            total,
-            ready: (0, opened.response, opened.client),
-            fresh: true,
-        };
-        return run_ranged(ctx, job, dest, &temp).await;
+        download_stream(ctx, opened.response, &temp.part).await?;
+        ctx.progress.set_merging();
+        return Ok(Attempt::Done(ctx.finalize_with_hints(&temp.part, dest, hints).await?));
     };
 
     let next = saved.segments.iter().position(|[start, end, done]| *done < end - start + 1);
@@ -842,7 +984,8 @@ async fn attempt(
         ctx.progress.set_total(saved.total);
         ctx.progress.set_downloaded(saved.total);
         ctx.progress.set_merging();
-        let landed = ctx.finalize(&temp.part, dest).await?;
+        let hints = FinalizeHints { expected_size: Some(saved.total), ..Default::default() };
+        let landed = ctx.finalize_with_hints(&temp.part, dest, hints).await?;
         let _ = tokio::fs::remove_file(&temp.state).await;
         return Ok(Attempt::Done(landed));
     };
@@ -857,12 +1000,25 @@ async fn attempt(
         result = open(initial, initial, headers, &range, None) => result?,
         _ = cancelled(&mut cancel) => return Err(DownloadError::Cancelled),
     };
-    match check_range_response(&opened.response, start + done, saved.total) {
+    match check_range_response(
+        &opened.response,
+        start + done,
+        saved.total,
+        saved.validator.as_deref(),
+    ) {
         Ok(()) => {}
         Err(DownloadError::Fatal(reason)) if reason == REMOTE_CHANGED => {
             return Ok(Attempt::Restart)
         }
         Err(error) => return Err(error),
+    }
+    if saved.validator.is_none() {
+        // Without any validator a same-size change is undetectable, so the
+        // partial bytes can never be trusted. The probe above already proved
+        // the file is still there; only bandwidth is lost, not progress on a
+        // dead or changed server.
+        log::warn!("download {}: no validator in resume state, restarting from zero", ctx.id);
+        return Ok(Attempt::Restart);
     }
     let job = RangedJob {
         initial: initial.clone(),
@@ -877,6 +1033,42 @@ async fn attempt(
     run_ranged(ctx, job, dest, &temp).await
 }
 
+/// A crash inside finalize can leave proof that the download already finished.
+/// Either `.part` and the destination are the same file object (the move's
+/// hard-link happened, the unlink did not), or the move completed and only the
+/// `.state` file was never cleaned up. Detect both before the fresh branch
+/// would wipe the artifacts and download everything again.
+async fn recover_completed(temp: &TempPaths, dest: &Path, url: &str) -> Option<PathBuf> {
+    let landed = || Some(dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf()));
+    if same_file_inode(&temp.part, dest) {
+        temp.remove().await;
+        return landed();
+    }
+    if temp.part.exists() || !temp.state.exists() || !dest.exists() {
+        return None;
+    }
+    let (state_path, dest_owned, url) = (temp.state.clone(), dest.to_path_buf(), url.to_string());
+    let valid = tokio::task::spawn_blocking(move || {
+        let state = load_complete_state_without_part(&state_path, &url)?;
+        if std::fs::metadata(&dest_owned).ok()?.len() != state.total {
+            return None;
+        }
+        validate_completed_file_named_with_hints(
+            &dest_owned,
+            &dest_owned,
+            FinalizeHints { expected_size: Some(state.total), ..Default::default() },
+        )
+        .ok()?;
+        Some(())
+    })
+    .await
+    .ok()
+    .flatten();
+    valid?;
+    let _ = tokio::fs::remove_file(&temp.state).await;
+    landed()
+}
+
 /// Download `url` to `out_path`. Returns where the file finally landed (the
 /// name may differ: server-provided filename, or `name (1).ext` on a clash).
 pub async fn process_http(
@@ -889,10 +1081,17 @@ pub async fn process_http(
     let mut dest = PathBuf::from(out_path);
     let parent = dest.parent().ok_or_else(|| DownloadError::fatal("Invalid output path"))?;
     tokio::fs::create_dir_all(parent).await.map_err(|e| io_error("could not create folder", &e))?;
+    if let Ok(temp) = TempPaths::for_dest(&dest, ctx.id) {
+        if let Some(done) = recover_completed(&temp, &dest, initial.as_str()).await {
+            return Ok(done);
+        }
+    }
     // Restore before the ticker can publish or persist an empty new run: even
     // when the resume probe fails, the row keeps the bytes the state can resume.
+    // Compare canonical forms on both sides: the state file stores the parsed
+    // Url while the row may hold a non-canonical spelling of the same target.
     let mut saved = match TempPaths::for_dest(&dest, ctx.id) {
-        Ok(temp) => load_saved_state(&temp, url).await,
+        Ok(temp) => load_saved_state(&temp, initial.as_str()).await,
         Err(_) => None,
     };
     if let Some(state) = &saved {
@@ -941,6 +1140,14 @@ mod tests {
         slow_ms: u64,
         /// Close the socket without answering when the User-Agent contains this.
         drop_agent: Option<&'static str>,
+        /// Emit this Content-Range verbatim instead of the honest one.
+        content_range_override: Option<&'static str>,
+        /// Answer 206 without any Content-Range header.
+        omit_content_range: bool,
+        /// Label responses with this Content-Encoding (body stays raw).
+        content_encoding: Option<&'static str>,
+        /// Honor the Range even when If-Range does not match (broken CDN).
+        ignore_if_range: bool,
     }
 
     struct TestServer {
@@ -1003,7 +1210,11 @@ mod tests {
                     }
                     // If-Range with a stale validator → full 200, like a real server.
                     let range = match (range, header("if-range"), options.etag) {
-                        (Some(_), Some(sent), Some(current)) if sent != current => None,
+                        (Some(_), Some(sent), Some(current))
+                            if sent != current && !options.ignore_if_range =>
+                        {
+                            None
+                        }
                         (range, _, _) => range,
                     };
                     let last = payload.len().saturating_sub(1);
@@ -1017,6 +1228,9 @@ mod tests {
                     if let Some(value) = options.content_type {
                         extra.push_str(&format!("Content-Type: {value}\r\n"));
                     }
+                    if let Some(value) = options.content_encoding {
+                        extra.push_str(&format!("Content-Encoding: {value}\r\n"));
+                    }
                     let (status, start, end) = match range {
                         Some(spec) => {
                             let spec = spec.trim_start_matches("bytes=");
@@ -1029,10 +1243,14 @@ mod tests {
                                     .await;
                                 return;
                             }
-                            extra.push_str(&format!(
-                                "Content-Range: bytes {start}-{end}/{}\r\n",
-                                payload.len()
-                            ));
+                            if let Some(override_spec) = options.content_range_override {
+                                extra.push_str(&format!("Content-Range: {override_spec}\r\n"));
+                            } else if !options.omit_content_range {
+                                extra.push_str(&format!(
+                                    "Content-Range: bytes {start}-{end}/{}\r\n",
+                                    payload.len()
+                                ));
+                            }
                             ("206 Partial Content", start, end)
                         }
                         None => ("200 OK", 0, last),
@@ -1148,6 +1366,15 @@ mod tests {
                 .collect(),
         };
         save_state(&state_path_for(dir.to_str().unwrap(), filename, id).unwrap(), &state).unwrap();
+    }
+
+    /// Put real bytes into the kept prefix of a fake partial file, so a
+    /// wrongly-mixed result differs from the correct one byte for byte.
+    fn fill_part_prefix(dir: &Path, filename: &str, id: i64, data: &[u8], kept: u64) {
+        use std::os::unix::fs::FileExt;
+        let part = part_path_for(dir.to_str().unwrap(), filename, id).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&part).unwrap();
+        file.write_all_at(&data[..kept as usize], 0).unwrap();
     }
 
     #[test]
@@ -1318,6 +1545,121 @@ mod tests {
             assert_eq!(server.requests.load(Ordering::SeqCst), 1);
             std::fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_probe_206_is_never_streamed_as_the_whole_file() {
+        let data = payload(3 * MIN_SEGMENT_BYTES as usize);
+        let _g = crate::util::allow_loopback_for_tests();
+        for (name, options) in [
+            // 206 that does not start at byte 0.
+            (
+                "badstart",
+                ServerOptions {
+                    content_range_override: Some("bytes 100-199/3000000"),
+                    ..Default::default()
+                },
+            ),
+            // 206 with an unknown total (`bytes 0-999/*`).
+            (
+                "startotal",
+                ServerOptions {
+                    content_range_override: Some("bytes 0-999/*"),
+                    ..Default::default()
+                },
+            ),
+            // 206 without any Content-Range header.
+            ("norange", ServerOptions { omit_content_range: true, ..Default::default() }),
+        ] {
+            let server = serve(data.clone(), options).await;
+            let dir = scratch(name);
+            let dest = dir.join("file.bin");
+            let (ctx, _tx) = JobContext::for_tests(100);
+            let result = process_http(
+                &ctx,
+                &format!("{}/file.bin", server.base),
+                dest.to_str().unwrap(),
+                conns(2),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(DownloadError::Fatal(_))),
+                "{name}: a malformed 206 must fail closed, got {result:?}"
+            );
+            assert!(!dest.exists(), "{name}: nothing may be saved from a partial response");
+            assert!(
+                !part_path_for(dir.to_str().unwrap(), "file.bin", 100).unwrap().exists(),
+                "{name}: truncated bytes must not survive as a partial file"
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn content_encoding_other_than_identity_is_fatal() {
+        let data = payload(3 * MIN_SEGMENT_BYTES as usize + 99);
+        let _g = crate::util::allow_loopback_for_tests();
+
+        // Fresh ranged download: the probe itself arrives compressed.
+        let server = serve(
+            data.clone(),
+            ServerOptions { content_encoding: Some("gzip"), ..Default::default() },
+        )
+        .await;
+        let dir = scratch("enc-probe");
+        let dest = dir.join("enc.bin");
+        let (ctx, _tx) = JobContext::for_tests(101);
+        let result = process_http(
+            &ctx,
+            &format!("{}/enc.bin", server.base),
+            dest.to_str().unwrap(),
+            conns(2),
+        )
+        .await;
+        assert!(matches!(result, Err(DownloadError::Fatal(_))), "probe: {result:?}");
+        assert!(!dest.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+
+        // Stream fallback (server without ranges) is just as broken compressed.
+        let server = serve(
+            data.clone(),
+            ServerOptions { no_ranges: true, content_encoding: Some("br"), ..Default::default() },
+        )
+        .await;
+        let dir = scratch("enc-stream");
+        let dest = dir.join("enc.bin");
+        let (ctx, _tx) = JobContext::for_tests(102);
+        let result = process_http(
+            &ctx,
+            &format!("{}/enc.bin", server.base),
+            dest.to_str().unwrap(),
+            conns(2),
+        )
+        .await;
+        assert!(matches!(result, Err(DownloadError::Fatal(_))), "stream: {result:?}");
+        assert!(!dest.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+
+        // Resume: a compressed 206 must not mix into the partial file either.
+        let server = serve(
+            data.clone(),
+            ServerOptions {
+                etag: Some("\"v1\""),
+                content_encoding: Some("deflate"),
+                ..Default::default()
+            },
+        )
+        .await;
+        let dir = scratch("enc-resume");
+        let dest = dir.join("enc.bin");
+        let url = format!("{}/enc.bin", server.base);
+        let total = data.len() as u64;
+        write_resume_artifacts(&dir, "enc.bin", 103, &url, total, 1000, Some("\"v1\"".into()));
+        let (ctx, _tx) = JobContext::for_tests(103);
+        let result = process_http(&ctx, &url, dest.to_str().unwrap(), conns(2)).await;
+        assert!(matches!(result, Err(DownloadError::Fatal(_))), "resume: {result:?}");
+        assert!(!dest.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -1536,6 +1878,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn if_range_ignoring_server_with_changed_validator_restarts() {
+        // A CDN that ignores If-Range answers 206 even for a stale validator.
+        // Only comparing the response validator keeps old and new bytes apart.
+        let len = 3 * MIN_SEGMENT_BYTES as usize;
+        let old = payload(len);
+        let new: Vec<u8> = old.iter().map(|b| b.wrapping_add(1)).collect();
+        let server = serve(
+            new.clone(),
+            ServerOptions { etag: Some("\"v2\""), ignore_if_range: true, ..Default::default() },
+        )
+        .await;
+        let dir = scratch("ifrange-cdn");
+        let dest = dir.join("data.bin");
+        let url = format!("{}/data.bin", server.base);
+        let _g = crate::util::allow_loopback_for_tests();
+
+        let total = len as u64;
+        let kept = 700_000;
+        write_resume_artifacts(&dir, "data.bin", 110, &url, total, kept, Some("\"v1\"".into()));
+        // The kept prefix holds the OLD version's bytes, like a real interruption.
+        fill_part_prefix(&dir, "data.bin", 110, &old, kept);
+
+        let (ctx, _tx) = JobContext::for_tests(110);
+        process_http(&ctx, &url, dest.to_str().unwrap(), conns(2)).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), new, "old prefix must not mix into the new file");
+        assert!(
+            server.ranges.lock().unwrap().iter().any(|spec| spec.starts_with("bytes=0-")),
+            "a stale entity must restart from byte zero"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_without_any_validator_restarts_from_scratch() {
+        // No ETag/Last-Modified was saved: a same-size change is undetectable,
+        // so the partial file can never be trusted.
+        let data = payload(3 * MIN_SEGMENT_BYTES as usize);
+        let server = serve(data.clone(), ServerOptions::default()).await;
+        let dir = scratch("novalidator");
+        let dest = dir.join("data.bin");
+        let url = format!("{}/data.bin", server.base);
+        let _g = crate::util::allow_loopback_for_tests();
+
+        let total = data.len() as u64;
+        write_resume_artifacts(&dir, "data.bin", 111, &url, total, 700_000, None);
+
+        let (ctx, _tx) = JobContext::for_tests(111);
+        process_http(&ctx, &url, dest.to_str().unwrap(), conns(2)).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+        assert!(
+            server.ranges.lock().unwrap().iter().any(|spec| spec.starts_with("bytes=0-")),
+            "unverifiable partial data must be discarded, not resumed"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn url_variant_that_normalizes_the_same_still_resumes() {
+        // The DB may hold a non-canonical spelling (uppercase scheme/host).
+        // The state file stores the canonical Url — resume must compare alike.
+        let data = payload(3 * MIN_SEGMENT_BYTES as usize);
+        let server =
+            serve(data.clone(), ServerOptions { etag: Some("\"v1\""), ..Default::default() }).await;
+        let dir = scratch("urlpattern");
+        let dest = dir.join("data.bin");
+        let _g = crate::util::allow_loopback_for_tests();
+
+        let canonical =
+            Url::parse(&format!("{}/data.bin", server.base)).unwrap().as_str().to_string();
+        let raw = format!("{}/data.bin", server.base).replace("http://", "HTTP://");
+        assert_ne!(raw, canonical, "test needs a raw spelling that differs pre-parse");
+        let total = data.len() as u64;
+        write_resume_artifacts(
+            &dir,
+            "data.bin",
+            112,
+            &canonical,
+            total,
+            700_000,
+            Some("\"v1\"".into()),
+        );
+        fill_part_prefix(&dir, "data.bin", 112, &data, 700_000);
+
+        let before = server.ranges.lock().unwrap().len();
+        let (ctx, _tx) = JobContext::for_tests(112);
+        process_http(&ctx, &raw, dest.to_str().unwrap(), conns(2)).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+        let resumed: Vec<String> = server.ranges.lock().unwrap()[before..].to_vec();
+        assert!(
+            !resumed.iter().any(|spec| spec.starts_with("bytes=0-")),
+            "a spelling variant must resume, not restart: {resumed:?}"
+        );
+        assert!(
+            resumed.iter().any(|spec| spec.starts_with("bytes=700000-")),
+            "resume continues where the state stopped: {resumed:?}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn workers_keep_streaming_while_state_is_persisted() {
+        // A slow disk must never freeze the connections: the periodic state
+        // save has to run beside the workers, not inside their select loop.
+        let data = payload(4 * MIN_SEGMENT_BYTES as usize);
+        let server = serve(data.clone(), ServerOptions { slow_ms: 6, ..Default::default() }).await;
+        let dir = scratch("persist-stall");
+        let dest = dir.join("stall.bin");
+        let _g = crate::util::allow_loopback_for_tests();
+
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let persist_count = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let (entered, release, persist_count) =
+                (entered.clone(), release.clone(), persist_count.clone());
+            move || {
+                // The first persist (before the workers start) passes through;
+                // the first periodic one blocks until the test lets go.
+                if persist_count.fetch_add(1, Ordering::SeqCst) == 1 {
+                    entered.store(true, Ordering::SeqCst);
+                    while !release.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            }
+        };
+        STATE_SAVE_EVERY_TEST_MS.with(|c| c.set(100));
+        PERSIST_TEST_HOOK.with(|h| *h.borrow_mut() = Some(Arc::new(hook)));
+
+        let (ctx, _tx) = JobContext::for_tests(120);
+        let progress = ctx.progress.clone();
+        let url = format!("{}/stall.bin", server.base);
+        let dest_str = dest.to_str().unwrap().to_string();
+        let task = tokio::spawn(async move { process_http(&ctx, &url, &dest_str, conns(2)).await });
+
+        // Wait for the periodic persist to grab the "slow disk".
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !entered.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "periodic persist never ran");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let first = progress.downloaded();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let second = progress.downloaded();
+        release.store(true, Ordering::SeqCst);
+
+        let landed = task.await.unwrap().expect("download finishes after the slow sync");
+        assert_eq!(std::fs::read(&landed).unwrap(), data);
+        assert!(
+            second > first,
+            "network reads stalled behind a slow persist ({first} -> {second})"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unwritable_resume_state_fails_the_download() {
+        // Fault injection: a directory sits where the state tmp file must be
+        // written, so every save fails. The engine must surface that instead
+        // of pretending the progress is safely resumable.
+        let data = payload(3 * MIN_SEGMENT_BYTES as usize);
+        let server = serve(data.clone(), ServerOptions::default()).await;
+        let dir = scratch("state-io-error");
+        let dest = dir.join("file.bin");
+        let _g = crate::util::allow_loopback_for_tests();
+        let tmp = dir.join(".file.bin.121.falcon.state.tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let (ctx, _tx) = JobContext::for_tests(121);
+        let result = process_http(
+            &ctx,
+            &format!("{}/file.bin", server.base),
+            dest.to_str().unwrap(),
+            conns(2),
+        )
+        .await;
+        assert!(matches!(result, Err(DownloadError::Fatal(_))), "{result:?}");
+        assert!(!dest.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn server_errors_are_retried_and_missing_files_are_fatal() {
         let data = payload(2000);
         let _g = crate::util::allow_loopback_for_tests();
@@ -1643,5 +2167,175 @@ mod tests {
         let base = Url::parse("https://8.8.8.8/file").unwrap();
         let target = base.join("http://127.0.0.1/secret").unwrap();
         assert!(validate_fetch_url_async(target.as_str()).await.is_err());
+    }
+
+    /// State where every range is done, without writing any `.part` file.
+    fn write_complete_state(dir: &Path, filename: &str, id: i64, url: &str, total: u64) {
+        let state = SavedState {
+            version: STATE_VERSION,
+            url: url.into(),
+            total,
+            validator: Some("\"v1\"".into()),
+            segments: plan_segments(total, 2)
+                .iter()
+                .map(|(start, end)| [*start, *end, end - start + 1])
+                .collect(),
+        };
+        save_state(&state_path_for(dir.to_str().unwrap(), filename, id).unwrap(), &state).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_response_with_explicit_zero_length_finalizes() {
+        // A deliberate empty file (Content-Length: 0) is not a broken download.
+        let server = serve(Vec::new(), ServerOptions::default()).await;
+        let dir = scratch("empty-ok");
+        let dest = dir.join("empty.bin");
+        let (ctx, _tx) = JobContext::for_tests(130);
+        let _g = crate::util::allow_loopback_for_tests();
+        let landed = process_http(
+            &ctx,
+            &format!("{}/empty.bin", server.base),
+            dest.to_str().unwrap(),
+            conns(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(landed, dest.canonicalize().unwrap());
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn small_binary_starting_with_lt_finalizes_when_size_matches() {
+        // `<` is a valid first byte of a small binary when the server delivered
+        // exactly the promised size and did not label the response as HTML.
+        let data = b"<\0\xff\x00valid-binary-payload".to_vec();
+        let _g = crate::util::allow_loopback_for_tests();
+        for (name, no_ranges) in [("lt-ranged", false), ("lt-stream", true)] {
+            let server =
+                serve(data.clone(), ServerOptions { no_ranges, ..Default::default() }).await;
+            let dir = scratch(name);
+            let dest = dir.join("firmware.bin");
+            let (ctx, _tx) = JobContext::for_tests(131);
+            process_http(
+                &ctx,
+                &format!("{}/firmware.bin", server.base),
+                dest.to_str().unwrap(),
+                conns(2),
+            )
+            .await
+            .unwrap();
+            assert_eq!(std::fs::read(&dest).unwrap(), data, "{name}");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn html_error_page_streamed_as_a_file_is_rejected() {
+        // A small "file" that is really an HTML error page: the response's own
+        // Content-Type gives it away even when the size technically matches.
+        let data = b"<html><body>blocked</body></html>".to_vec();
+        let server = serve(
+            data,
+            ServerOptions {
+                no_ranges: true,
+                content_type: Some("text/html"),
+                ..Default::default()
+            },
+        )
+        .await;
+        let dir = scratch("html-page");
+        let dest = dir.join("archive.zip");
+        let (ctx, _tx) = JobContext::for_tests(132);
+        let _g = crate::util::allow_loopback_for_tests();
+        let result =
+            process_http(&ctx, &format!("{}/get/7", server.base), dest.to_str().unwrap(), conns(2))
+                .await;
+        assert!(
+            matches!(result, Err(DownloadError::Fatal(ref reason)) if reason.contains("error page")),
+            "{result:?}"
+        );
+        assert!(!dest.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn part_hardlinked_to_dest_finishes_without_a_network_request() {
+        // Crash between hard_link and unlink inside finalize: `.part` and the
+        // destination are the same file object, so the download is done.
+        let data = payload(5000);
+        let server =
+            serve(data.clone(), ServerOptions { no_ranges: true, ..Default::default() }).await;
+        let dir = scratch("sameinode");
+        let dest = dir.join("stream.bin");
+        let url = format!("{}/stream.bin", server.base);
+        let part = part_path_for(dir.to_str().unwrap(), "stream.bin", 133).unwrap();
+        std::fs::write(&part, &data).unwrap();
+        std::fs::hard_link(&part, &dest).unwrap();
+        let (ctx, _tx) = JobContext::for_tests(133);
+        let _g = crate::util::allow_loopback_for_tests();
+        let landed = process_http(&ctx, &url, dest.to_str().unwrap(), conns(2)).await.unwrap();
+        assert_eq!(landed, dest.canonicalize().unwrap());
+        assert_eq!(
+            server.requests.load(Ordering::SeqCst),
+            0,
+            "a finished download must not be fetched again"
+        );
+        assert!(!part.exists(), "the leftover .part alias is cleaned up");
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_part_with_complete_state_and_valid_dest_recovers() {
+        // Crash after the move but before the state cleanup: only the `.state`
+        // file survived. A complete, valid destination means the work is done.
+        let data = payload(3000);
+        let server = serve(data.clone(), ServerOptions::default()).await;
+        let dir = scratch("state-leftover");
+        let dest = dir.join("rec.bin");
+        let url = format!("{}/rec.bin", server.base);
+        std::fs::write(&dest, &data).unwrap();
+        write_complete_state(&dir, "rec.bin", 134, &url, data.len() as u64);
+        let (ctx, _tx) = JobContext::for_tests(134);
+        let _g = crate::util::allow_loopback_for_tests();
+        let landed = process_http(&ctx, &url, dest.to_str().unwrap(), conns(2)).await.unwrap();
+        assert_eq!(landed, dest.canonicalize().unwrap());
+        assert_eq!(
+            server.requests.load(Ordering::SeqCst),
+            0,
+            "a finished download must not be fetched again"
+        );
+        assert!(!state_path_for(dir.to_str().unwrap(), "rec.bin", 134).unwrap().exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_part_with_mismatched_dest_downloads_again() {
+        // Same leftover state, but the destination is not the promised file:
+        // recovery must not trust it and the normal download runs.
+        let data = payload(3000);
+        let server = serve(data.clone(), ServerOptions::default()).await;
+        let dir = scratch("state-mismatch");
+        let dest = dir.join("rec.bin");
+        let url = format!("{}/rec.bin", server.base);
+        std::fs::write(&dest, b"foreign").unwrap();
+        write_complete_state(&dir, "rec.bin", 135, &url, data.len() as u64);
+        let (ctx, _tx) = JobContext::for_tests(135);
+        let _g = crate::util::allow_loopback_for_tests();
+        let landed = process_http(&ctx, &url, dest.to_str().unwrap(), conns(2)).await.unwrap();
+        assert!(
+            server.requests.load(Ordering::SeqCst) > 0,
+            "a foreign destination must not short-circuit the download"
+        );
+        assert_eq!(
+            landed.file_name().unwrap(),
+            "rec (1).bin",
+            "the foreign file is never overwritten"
+        );
+        assert_eq!(std::fs::read(&landed).unwrap(), data);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"foreign");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -6,7 +6,7 @@ use crate::download::DownloadError;
 use crate::storage::{models::DownloadCategory, Database};
 use crate::util::{
     move_file_unique, sanitize_filename, unique_download_filename_reserved,
-    validate_completed_file_named,
+    validate_completed_file_named_with_hints, FinalizeHints,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -99,12 +99,25 @@ impl JobContext {
     /// If the name got taken meanwhile the file lands as `name (n).ext` and the
     /// row follows. An invalid temp file is deleted so a retry starts clean.
     pub async fn finalize(&self, temp: &Path, dest: &Path) -> Result<PathBuf, DownloadError> {
+        self.finalize_with_hints(temp, dest, FinalizeHints::default()).await
+    }
+
+    /// `finalize` with the response facts needed to distinguish deliberate
+    /// empty or small binary files from error pages.
+    pub async fn finalize_with_hints(
+        &self,
+        temp: &Path,
+        dest: &Path,
+        hints: FinalizeHints,
+    ) -> Result<PathBuf, DownloadError> {
         self.check_cancel()?;
         let reserved = dest.parent().map(|dir| self.reserved_names(dir)).unwrap_or_default();
         let temp_owned = temp.to_path_buf();
         let dest_owned = dest.to_path_buf();
         let landed = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
-            if let Err(reason) = validate_completed_file_named(&temp_owned, &dest_owned) {
+            if let Err(reason) =
+                validate_completed_file_named_with_hints(&temp_owned, &dest_owned, hints)
+            {
                 let _ = std::fs::remove_file(&temp_owned);
                 return Err(reason);
             }
@@ -129,5 +142,99 @@ impl JobContext {
     pub fn for_tests(id: i64) -> (Self, watch::Sender<bool>) {
         let (tx, rx) = watch::channel(false);
         (Self::new(id, None, None, rx, Arc::new(RateLimiter::new(0))), tx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::FinalizeHints;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("falcon-job-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    async fn finalize_payload(
+        root: &Path,
+        filename: &str,
+        payload: &[u8],
+        hints: FinalizeHints,
+    ) -> Result<PathBuf, DownloadError> {
+        let temp = root.join(format!(".{filename}.71.falcon.part"));
+        std::fs::write(&temp, payload).unwrap();
+        let (ctx, _cancel) = JobContext::for_tests(71);
+        ctx.finalize_with_hints(&temp, &root.join(filename), hints).await
+    }
+
+    #[tokio::test]
+    async fn finalize_accepts_empty_file_when_content_length_was_zero() {
+        let root = scratch("empty-cl0");
+        let landed = finalize_payload(
+            &root,
+            "empty.bin",
+            b"",
+            FinalizeHints { expected_size: Some(0), ..Default::default() },
+        )
+        .await
+        .unwrap();
+        assert_eq!(landed.file_name().unwrap(), "empty.bin");
+        assert_eq!(std::fs::metadata(&landed).unwrap().len(), 0);
+        assert!(!root.join(".empty.bin.71.falcon.part").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalize_accepts_small_binary_starting_with_lt_when_size_matches() {
+        let root = scratch("small-binary");
+        let payload = b"<\0\xff\x00valid-binary";
+        let landed = finalize_payload(
+            &root,
+            "firmware.bin",
+            payload,
+            FinalizeHints { expected_size: Some(payload.len() as u64), ..Default::default() },
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&landed).unwrap(), payload);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalize_rejects_html_error_page_when_response_was_html() {
+        let root = scratch("html-error");
+        let payload = b"<html>403</html>";
+        let result = finalize_payload(
+            &root,
+            "archive.zip",
+            payload,
+            FinalizeHints { expected_size: Some(payload.len() as u64), response_is_html: true },
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(DownloadError::Fatal("Server returned an error page instead of a file".into()))
+        );
+        assert!(!root.join(".archive.zip.71.falcon.part").exists(), "bad temp must be deleted");
+        assert!(!root.join("archive.zip").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalize_rejects_error_page_when_server_promised_a_larger_file() {
+        let root = scratch("size-mismatch");
+        let result = finalize_payload(
+            &root,
+            "archive.zip",
+            b"{\"error\":\"blocked\"}",
+            FinalizeHints { expected_size: Some(100_000), ..Default::default() },
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(DownloadError::Fatal("Server returned an error page instead of a file".into()))
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

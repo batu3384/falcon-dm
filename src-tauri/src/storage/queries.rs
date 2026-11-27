@@ -83,6 +83,9 @@ impl Database {
     }
 
     pub fn insert_download_deduped(&self, download: &mut Download) -> Result<InsertDownloadResult> {
+        // The dedupe comparison is an exact string match, so the stored URL
+        // must be canonical: case/port/spelling variants of one target collapse.
+        download.url = crate::canonical_store_url(&download.url);
         let mut conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -828,4 +831,91 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
         attempts: attempts.clamp(0, i64::from(u32::MAX)) as u32,
         retry_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::models::DownloadStatus;
+
+    fn row(url: &str, name: &str, dir: &str) -> Download {
+        Download {
+            id: None,
+            url: url.into(),
+            filename: name.into(),
+            save_path: dir.into(),
+            total_size: 0,
+            downloaded_size: 0,
+            status: DownloadStatus::Queued,
+            category: DownloadCategory::Other,
+            speed: 0.0,
+            segments: 2,
+            priority: 1,
+            created_at: "t".into(),
+            completed_at: None,
+            error_message: None,
+            referrer: None,
+            user_agent: None,
+            cookies: None,
+            archived: false,
+            attempts: 0,
+            retry_at: None,
+        }
+    }
+
+    #[test]
+    fn insert_canonicalizes_url_and_dedupes_case_and_port_variants() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-canon-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap();
+
+        let mut first = row("HTTPS://CDN.EXAMPLE.COM:443/a.bin", "a.bin", save);
+        let created = db.insert_download_deduped(&mut first).unwrap();
+        assert_eq!(
+            first.url, "https://cdn.example.com/a.bin",
+            "the stored URL must be the canonical form"
+        );
+
+        for variant in [
+            "https://cdn.example.com/a.bin",
+            "HTTPS://cdn.example.com/a.bin",
+            "https://CDN.EXAMPLE.COM/a.bin",
+            "https://cdn.example.com:443/a.bin",
+        ] {
+            let mut again = row(variant, "other.bin", save);
+            match db.insert_download_deduped(&mut again).unwrap() {
+                InsertDownloadResult::Existing(id) => assert_eq!(id, created.id(), "{variant}"),
+                InsertDownloadResult::Created(_) => {
+                    panic!("{variant} must dedupe against the canonical row")
+                }
+            }
+        }
+
+        // Genuinely different URLs still create new rows.
+        let mut other = row("https://cdn.example.com/b.bin", "b.bin", save);
+        match db.insert_download_deduped(&mut other).unwrap() {
+            InsertDownloadResult::Created(_) => {}
+            InsertDownloadResult::Existing(_) => panic!("different file must not dedupe"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn insert_canonicalization_keeps_signed_query_strings_verbatim() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-canon-q-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap();
+        let signed =
+            "https://rr1---sn.example.com/videoplayback?itag=18&sig=abc%2Bd%2F%3D&range=0-100&sq=1";
+        let mut first = row(signed, "v.bin", save);
+        db.insert_download_deduped(&mut first).unwrap();
+        assert_eq!(first.url, signed, "query bytes must survive canonicalization");
+        // Non-HTTP(S) rows (blob uploads) pass through untouched.
+        let mut blob = row("blob:https://example.com/uuid", "blob.bin", save);
+        db.insert_download_deduped(&mut blob).unwrap();
+        assert_eq!(blob.url, "blob:https://example.com/uuid");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

@@ -54,6 +54,18 @@ pub(crate) fn is_valid_extension_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
 }
 
+/// Canonical form of an HTTP(S) URL for storage: lowercase scheme and host,
+/// no default port, non-empty path. Dedupe and resume-state compare URLs as
+/// strings, so one spelling must win. Queries and fragments pass through
+/// byte-for-byte (YouTube signatures); anything unparseable or non-HTTP(S)
+/// (blob uploads) is kept as-is.
+pub(crate) fn canonical_store_url(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed.into(),
+        _ => raw.to_string(),
+    }
+}
+
 pub(crate) fn parse_extension_id(raw: &str) -> Result<&str, String> {
     let id = raw.trim();
     if is_valid_extension_id(id) {
@@ -219,6 +231,8 @@ pub(crate) async fn enqueue_download(
 
     let watch_url = util::youtube_page_url_for_download(&payload.url, payload.referrer.as_deref());
     let base = watch_url.clone().unwrap_or_else(|| normalize_media_url(payload.url.trim()));
+    // One spelling everywhere: dedupe, resume state and routing compare strings.
+    let base = canonical_store_url(&base);
     let format = payload.format.as_deref().or(if watch_url.is_some() {
         Some(download::ytdlp::DEFAULT_VIDEO_FORMAT)
     } else {
@@ -629,6 +643,22 @@ mod tests {
         assert!(!is_audio_only_format(""));
         assert_eq!(with_extension("My Song.webm", "m4a"), "My Song.m4a");
         assert_eq!(with_extension("noext", "mp4"), "noext.mp4");
+    }
+
+    #[test]
+    fn canonical_store_url_normalizes_scheme_host_port_and_path() {
+        assert_eq!(
+            canonical_store_url("HTTPS://CDN.EXAMPLE.COM:443/a.bin"),
+            "https://cdn.example.com/a.bin"
+        );
+        assert_eq!(canonical_store_url("https://cdn.example.com"), "https://cdn.example.com/");
+        assert_eq!(canonical_store_url("http://example.com:80/x"), "http://example.com/x");
+        // Query bytes and the falconfmt fragment survive verbatim.
+        let signed = "https://cdn.example.com/v?sig=a%2Fb%3D&x=1#falconfmt=best";
+        assert_eq!(canonical_store_url(signed), signed);
+        // Non-HTTP(S) rows (blob uploads) and unparseable strings pass through.
+        assert_eq!(canonical_store_url("blob:https://x/y"), "blob:https://x/y");
+        assert_eq!(canonical_store_url("not a url"), "not a url");
     }
 
     #[test]
