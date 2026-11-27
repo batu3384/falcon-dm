@@ -52,6 +52,7 @@ async function refresh() {
   $('capture').checked = !(resp && resp.paused);
   // Checked = Chrome may download when Falcon DM is closed.
   $('fallback').checked = !(resp && resp.failClosed);
+  $('notify-success').checked = !!(resp && resp.notifySuccess);
 }
 
 $('title').textContent = t('optionsTitle', 'Falcon DM');
@@ -66,7 +67,15 @@ $('capture-hint').textContent = t('popupCaptureHint', 'When off, Chrome download
 $('fallback-label').textContent = t('optionsFallback', 'Let Chrome download when Falcon DM is closed');
 $('fallback-hint').textContent = t(
   'optionsFallbackHint',
-  'When off, a captured download waits until Falcon DM can take it.',
+  'When off, a download Falcon DM cannot take is cancelled — click the link again once Falcon DM is running.',
+);
+$('notify-success-label').textContent = t(
+  'optionsNotifySuccess',
+  'Notify when a download is sent to Falcon DM',
+);
+$('notify-success-hint').textContent = t(
+  'optionsNotifySuccessHint',
+  'When off, only errors show notifications.',
 );
 
 $('pair').addEventListener('click', async () => {
@@ -94,6 +103,11 @@ $('capture').addEventListener('change', async (e) => {
 
 $('fallback').addEventListener('change', async (e) => {
   const resp = await send('set_fail_closed', { failClosed: !e.target.checked });
+  if (!resp || resp.ok === false) e.target.checked = !e.target.checked;
+});
+
+$('notify-success').addEventListener('change', async (e) => {
+  const resp = await send('set_notify_success', { enabled: e.target.checked });
   if (!resp || resp.ok === false) e.target.checked = !e.target.checked;
 });
 

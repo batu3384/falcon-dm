@@ -237,7 +237,13 @@
     "message": "Falcon DM kapalıyken Chrome indirsin"
   },
   "optionsFallbackHint": {
-    "message": "Kapalıyken yakalanan indirme, Falcon DM devralabilene kadar bekler."
+    "message": "Kapalıyken Falcon DM'in devralamadığı indirme iptal edilir — Falcon DM çalışırken bağlantıya yeniden tıklayın."
+  },
+  "optionsNotifySuccess": {
+    "message": "İndirme Falcon DM'e gönderildiğinde bildir"
+  },
+  "optionsNotifySuccessHint": {
+    "message": "Kapalıyken yalnızca hatalar bildirim gösterir."
   },
   "pairNotify": {
     "message": "{code} kodunu Falcon DM'de onaylayın"

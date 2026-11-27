@@ -237,7 +237,13 @@
     "message": "Let Chrome download when Falcon DM is closed"
   },
   "optionsFallbackHint": {
-    "message": "When off, a captured download waits until Falcon DM can take it."
+    "message": "When off, a download Falcon DM cannot take is cancelled — click the link again once Falcon DM is running."
+  },
+  "optionsNotifySuccess": {
+    "message": "Notify when a download is sent to Falcon DM"
+  },
+  "optionsNotifySuccessHint": {
+    "message": "When off, only errors show notifications."
   },
   "pairNotify": {
     "message": "Approve code {code} in Falcon DM"

@@ -334,10 +334,12 @@ async function runHijack(item, opts = {}) {
       format: hijack.format || undefined,
     });
     abortAndEraseBrowserDownload(item.id);
-    notify(
-      'Falcon DM',
-      msg('interceptQueued', 'Browser download cancelled — queued in Falcon DM'),
-    );
+    if (notifySuccess) {
+      notify(
+        'Falcon DM',
+        msg('interceptQueued', 'Browser download cancelled — queued in Falcon DM'),
+      );
+    }
   } catch (e) {
     console.error(e);
     if (failClosed) {
@@ -514,7 +516,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         cookies: cookiesHeader,
         cookie_url: cookieLookup,
       });
-      notify('Falcon DM', msg('sentToApp', 'Download sent to Falcon DM'));
+      if (notifySuccess) notify('Falcon DM', msg('sentToApp', 'Download sent to Falcon DM'));
     } catch (e) {
       console.error(e);
       notify('Falcon DM', e.message || msg('errorAppOffline', 'Failed'));
@@ -548,6 +550,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         state: connectionState,
         paused: interceptPaused,
         failClosed: interceptFailClosed,
+        notifySuccess,
         pairCode: formatPairCode(visiblePairCode()),
         extensionId: chrome.runtime.id,
       });
@@ -609,6 +612,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       try {
         const next = await setInterceptFailClosed(!!request.failClosed);
         sendResponse({ ok: true, failClosed: next });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message || 'Failed' });
+      }
+    })();
+    return true;
+  }
+
+  if (request.action === 'set_notify_success') {
+    (async () => {
+      try {
+        const next = await setNotifySuccessEnabled(!!request.enabled);
+        sendResponse({ ok: true, enabled: next });
       } catch (e) {
         sendResponse({ ok: false, error: e.message || 'Failed' });
       }
@@ -839,7 +854,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         success: false,
         error: msg(
           'errorJunkUrl',
-          'Bu adres gerçek video değil (YouTube UI sesi) — videoyu oynatıp tekrar dene',
+          'Not a real video URL — play the video and pick a quality card',
         ),
       });
       return true;

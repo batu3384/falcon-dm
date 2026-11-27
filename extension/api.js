@@ -88,7 +88,7 @@ async function sendToFalcon(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
         await withTimeout(wakeFalcon(), 5000, 'Falcon wake');
         if (!(await waitForHealthy(15000))) {
           setState('offline');
-          throw new Error(msg('errorWaking', 'Falcon DM başlatılamadı'));
+          throw new Error(msg('errorWaking', 'Falcon DM did not start. Open it manually.'));
         }
         return postFalcon(path, body, timeoutMs);
       }
@@ -106,7 +106,7 @@ async function sendToFalcon(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   }
 
   setState('offline');
-  throw new Error(msg('errorWaking', 'Falcon DM başlatılamadı'));
+  throw new Error(msg('errorWaking', 'Falcon DM did not start. Open it manually.'));
 }
 
 /** Live and recent downloads for the popup. Returns null when not paired. */

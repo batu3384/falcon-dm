@@ -35,11 +35,13 @@ function fetchWithTimeout(url, options, timeoutMs, label) {
 let connectionState = 'offline'; // "connected" | "pending" | "blocked" | "offline"
 let interceptPaused = false; // when true, automatic hijack is off (browser downloads natively)
 let interceptFailClosed = true; // default fail-closed: Chrome does not keep hijacked files
+let notifySuccess = false; // success popups are opt-in — errors always notify
 const INJECTED = new Set(); // tab ids that already have the on-demand content script
 
 // Writers set dirty so an in-flight hydrate get() cannot clobber a live toggle.
 let pauseDirty = false;
 let failClosedDirty = false;
+let notifySuccessDirty = false;
 let prefsHydrated = false;
 
 function markPauseWrite() {
@@ -50,6 +52,10 @@ function markFailClosedWrite() {
   failClosedDirty = true;
 }
 
+function markNotifySuccessWrite() {
+  notifySuccessDirty = true;
+}
+
 const prefsReady = (async () => {
   try {
     const { falconConnectionState } = await chrome.storage.session.get({
@@ -57,6 +63,9 @@ const prefsReady = (async () => {
     });
     const { falconInterceptFailClosed } = await chrome.storage.local.get({
       falconInterceptFailClosed: true,
+    });
+    const { falconNotifySuccess } = await chrome.storage.local.get({
+      falconNotifySuccess: false,
     });
     const localPauseBag = await chrome.storage.local.get('falconInterceptPaused');
     const hasLocalPause = Object.hasOwn(localPauseBag, 'falconInterceptPaused');
@@ -75,6 +84,7 @@ const prefsReady = (async () => {
       interceptPaused = paused;
     }
     if (!failClosedDirty) interceptFailClosed = !!falconInterceptFailClosed;
+    if (!notifySuccessDirty) notifySuccess = !!falconNotifySuccess;
     if (connectionState === 'offline') {
       connectionState = falconConnectionState || 'offline';
     }
@@ -106,6 +116,13 @@ async function setInterceptFailClosed(next) {
   interceptFailClosed = !!next;
   await chrome.storage.local.set({ falconInterceptFailClosed: interceptFailClosed });
   return interceptFailClosed;
+}
+
+async function setNotifySuccessEnabled(next) {
+  markNotifySuccessWrite();
+  notifySuccess = !!next;
+  await chrome.storage.local.set({ falconNotifySuccess: notifySuccess });
+  return notifySuccess;
 }
 
 function setState(s) {
@@ -279,7 +296,15 @@ async function getCookiesHeader(url) {
   return '';
 }
 
+const NOTIFY_DEDUP_MS = 10000;
+const notifyLastAt = new Map();
+
 function notify(title, message) {
+  // Batch identical popups: a burst of hijacks or errors must not spam the OS.
+  const key = `${title}\0${message}`;
+  const now = Date.now();
+  if (now - (notifyLastAt.get(key) || 0) < NOTIFY_DEDUP_MS) return;
+  notifyLastAt.set(key, now);
   chrome.notifications.create({
     type: 'basic',
     iconUrl: 'icon128.png',

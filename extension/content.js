@@ -106,7 +106,7 @@
   function sendBg(payload) {
     return new Promise((resolve, reject) => {
       if (!chrome?.runtime?.id) {
-        reject(new Error(msg('errorExtensionReload', 'Eklenti yenilendi — sayfayı yenileyin')));
+        reject(new Error(msg('errorExtensionReload', 'Extension reloaded — refresh this page')));
         return;
       }
       chrome.runtime.sendMessage(payload, (response) => {
@@ -114,7 +114,7 @@
         if (err) {
           const m = err.message || '';
           if (/invalidated|context/i.test(m)) {
-            reject(new Error(msg('errorExtensionReload', 'Eklenti yenilendi — sayfayı yenileyin')));
+            reject(new Error(msg('errorExtensionReload', 'Extension reloaded — refresh this page')));
             return;
           }
           reject(new Error(m));
