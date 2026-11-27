@@ -132,8 +132,7 @@ impl JobContext {
             // retry would trip over an orphan.
             let drop_temp_and_state = || {
                 let _ = std::fs::remove_file(&temp_owned);
-                if let Some(state) =
-                    crate::download::http::hidden_sibling(&dest_owned, id, "state")
+                if let Some(state) = crate::download::http::hidden_sibling(&dest_owned, id, "state")
                 {
                     let _ = std::fs::remove_file(state);
                 }

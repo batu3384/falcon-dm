@@ -71,7 +71,11 @@ const REMOTE_CHANGED: &str = "ERR_REMOTE_CHANGED";
 const PARTIAL_RESPONSE: &str = "ERR_PARTIAL_RESPONSE";
 const CONTENT_ENCODING: &str = "ERR_CONTENT_ENCODING";
 
-pub(crate) fn hidden_sibling(destination: &Path, download_id: i64, suffix: &str) -> Option<PathBuf> {
+pub(crate) fn hidden_sibling(
+    destination: &Path,
+    download_id: i64,
+    suffix: &str,
+) -> Option<PathBuf> {
     let parent = destination.parent()?;
     let name = destination.file_name()?.to_str()?;
     Some(parent.join(format!(".{name}.{download_id}.falcon.{suffix}")))
