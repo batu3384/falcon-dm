@@ -328,10 +328,11 @@ pub fn run() {
     };
 
     #[cfg(desktop)]
-    let builder =
-        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             crate::show_main_window(app);
-        }));
+        }))
+        .plugin(tauri_plugin_window_state::Builder::default().build());
     #[cfg(not(desktop))]
     let builder = tauri::Builder::default();
 
@@ -399,14 +400,31 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
-        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-            // Restart ignores prevent_exit. A second ExitRequested is the real exit.
-            if code == Some(tauri::RESTART_EXIT_CODE) {
-                return;
+        match event {
+            tauri::RunEvent::ExitRequested { api, code, .. } => {
+                // Restart ignores prevent_exit. A second ExitRequested is the real exit.
+                if code == Some(tauri::RESTART_EXIT_CODE) {
+                    return;
+                }
+                if start_shutdown(app_handle) {
+                    api.prevent_exit();
+                }
             }
-            if start_shutdown(app_handle) {
-                api.prevent_exit();
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                api.prevent_close();
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.hide();
+                }
             }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { has_visible_windows, .. } if !has_visible_windows => {
+                crate::show_main_window(app_handle);
+            }
+            _ => {}
         }
     });
 }
