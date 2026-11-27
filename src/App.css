@@ -28,7 +28,9 @@
 
   --text: #1d1d1f;
   --text-2: #6e6e73;
-  --text-3: #8e8e93;
+  /* #8e8e93 was 3.3:1 on white — too faint for 11px labels. #707074 is
+     4.9:1 on white, 4.5:1 on --bg-subtle (WCAG AA small text). */
+  --text-3: #707074;
   --separator: rgba(0, 0, 0, 0.09);
   --border: rgba(0, 0, 0, 0.15);
   --track: rgba(0, 0, 0, 0.08);
@@ -78,7 +80,9 @@
 
   --text: rgba(255, 255, 255, 0.9);
   --text-2: rgba(235, 235, 245, 0.62);
-  --text-3: rgba(235, 235, 245, 0.4);
+  /* 40% alpha was ~3.2:1 on dark surfaces; 58% lands 4.7–5.6:1 on
+     --bg / --bg-elevated / --bg-subtle composites (WCAG AA small text). */
+  --text-3: rgba(235, 235, 245, 0.58);
   --separator: rgba(255, 255, 255, 0.09);
   --border: rgba(255, 255, 255, 0.14);
   --track: rgba(255, 255, 255, 0.12);
@@ -1238,6 +1242,12 @@ svg {
   animation: fade 0.15s ease-out;
 }
 
+/* Nested sheets (Settings → Logs, pair dialog over onboarding): overlays stack
+   in DOM order, so only the topmost dims — lower ones would double-darken. */
+.sheet-overlay:has(~ .sheet-overlay) {
+  background: transparent;
+}
+
 .sheet {
   width: 480px;
   max-width: 100%;
@@ -2030,7 +2040,17 @@ svg {
   color: rgba(255, 255, 255, 0.7);
 }
 
-.toast .toast-action {
+.toast .toast-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-3);
+  background: var(--bg-subtle);
+  border-radius: 8px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+.toast-action {
   flex: none;
   width: auto;
   height: 22px;

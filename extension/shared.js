@@ -326,7 +326,8 @@ function refreshBadge() {
     connected: { text: '✓', color: '#22c55e' },
     pending: { text: '•', color: '#D97706' },
     blocked: { text: '!', color: '#dc2626' },
-    offline: { text: '', color: '#dc2626' },
+    // Gray dash: an empty badge looked indistinguishable from a working ext.
+    offline: { text: '–', color: '#8e8e93' },
   };
   const b = map[connectionState] || map.offline;
   try {

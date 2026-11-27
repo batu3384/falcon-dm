@@ -39,4 +39,42 @@ describe('useToastStore', () => {
     action?.run();
     expect(run).toHaveBeenCalledOnce();
   });
+
+  it('folds identical visible toasts into one with a count', () => {
+    const { showToast } = useToastStore.getState();
+    for (let i = 0; i < 8; i += 1) showToast('error', 'boom');
+    const { toasts } = useToastStore.getState();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].count).toBe(8);
+  });
+
+  it('does not dedupe different messages or kinds', () => {
+    const { showToast } = useToastStore.getState();
+    showToast('error', 'boom');
+    showToast('info', 'boom');
+    showToast('error', 'other');
+    expect(useToastStore.getState().toasts).toHaveLength(3);
+  });
+
+  it('re-arms the dismissal timer when a duplicate folds in', () => {
+    const { showToast } = useToastStore.getState();
+    showToast('error', 'boom');
+    vi.advanceTimersByTime(3000);
+    showToast('error', 'boom');
+    vi.advanceTimersByTime(3000);
+    // 6s after the first push but only 3s since the dupe — still visible.
+    expect(useToastStore.getState().toasts).toHaveLength(1);
+    vi.advanceTimersByTime(500);
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+  });
+
+  it('stacks a repeat once the original has dismissed itself', () => {
+    const { showToast } = useToastStore.getState();
+    showToast('error', 'boom');
+    vi.advanceTimersByTime(3500);
+    showToast('error', 'boom');
+    const { toasts } = useToastStore.getState();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].count).toBe(1);
+  });
 });

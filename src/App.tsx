@@ -230,10 +230,37 @@ function App() {
     () => showToast('error', t('app.clipboard_failed')),
   );
 
+  // A dropped .txt/.csv of links opens the New Download sheet prefilled,
+  // mirroring the sheet's own import button.
+  const importDroppedFile = useCallback(
+    async (file: File) => {
+      if (!/\.(txt|csv)$/i.test(file.name)) {
+        showToast('error', t('new_download.import_unsupported'));
+        return;
+      }
+      try {
+        const urls = publicHttpUrlsFromMixedText(await file.text());
+        if (!urls.length) {
+          showToast('error', t('new_download.import_empty'));
+          return;
+        }
+        ui.openNewDownload(urls.join('\n'));
+      } catch {
+        showToast('error', t('new_download.import_failed'));
+      }
+    },
+    [showToast, t, ui],
+  );
+
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
     if (isForegroundDialogOpen()) return;
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      void importDroppedFile(file);
+      return;
+    }
     const text = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
     const urls = publicHttpUrlsFromMixedText(text);
     if (urls.length) ui.openNewDownload(urls.join('\n'));
@@ -319,7 +346,7 @@ function App() {
     <div
       className="app"
       onDragOver={(e) => {
-        if (isForegroundDialogOpen() || e.dataTransfer.types.includes('Files')) return;
+        if (isForegroundDialogOpen()) return;
         e.preventDefault();
         if (!dragging) setDragging(true);
       }}
@@ -423,6 +450,7 @@ function App() {
                 <Info size={15} aria-hidden={true} />
               )}
               <span>{toast.msg}</span>
+              {toast.count > 1 && <span className="toast-count">×{toast.count}</span>}
               {toast.action && (
                 <button
                   type="button"
