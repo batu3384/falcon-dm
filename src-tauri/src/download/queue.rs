@@ -109,6 +109,13 @@ pub(crate) fn route_queued_download(url: &str, referrer: Option<&str>) -> Downlo
     }
 }
 
+fn ytdlp_speed_limit_kbps(global: u32, active_downloads: usize) -> u32 {
+    if global == 0 {
+        return 0;
+    }
+    (u64::from(global) / active_downloads.max(1) as u64).max(1) as u32
+}
+
 /// Why a running worker was asked to stop. Decides the row's next status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
@@ -127,7 +134,14 @@ struct ActiveJob {
     stop: Option<StopReason>,
 }
 
-type ActiveJobs = Arc<Mutex<HashMap<i64, ActiveJob>>>;
+#[derive(Default)]
+struct QueueSlots {
+    active: HashMap<i64, ActiveJob>,
+    removing: HashMap<i64, usize>,
+    shutting_down: bool,
+}
+
+type SharedSlots = Arc<Mutex<QueueSlots>>;
 
 /// Settings the workers read at start.
 #[derive(Clone, Default)]
@@ -143,7 +157,7 @@ pub struct QueueManager {
     max_connections: AtomicUsize,
     options: Mutex<QueueOptions>,
     limiter: Arc<RateLimiter>,
-    active: ActiveJobs,
+    slots: SharedSlots,
 }
 
 impl Default for QueueManager {
@@ -164,7 +178,7 @@ impl QueueManager {
             max_connections: AtomicUsize::new(8),
             options: Mutex::new(QueueOptions::default()),
             limiter: Arc::new(RateLimiter::new(0)),
-            active: Arc::new(Mutex::new(HashMap::new())),
+            slots: Arc::new(Mutex::new(QueueSlots::default())),
         }
     }
 
@@ -204,18 +218,51 @@ impl QueueManager {
     }
 
     pub fn is_active(&self, id: i64) -> bool {
-        lock_or_recover(&self.active).contains_key(&id)
+        lock_or_recover(&self.slots).active.contains_key(&id)
     }
 
     pub fn active_ids(&self) -> Vec<i64> {
-        lock_or_recover(&self.active).keys().copied().collect()
+        lock_or_recover(&self.slots).active.keys().copied().collect()
+    }
+
+    /// Once shutdown begins, no queued row may claim a new worker slot.
+    pub(crate) fn begin_shutdown(&self) {
+        lock_or_recover(&self.slots).shutting_down = true;
+    }
+
+    pub(crate) fn begin_remove(&self, id: i64) {
+        *lock_or_recover(&self.slots).removing.entry(id).or_insert(0) += 1;
+    }
+
+    pub(crate) fn end_remove(&self, id: i64) {
+        let mut slots = lock_or_recover(&self.slots);
+        if let Some(count) = slots.removing.get_mut(&id) {
+            *count -= 1;
+            if *count == 0 {
+                slots.removing.remove(&id);
+            }
+        }
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        lock_or_recover(&self.slots).shutting_down
+    }
+
+    fn claim_active_slot(&self, id: i64, cancel: watch::Sender<bool>) -> bool {
+        let mut slots = lock_or_recover(&self.slots);
+        if slots.shutting_down || slots.removing.contains_key(&id) || slots.active.contains_key(&id)
+        {
+            return false;
+        }
+        slots.active.insert(id, ActiveJob { cancel, stop: None });
+        true
     }
 
     /// Ask a running worker to stop. Returns false when nothing is running.
     /// The first reason wins, except that `Remove` overrides everything.
     pub fn request_stop(&self, id: i64, reason: StopReason) -> bool {
-        let mut active = lock_or_recover(&self.active);
-        let Some(job) = active.get_mut(&id) else {
+        let mut slots = lock_or_recover(&self.slots);
+        let Some(job) = slots.active.get_mut(&id) else {
             return false;
         };
         if job.stop.is_none() || reason == StopReason::Remove {
@@ -269,6 +316,9 @@ impl QueueManager {
 
     /// Start, stop and requeue workers. Never waits on a worker.
     pub fn tick(&self, db: &Database, app: &tauri::AppHandle) -> Result<(), String> {
+        if self.is_shutting_down() {
+            return Ok(());
+        }
         let schedule = self.get_schedule();
         let running = self.active_ids();
 
@@ -357,6 +407,8 @@ impl QueueManager {
         };
         let options = lock_or_recover(&self.options).clone();
         let max_connections = self.max_connections.load(Ordering::SeqCst);
+        // Approximation: yt-dlp cannot join the byte-counted bucket, so split the cap across live rows.
+        let active_downloads = self.active_ids().len() + 1;
         let headers = HttpHeaders {
             cookies: row.cookies.clone(),
             referrer: row.referrer.clone(),
@@ -370,7 +422,7 @@ impl QueueManager {
             referrer: row.referrer.clone(),
             format,
             proxy: options.proxy.clone(),
-            speed_limit_kbps: self.limiter.kbps(),
+            speed_limit_kbps: ytdlp_speed_limit_kbps(self.limiter.kbps(), active_downloads),
             ytdlp_path: options.ytdlp_path.clone(),
             use_browser_cookies: options.ytdlp_use_browser_cookies,
             max_connections,
@@ -394,19 +446,15 @@ impl QueueManager {
         };
 
         let (cancel, rx) = watch::channel(false);
-        {
-            let mut active = lock_or_recover(&self.active);
-            // The previous worker of this row is still shutting down.
-            if active.contains_key(&id) {
-                return false;
-            }
-            active.insert(id, ActiveJob { cancel, stop: None });
+        // Shutdown, removal, and a still-stopping previous worker all claim through the same lock.
+        if !self.claim_active_slot(id, cancel) {
+            return false;
         }
         if !db
             .set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Downloading)
             .unwrap_or(false)
         {
-            lock_or_recover(&self.active).remove(&id);
+            lock_or_recover(&self.slots).active.remove(&id);
             return false;
         }
         crate::emit_row(app, db, id);
@@ -414,7 +462,7 @@ impl QueueManager {
         let out_path = crate::util::full_file_path(&row.save_path, &row.filename);
         let ctx =
             JobContext::new(id, Some(app.clone()), Some(db.clone()), rx, self.limiter.clone());
-        let guard = JobGuard { id, active: self.active.clone(), db: db.clone(), finished: false };
+        let guard = JobGuard { id, slots: self.slots.clone(), db: db.clone(), finished: false };
         tokio::spawn(run_job(ctx, kind, out_path, row.attempts, guard));
         true
     }
@@ -430,14 +478,14 @@ enum JobKind {
 /// instead of staying `Downloading` with nothing behind it.
 struct JobGuard {
     id: i64,
-    active: ActiveJobs,
+    slots: SharedSlots,
     db: Database,
     finished: bool,
 }
 
 impl JobGuard {
     fn stop_reason(&self) -> Option<StopReason> {
-        lock_or_recover(&self.active).get(&self.id).and_then(|job| job.stop)
+        lock_or_recover(&self.slots).active.get(&self.id).and_then(|job| job.stop)
     }
 }
 
@@ -453,7 +501,7 @@ impl Drop for JobGuard {
                 Some(0.0),
             );
         }
-        lock_or_recover(&self.active).remove(&self.id);
+        lock_or_recover(&self.slots).active.remove(&self.id);
     }
 }
 
@@ -521,9 +569,15 @@ async fn run_job(
         }
     };
 
-    let (Some(app), Some(db)) = (ctx.app.as_ref(), ctx.db.as_ref()) else {
+    let Some(db) = ctx.db.as_ref() else {
         guard.finished = true;
         return;
+    };
+    let app = ctx.app.as_ref();
+    let emit_row = |id| {
+        if let Some(app) = app {
+            crate::emit_row(app, db, id);
+        }
     };
     match result {
         Ok(landed) => {
@@ -531,13 +585,22 @@ async fn run_job(
             // A row deleted meanwhile keeps its file: never remove what the user may own.
             if db.finish_stream_if_active(id, size).unwrap_or(false) {
                 let _ = db.clear_session_cookies(id);
-                crate::emit_row(app, db, id);
-                crate::notify_download(app, db, id, true);
+                emit_row(id);
+                if let Some(app) = app {
+                    crate::notify_download(app, db, id, true);
+                }
             }
         }
         Err(error) => {
             let transferred = ctx.progress.transferred();
-            match outcome_for(error, guard.stop_reason(), attempts, transferred) {
+            let outcome = outcome_for(error, guard.stop_reason(), attempts, transferred);
+            // A healthy run proved the link; earlier failures must not consume its next budget.
+            if transferred >= HEALTHY_RUN_BYTES
+                && matches!(outcome, Outcome::Requeue | Outcome::Leave)
+            {
+                let _ = db.clear_retry_state(id);
+            }
+            match outcome {
                 Outcome::Leave => {}
                 Outcome::Requeue => {
                     if db
@@ -548,7 +611,7 @@ async fn run_job(
                         )
                         .unwrap_or(false)
                     {
-                        crate::emit_row(app, db, id);
+                        emit_row(id);
                     }
                 }
                 Outcome::Retry { attempt, delay, message } => {
@@ -567,7 +630,7 @@ async fn run_job(
                         )
                         .unwrap_or(false)
                     {
-                        crate::emit_row(app, db, id);
+                        emit_row(id);
                     }
                 }
                 Outcome::Fail(message) => {
@@ -583,8 +646,10 @@ async fn run_job(
                         .unwrap_or(false)
                     {
                         let _ = db.clear_session_cookies(id);
-                        crate::emit_row(app, db, id);
-                        crate::notify_download(app, db, id, false);
+                        emit_row(id);
+                        if let Some(app) = app {
+                            crate::notify_download(app, db, id, false);
+                        }
                     }
                 }
             }
@@ -599,8 +664,73 @@ mod tests {
 
     fn insert_job(qm: &QueueManager, id: i64) -> watch::Receiver<bool> {
         let (cancel, rx) = watch::channel(false);
-        lock_or_recover(&qm.active).insert(id, ActiveJob { cancel, stop: None });
+        lock_or_recover(&qm.slots).active.insert(id, ActiveJob { cancel, stop: None });
         rx
+    }
+
+    fn queued_test_download(status: DownloadStatus) -> Download {
+        Download {
+            id: None,
+            url: "http://127.0.0.1:9/a.bin".into(),
+            filename: "a.bin".into(),
+            save_path: "/tmp".into(),
+            total_size: 0,
+            downloaded_size: 0,
+            status,
+            category: crate::storage::models::DownloadCategory::Other,
+            speed: 0.0,
+            segments: 1,
+            priority: 1,
+            created_at: "t".into(),
+            completed_at: None,
+            error_message: None,
+            referrer: None,
+            user_agent: None,
+            cookies: None,
+            archived: false,
+            attempts: 0,
+            retry_at: None,
+        }
+    }
+
+    async fn cancelled_row(transferred: u64, stop: StopReason) -> Download {
+        let _loopback = crate::util::allow_loopback_for_tests();
+        let db = Database::in_memory().unwrap();
+        let id = db.insert_download(&queued_test_download(DownloadStatus::Downloading)).unwrap();
+        assert!(db
+            .schedule_retry(id, &[DownloadStatus::Downloading], 3, 4_000_000_000, "old failure",)
+            .unwrap());
+        assert!(db
+            .set_status_if_current(id, &[DownloadStatus::Queued], &DownloadStatus::Downloading)
+            .unwrap());
+
+        let qm = QueueManager::new();
+        let (cancel, rx) = watch::channel(true);
+        lock_or_recover(&qm.slots).active.insert(id, ActiveJob { cancel, stop: Some(stop) });
+        let ctx = JobContext::new(id, None, Some(db.clone()), rx, Arc::new(RateLimiter::new(0)));
+        ctx.progress.add_transferred(transferred);
+        let guard = JobGuard { id, slots: qm.slots.clone(), db: db.clone(), finished: false };
+        let root = std::env::temp_dir().join(format!("falcon-queue-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let out = root.join("a.bin");
+        run_job(
+            ctx,
+            JobKind::Http {
+                url: "http://127.0.0.1:9/a.bin".into(),
+                headers: HttpHeaders::default(),
+            },
+            out,
+            3,
+            guard,
+        )
+        .await;
+        let row = db.get_download(id).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+        row
+    }
+
+    async fn cancelled_requeue_row(transferred: u64) -> Download {
+        cancelled_row(transferred, StopReason::Requeue).await
     }
 
     #[test]
@@ -626,6 +756,33 @@ mod tests {
     }
 
     #[test]
+    fn removal_tombstone_blocks_claiming_until_the_delete_finishes() {
+        let qm = QueueManager::new();
+        qm.begin_remove(7);
+        qm.begin_remove(7);
+        let (cancel, _rx) = watch::channel(false);
+        assert!(!qm.claim_active_slot(7, cancel));
+        assert!(!qm.is_active(7));
+
+        qm.end_remove(7);
+        let (cancel, _rx) = watch::channel(false);
+        assert!(!qm.claim_active_slot(7, cancel), "a concurrent remover still owns the tombstone");
+        qm.end_remove(7);
+        let (cancel, _rx) = watch::channel(false);
+        assert!(qm.claim_active_slot(7, cancel));
+        assert!(qm.is_active(7));
+    }
+
+    #[test]
+    fn shutdown_blocks_claiming_new_job_slots() {
+        let qm = QueueManager::new();
+        qm.begin_shutdown();
+        let (cancel, _rx) = watch::channel(false);
+        assert!(!qm.claim_active_slot(1, cancel));
+        assert!(qm.active_ids().is_empty());
+    }
+
+    #[test]
     fn request_stop_signals_and_keeps_first_reason() {
         let qm = QueueManager::new();
         assert!(!qm.request_stop(999, StopReason::Pause));
@@ -634,19 +791,19 @@ mod tests {
         assert!(*rx.borrow());
         assert!(qm.is_active(7), "the slot is released by the worker, not by the stopper");
         qm.request_stop(7, StopReason::Pause);
-        assert_eq!(lock_or_recover(&qm.active)[&7].stop, Some(StopReason::Requeue));
+        assert_eq!(lock_or_recover(&qm.slots).active[&7].stop, Some(StopReason::Requeue));
         qm.request_stop(7, StopReason::Remove);
-        assert_eq!(lock_or_recover(&qm.active)[&7].stop, Some(StopReason::Remove));
+        assert_eq!(lock_or_recover(&qm.slots).active[&7].stop, Some(StopReason::Remove));
     }
 
     #[tokio::test]
     async fn stop_and_wait_returns_after_worker_cleanup() {
         let qm = QueueManager::new();
         let _rx = insert_job(&qm, 7);
-        let active = qm.active.clone();
+        let slots = qm.slots.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            lock_or_recover(&active).remove(&7);
+            lock_or_recover(&slots).active.remove(&7);
         });
         assert!(qm.stop_and_wait(7, StopReason::Remove).await);
         assert!(!qm.is_active(7));
@@ -690,9 +847,44 @@ mod tests {
             .unwrap();
         let qm = QueueManager::new();
         let _rx = insert_job(&qm, id);
-        drop(JobGuard { id, active: qm.active.clone(), db: db.clone(), finished: false });
+        drop(JobGuard { id, slots: qm.slots.clone(), db: db.clone(), finished: false });
         assert!(!qm.is_active(id));
         assert_eq!(db.get_download(id).unwrap().status, DownloadStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn healthy_requeued_run_clears_the_retry_budget() {
+        let row = cancelled_requeue_row(HEALTHY_RUN_BYTES).await;
+        assert_eq!(row.status, DownloadStatus::Queued);
+        assert_eq!(row.attempts, 0);
+        assert_eq!(row.retry_at, None);
+        assert_eq!(row.error_message, None);
+    }
+
+    #[tokio::test]
+    async fn healthy_shutdown_run_clears_the_retry_budget() {
+        let row = cancelled_row(HEALTHY_RUN_BYTES, StopReason::Shutdown).await;
+        assert_eq!(row.status, DownloadStatus::Downloading);
+        assert_eq!(row.attempts, 0);
+        assert_eq!(row.retry_at, None);
+        assert_eq!(row.error_message, None);
+    }
+
+    #[tokio::test]
+    async fn unhealthy_requeued_run_keeps_the_retry_budget() {
+        let row = cancelled_requeue_row(0).await;
+        assert_eq!(row.status, DownloadStatus::Queued);
+        assert_eq!(row.attempts, 3);
+        assert_eq!(row.retry_at, Some(4_000_000_000));
+        assert_eq!(row.error_message.as_deref(), Some("old failure"));
+    }
+
+    #[test]
+    fn ytdlp_limit_splits_the_global_cap_across_active_downloads() {
+        assert_eq!(ytdlp_speed_limit_kbps(0, 4), 0);
+        assert_eq!(ytdlp_speed_limit_kbps(1000, 1), 1000);
+        assert_eq!(ytdlp_speed_limit_kbps(1000, 4), 250);
+        assert_eq!(ytdlp_speed_limit_kbps(3, 4), 1, "a configured limit must remain enforceable");
     }
 
     #[test]

@@ -4,8 +4,9 @@
 use crate::download::DownloadError;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 /// Resolves when the watch flips to `true`. Never resolves if the sender is
 /// dropped without cancelling, so it is safe as a `select!` branch.
@@ -43,23 +44,33 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
+    /// `kbps` is decimal: the UI shows 1000-based units everywhere, so the
+    /// "KB/s" the user types means 1000 bytes per second.
     pub fn new(kbps: u32) -> Self {
         Self {
-            bytes_per_sec: AtomicU64::new(u64::from(kbps) * 1024),
+            bytes_per_sec: AtomicU64::new(u64::from(kbps) * 1000),
             bucket: Mutex::new(Bucket { tokens: 0.0, refilled: Instant::now() }),
         }
     }
 
     /// 0 = unlimited. Clears accumulated debt so the new limit applies at once.
     pub fn set_kbps(&self, kbps: u32) {
-        self.bytes_per_sec.store(u64::from(kbps) * 1024, Ordering::Relaxed);
+        self.bytes_per_sec.store(u64::from(kbps) * 1000, Ordering::Relaxed);
         let mut bucket = crate::util::lock_or_recover(&self.bucket);
         bucket.tokens = 0.0;
         bucket.refilled = Instant::now();
     }
 
     pub fn kbps(&self) -> u32 {
-        (self.bytes_per_sec.load(Ordering::Relaxed) / 1024) as u32
+        (self.bytes_per_sec.load(Ordering::Relaxed) / 1000) as u32
+    }
+
+    fn refill_bucket(bucket: &mut Bucket, rate: f64) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(bucket.refilled).as_secs_f64();
+        bucket.refilled = now;
+        // Burst is capped at one second of traffic.
+        bucket.tokens = (bucket.tokens + elapsed * rate).min(rate);
     }
 
     /// Debt model: the bytes are already received, so charge them and report
@@ -70,11 +81,18 @@ impl RateLimiter {
             return None;
         }
         let mut bucket = crate::util::lock_or_recover(&self.bucket);
-        let now = Instant::now();
-        let elapsed = now.duration_since(bucket.refilled).as_secs_f64();
-        bucket.refilled = now;
-        // Burst is capped at one second of traffic.
-        bucket.tokens = (bucket.tokens + elapsed * rate).min(rate) - bytes as f64;
+        Self::refill_bucket(&mut bucket, rate);
+        bucket.tokens -= bytes as f64;
+        (bucket.tokens < 0.0).then(|| Duration::from_secs_f64(-bucket.tokens / rate))
+    }
+
+    fn debt_wait(&self) -> Option<Duration> {
+        let rate = self.bytes_per_sec.load(Ordering::Relaxed) as f64;
+        if rate <= 0.0 {
+            return None;
+        }
+        let mut bucket = crate::util::lock_or_recover(&self.bucket);
+        Self::refill_bucket(&mut bucket, rate);
         (bucket.tokens < 0.0).then(|| Duration::from_secs_f64(-bucket.tokens / rate))
     }
 
@@ -83,11 +101,17 @@ impl RateLimiter {
         bytes: u64,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), DownloadError> {
-        let Some(wait) = self.charge(bytes) else {
+        let Some(mut wait) = self.charge(bytes) else {
             return Ok(());
         };
-        // Cap one sleep so "unlimited" or a higher limit is picked up quickly.
-        sleep_or_cancel(wait.min(Duration::from_secs(2)), cancel).await
+        loop {
+            // Re-check long debts so "unlimited" or a higher limit is picked up quickly.
+            sleep_or_cancel(wait.min(Duration::from_secs(2)), cancel).await?;
+            let Some(remaining) = self.debt_wait() else {
+                return Ok(());
+            };
+            wait = remaining;
+        }
     }
 }
 
@@ -106,12 +130,22 @@ mod tests {
 
     #[test]
     fn charge_reports_debt_shared_across_callers() {
-        let limiter = RateLimiter::new(100); // 102_400 B/s
-                                             // Two "downloads" each push 102_400 bytes: together they owe ~2 s.
-        let first = limiter.charge(102_400).expect("first caller waits");
-        let second = limiter.charge(102_400).expect("second caller waits longer");
+        let limiter = RateLimiter::new(100); // 100_000 B/s
+                                             // Two "downloads" each push 100_000 bytes: together they owe ~2 s.
+        let first = limiter.charge(100_000).expect("first caller waits");
+        let second = limiter.charge(100_000).expect("second caller waits longer");
         assert!(first.as_secs_f64() > 0.9 && first.as_secs_f64() < 1.1, "{first:?}");
         assert!(second.as_secs_f64() > 1.9 && second.as_secs_f64() < 2.1, "{second:?}");
+    }
+
+    #[test]
+    fn kbps_is_decimal_end_to_end() {
+        let limiter = RateLimiter::new(1);
+        assert_eq!(limiter.bytes_per_sec.load(Ordering::Relaxed), 1000);
+        assert_eq!(limiter.kbps(), 1);
+        limiter.set_kbps(512);
+        assert_eq!(limiter.bytes_per_sec.load(Ordering::Relaxed), 512_000);
+        assert_eq!(limiter.kbps(), 512);
     }
 
     #[test]
@@ -121,6 +155,45 @@ mod tests {
         limiter.set_kbps(0);
         assert!(limiter.charge(10 * 1024 * 1024).is_none());
         assert_eq!(limiter.kbps(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sustained_acquire_throughput_converges_to_the_configured_rate() {
+        let limiter = std::sync::Arc::new(RateLimiter::new(1)); // 1000 B/s
+        let (_tx, rx) = watch::channel(false);
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let worker_limiter = limiter.clone();
+                let rx = rx.clone();
+                tokio::spawn(async move {
+                    for _ in 0..2 {
+                        worker_limiter.acquire(4000, &rx).await.unwrap();
+                    }
+                })
+            })
+            .collect();
+        tokio::task::yield_now().await;
+
+        for _ in 0..90 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            workers.iter().all(|worker| !worker.is_finished()),
+            "16000 bytes at 1000 B/s need about 16 seconds"
+        );
+
+        for _ in 0..75 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            workers.iter().all(|worker| worker.is_finished()),
+            "the debt should be paid shortly after 16 seconds"
+        );
+        for worker in workers {
+            worker.await.unwrap();
+        }
     }
 
     #[tokio::test]
