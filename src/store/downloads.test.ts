@@ -36,6 +36,7 @@ function reset() {
     selectedIds: new Set(),
     primaryId: null,
     liveSpeeds: {},
+    byteRestartIds: new Set(),
   });
 }
 
@@ -185,6 +186,31 @@ describe('useDownloadsStore', () => {
     expect(useDownloadsStore.getState().rows[0]).toMatchObject({
       downloaded_size: 800,
       segments: 8,
+    });
+  });
+
+  it('accepts lower bytes when a new run goes back to Downloading', () => {
+    const merging = makeRow({ status: 'Merging', downloaded_size: 800 });
+    useDownloadsStore.setState({ rows: [merging] });
+    useDownloadsStore
+      .getState()
+      .upsert({ ...merging, status: 'Downloading', downloaded_size: 0, speed: 20 });
+    expect(useDownloadsStore.getState().rows[0]).toMatchObject({
+      status: 'Downloading',
+      downloaded_size: 0,
+    });
+  });
+
+  it('does not clamp restarted live bytes back to their old maximum', () => {
+    const live = makeRow({ status: 'Downloading', downloaded_size: 800 });
+    useDownloadsStore.setState({ rows: [live] });
+    useDownloadsStore.getState().applyProgress(tick(live.id, { downloaded_size: 0, speed: 5 }));
+    expect(useDownloadsStore.getState().rows[0].downloaded_size).toBe(0);
+
+    useDownloadsStore.getState().upsert({ ...live, filename: 'renamed.bin' });
+    expect(useDownloadsStore.getState().rows[0]).toMatchObject({
+      filename: 'renamed.bin',
+      downloaded_size: 0,
     });
   });
 

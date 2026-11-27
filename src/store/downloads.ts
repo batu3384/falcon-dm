@@ -49,6 +49,14 @@ function insertById(rows: DownloadModel[], row: DownloadModel): DownloadModel[] 
   return [...rows.slice(0, index), row, ...rows.slice(index)];
 }
 
+function setByteRestarted(ids: Set<number>, id: number, restarted: boolean): Set<number> {
+  if (ids.has(id) === restarted) return ids;
+  const next = new Set(ids);
+  if (restarted) next.add(id);
+  else next.delete(id);
+  return next;
+}
+
 export interface SelectMods {
   toggle?: boolean;
   range?: boolean;
@@ -69,6 +77,8 @@ interface DownloadsState {
   primaryId: number | null;
   /** Speed of every running download, whatever the current view shows. */
   liveSpeeds: Record<number, number>;
+  /** Live rows whose byte counter restarted; full rows must not restore the old maximum. */
+  byteRestartIds: Set<number>;
 
   setView: (view: ViewId) => Promise<void>;
   setSearch: (search: string) => Promise<void>;
@@ -120,13 +130,19 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => {
         const selectedIds = new Set([...state.selectedIds].filter((id) => visible.has(id)));
         // Seed speeds of live rows so the total is right before the first tick.
         const liveSpeeds = { ...state.liveSpeeds };
+        let byteRestartIds = state.byteRestartIds;
         for (const row of rows) {
-          if (!isLive(row.status)) delete liveSpeeds[row.id];
-          else if (!(row.id in liveSpeeds)) liveSpeeds[row.id] = row.speed;
+          if (!isLive(row.status)) {
+            delete liveSpeeds[row.id];
+            byteRestartIds = setByteRestarted(byteRestartIds, row.id, false);
+          } else if (!(row.id in liveSpeeds)) {
+            liveSpeeds[row.id] = row.speed;
+          }
         }
         return {
           rows,
           liveSpeeds,
+          byteRestartIds,
           loading: false,
           hasMore: lastPageFull,
           loadedPages: Math.max(1, Math.ceil(rows.length / DOWNLOAD_PAGE_SIZE)),
@@ -154,6 +170,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => {
     selectedIds: new Set(),
     primaryId: null,
     liveSpeeds: {},
+    byteRestartIds: new Set(),
 
     setView: async (view) => {
       if (view === get().view) return;
@@ -206,11 +223,13 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => {
         const belongs =
           downloadMatchesView(row, state.view) && downloadMatchesSearch(row, state.search);
         if (!belongs) {
-          if (index === -1) return { liveSpeeds };
+          const byteRestartIds = setByteRestarted(state.byteRestartIds, row.id, false);
+          if (index === -1) return { liveSpeeds, byteRestartIds };
           const selectedIds = new Set(state.selectedIds);
           selectedIds.delete(row.id);
           return {
             liveSpeeds,
+            byteRestartIds,
             rows: state.rows.filter((existing) => existing.id !== row.id),
             selectedIds,
             primaryId: state.primaryId === row.id ? null : state.primaryId,
@@ -218,18 +237,29 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => {
         }
         if (index === -1) return { liveSpeeds, rows: insertById(state.rows, row) };
         const existing = state.rows[index];
-        // A row update never carries fresher counters than live progress.
-        const next =
-          isLive(row.status) && isLive(existing.status)
-            ? {
-                ...row,
-                downloaded_size: Math.max(row.downloaded_size, existing.downloaded_size),
-                speed: existing.speed,
-              }
-            : row;
+        const restartTransition =
+          row.status === 'Downloading' &&
+          existing.status !== 'Downloading' &&
+          row.downloaded_size < existing.downloaded_size;
+        let byteRestartIds = state.byteRestartIds;
+        if (!isLive(row.status)) byteRestartIds = setByteRestarted(byteRestartIds, row.id, false);
+        else if (restartTransition) byteRestartIds = setByteRestarted(byteRestartIds, row.id, true);
+
+        // A row update never carries fresher counters than live progress. A
+        // restarted transfer is the one exception to the bytes being monotonic.
+        let downloadedSize = row.downloaded_size;
+        const bothLive = isLive(row.status) && isLive(existing.status);
+        if (bothLive) {
+          downloadedSize = Math.max(row.downloaded_size, existing.downloaded_size);
+          if (state.byteRestartIds.has(row.id)) downloadedSize = existing.downloaded_size;
+          if (restartTransition) downloadedSize = row.downloaded_size;
+        }
+        const next = bothLive
+          ? { ...row, downloaded_size: downloadedSize, speed: existing.speed }
+          : row;
         const rows = state.rows.slice();
         rows[index] = next;
-        return { liveSpeeds, rows };
+        return { liveSpeeds, byteRestartIds, rows };
       }),
 
     remove: (id) =>
@@ -240,6 +270,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => {
         selectedIds.delete(id);
         return {
           liveSpeeds,
+          byteRestartIds: setByteRestarted(state.byteRestartIds, id, false),
           rows: state.rows.filter((row) => row.id !== id),
           selectedIds,
           primaryId: state.primaryId === id ? null : state.primaryId,
@@ -253,10 +284,15 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => {
         // Speeds of rows outside this view still count towards the total.
         if (current && !isLive(current.status)) return state;
         const liveSpeeds = { ...state.liveSpeeds, [p.id]: p.status === 'Merging' ? 0 : p.speed };
-        if (!current) return { liveSpeeds };
+        // Worker ticks are ordered, so shrinking bytes mean the transfer restarted.
+        const byteRestartIds =
+          current && p.downloaded_size < current.downloaded_size
+            ? setByteRestarted(state.byteRestartIds, p.id, true)
+            : state.byteRestartIds;
+        if (!current) return { liveSpeeds, byteRestartIds };
         const rows = state.rows.slice();
         rows[index] = applyProgressToRow(current, p);
-        return { liveSpeeds, rows };
+        return { liveSpeeds, byteRestartIds, rows };
       }),
 
     select: (id, mods) =>

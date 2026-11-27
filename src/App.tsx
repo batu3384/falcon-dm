@@ -71,7 +71,6 @@ function App() {
   const upsert = useDownloadsStore((s) => s.upsert);
   const remove = useDownloadsStore((s) => s.remove);
   const applyProgress = useDownloadsStore((s) => s.applyProgress);
-  const select = useDownloadsStore((s) => s.select);
 
   const refreshStats = useAppStore((s) => s.refreshStats);
   const refreshExtension = useAppStore((s) => s.refreshExtension);
@@ -346,7 +345,7 @@ function App() {
                 rows={selectedRows}
                 primary={primary}
                 actions={actions}
-                onClose={() => select(null)}
+                onClose={() => ui.toggleInspector()}
               />
             </ErrorBoundary>
           )}

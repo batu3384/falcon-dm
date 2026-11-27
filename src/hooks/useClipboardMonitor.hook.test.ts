@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useClipboardMonitor } from './useClipboardMonitor';
+import { useClipboardMonitor, suppressClipboardUrl } from './useClipboardMonitor';
 import * as api from '../api/commands';
 
 vi.mock('../api/commands', () => ({
@@ -72,5 +72,26 @@ describe('useClipboardMonitor polling', () => {
       await vi.advanceTimersByTimeAsync(2100);
     });
     expect(onUrl).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a URL copied by the app, then resumes normal detection', async () => {
+    const appCopy = 'https://cdn.example.com/app-copy.zip';
+    const userCopy = 'https://cdn.example.com/user-copy.zip';
+    suppressClipboardUrl(appCopy);
+    mockedReadClipboard.mockResolvedValue(appCopy);
+    const onUrl = vi.fn();
+    renderHook(() => useClipboardMonitor(true, onUrl));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    expect(onUrl).not.toHaveBeenCalled();
+
+    mockedReadClipboard.mockResolvedValue(userCopy);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    expect(onUrl).toHaveBeenCalledTimes(1);
+    expect(onUrl).toHaveBeenCalledWith(userCopy);
   });
 });

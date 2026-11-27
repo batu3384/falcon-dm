@@ -293,7 +293,7 @@ export default function DownloadList() {
         onKeyDown={onKeyDown}
         onMouseDown={(e) => {
           // Click on empty space clears the selection, like Finder.
-          if (e.target === e.currentTarget) select(null);
+          if (!(e.target as HTMLElement).closest('.list-row')) select(null);
         }}
       >
         {body}

@@ -6,6 +6,19 @@ export const URL_RE = /^https?:\/\/\S+/i;
 const GLOBAL_JUNK_PATH_RE = /no_input\.mp3|\/generate_204|favicon|\.svg(\?|$)/i;
 const YOUTUBE_UI_PATH_RE = /\/api\/stats|\/log_event|\/ptracking|\/s\/search\//i;
 
+let copiedByApp: string | null = null;
+
+/** Ignore the next monitor sighting of a URL the app itself put on the clipboard. */
+export function suppressClipboardUrl(url: string) {
+  copiedByApp = url.trim();
+}
+
+function consumeSuppressedClipboardUrl(text: string): boolean {
+  if (copiedByApp === null || copiedByApp !== text) return false;
+  copiedByApp = null;
+  return true;
+}
+
 function isYoutubeClipboardHost(host: string): boolean {
   return (
     host === 'youtu.be' ||
@@ -68,7 +81,12 @@ export function useClipboardMonitor(
       try {
         const text = await readClipboardText();
         readFailed.current = false;
-        if (!text || text === lastRef.current) return;
+        if (!text) return;
+        if (consumeSuppressedClipboardUrl(text)) {
+          lastRef.current = text;
+          return;
+        }
+        if (text === lastRef.current) return;
         if (!isQueueableClipboardUrl(text)) return;
         if (!clipboardUrlConsumed(onUrlRef.current(text))) return;
         lastRef.current = text;

@@ -6,6 +6,7 @@ import { fileFullPath } from './format';
 import { getDownloadCapabilities } from './downloadCapabilities';
 import { useToastStore } from '../store/toast';
 import { useUiStore } from '../store/ui';
+import { suppressClipboardUrl } from '../hooks/useClipboardMonitor';
 
 /** Every per-download action, shared by rows, inspector, menus and shortcuts. */
 export function useDownloadActions() {
@@ -60,8 +61,11 @@ export function useDownloadActions() {
       reveal: (row: DownloadModel) => api.openFolder(fileFullPath(row)).catch(fail),
       open: (row: DownloadModel) => api.openFile(fileFullPath(row)).catch(fail),
       copyUrl: async (row: DownloadModel) => {
+        const url = row.url.replace(/#falconfmt=.*$/, '');
         try {
-          await navigator.clipboard.writeText(row.url.replace(/#falconfmt=.*$/, ''));
+          // Mark before the async write so an in-flight poll cannot mistake it for a user copy.
+          suppressClipboardUrl(url);
+          await navigator.clipboard.writeText(url);
           showToast('success', t('actions.link_copied'));
         } catch (e) {
           fail(e);
