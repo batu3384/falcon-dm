@@ -4,6 +4,7 @@ import {
   isPublicHttpUrl,
   publicHttpUrlsFromMixedText,
   publicHttpUrlsFromText,
+  mixedTextLinkStats,
   enqueueCookieUrl,
   isFalconGithubReleaseUrl,
 } from './publicHttpUrl';
@@ -75,6 +76,42 @@ describe('publicHttpUrlsFromMixedText', () => {
     expect(
       publicHttpUrlsFromMixedText('https://cdn.example.com/a.zip https://cdn.example.com/b.zip'),
     ).toEqual(['https://cdn.example.com/a.zip', 'https://cdn.example.com/b.zip']);
+  });
+});
+
+describe('mixedTextLinkStats', () => {
+  it('reports the same urls as publicHttpUrlsFromMixedText', () => {
+    const text =
+      '# skip\nhttps://cdn.example.com/a.mp4,https://cdn.example.com/b.zip\nhttps://cdn.example.com/a.mp4';
+    expect(mixedTextLinkStats(text).urls).toEqual(publicHttpUrlsFromMixedText(text));
+  });
+
+  it('counts junk lines as skipped but not blank lines or comments', () => {
+    const stats = mixedTextLinkStats(
+      'https://cdn.example.com/a.zip\n\n   \n# a comment\njust some prose\nmagnet:?xt=urn:btih:abc',
+    );
+    expect(stats.urls).toEqual(['https://cdn.example.com/a.zip']);
+    expect(stats.skippedLines).toBe(2);
+  });
+
+  it('counts private and non-http lines as skipped', () => {
+    const stats = mixedTextLinkStats(
+      'http://127.0.0.1/x\nfile:///etc/passwd\nhttps://cdn.example.com/b.zip',
+    );
+    expect(stats.skippedLines).toBe(2);
+  });
+
+  it('does not skip a line that yields at least one valid link', () => {
+    const stats = mixedTextLinkStats(
+      'junk words\nhttps://cdn.example.com/a.zip https://cdn.example.com/b.zip',
+    );
+    expect(stats.skippedLines).toBe(1);
+    expect(stats.urls).toEqual(['https://cdn.example.com/a.zip', 'https://cdn.example.com/b.zip']);
+  });
+
+  it('skips nothing for clean input', () => {
+    expect(mixedTextLinkStats('https://cdn.example.com/a.zip').skippedLines).toBe(0);
+    expect(mixedTextLinkStats('').skippedLines).toBe(0);
   });
 });
 

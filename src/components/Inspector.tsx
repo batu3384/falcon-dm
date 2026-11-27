@@ -14,6 +14,7 @@ import { getDownloadCapabilities, isLive } from '../lib/downloadCapabilities';
 import { localizeDownloadError } from '../api/commands';
 import { downloadEngine } from '../lib/publicHttpUrl';
 import { retryCountdown, sizeProgress } from '../lib/downloadText';
+import { checksumAlgoLabel } from '../lib/checksum';
 import type { DownloadActions } from '../lib/useDownloadActions';
 import { FileIcon } from './FileIcon';
 
@@ -175,6 +176,28 @@ export function Inspector({ rows, primary, actions, onClose }: InspectorProps) {
             <>
               <dt>{t('inspector.attempts')}</dt>
               <dd>{row.attempts}</dd>
+            </>
+          )}
+          {row.expected_hash && (
+            <>
+              <dt>{t('inspector.checksum')}</dt>
+              {row.status === 'Completed' ? (
+                // Verification runs before the file lands, so a completed row
+                // with a hash is a verified file.
+                <dd className="verified">
+                  {t('inspector.checksum_verified', {
+                    algo: checksumAlgoLabel(row.expected_hash),
+                  })}
+                </dd>
+              ) : row.status === 'Failed' && row.error_message === 'ERR_CHECKSUM_MISMATCH' ? (
+                <dd className="mismatch">
+                  {t('inspector.checksum_mismatch', {
+                    algo: checksumAlgoLabel(row.expected_hash),
+                  })}
+                </dd>
+              ) : (
+                <dd>{checksumAlgoLabel(row.expected_hash)}</dd>
+              )}
             </>
           )}
         </dl>

@@ -68,6 +68,9 @@
   "qualityHint": {
     "message": "Kalite ve format seçin. HLS akışları Falcon DM tarafından otomatik birleştirilir."
   },
+  "qualityAudioOnly": {
+    "message": "Yalnızca ses (M4A)"
+  },
   "labelQuality": {
     "message": "Kalite ve format"
   },

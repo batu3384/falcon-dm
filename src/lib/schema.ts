@@ -43,6 +43,8 @@ export const DownloadSchema = z.object({
   archived: z.boolean().optional().default(false),
   attempts: z.number().int().nonnegative().optional().default(0),
   retry_at: z.number().nullable().optional().default(null),
+  /** Canonical `algo:hex` the finished file was verified against (sha256/md5). */
+  expected_hash: z.string().nullable().optional().default(null),
 });
 
 export const DownloadArraySchema = z.array(DownloadSchema).max(500);
@@ -67,6 +69,16 @@ export const DownloadProfileSchema = z.object({
   save_subdir: z.string().nullable().optional(),
 });
 
+const WeekdayMaskSchema = z.tuple([
+  z.boolean(),
+  z.boolean(),
+  z.boolean(),
+  z.boolean(),
+  z.boolean(),
+  z.boolean(),
+  z.boolean(),
+]);
+
 export const SettingsSchema = z.object({
   theme: z.string(),
   default_download_path: z.string(),
@@ -82,6 +94,9 @@ export const SettingsSchema = z.object({
   schedule_active: z.boolean().optional(),
   schedule_start: z.string().nullable().optional(),
   schedule_stop: z.string().nullable().optional(),
+  schedule_days: WeekdayMaskSchema.optional(),
+  completion_action: z.enum(['none', 'sleep', 'script']).optional(),
+  completion_script: z.string().optional(),
   download_profiles: z.array(DownloadProfileSchema).optional(),
 });
 

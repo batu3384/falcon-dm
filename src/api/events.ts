@@ -51,3 +51,6 @@ export const onDownloadProgress = (cb: (p: ProgressPayload) => void) =>
 
 export const onPairRequest = (cb: (request: PairRequest) => void) =>
   on('pair-request', parsePairRequest, cb);
+
+/** Tray "New Download" — the payload is empty, the event itself is the signal. */
+export const onOpenNewDownload = (cb: () => void) => on('open-new-download', () => true, cb);

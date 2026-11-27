@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import i18n from '../../i18n';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -131,6 +131,23 @@ describe('SettingsSheet', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('two different times');
     expect(api.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('saves weekday schedule selections and the completion action', async () => {
+    render(<SettingsSheet initialTab="downloads" onClose={vi.fn()} />);
+    await userEvent.click(await screen.findByLabelText(/Download only during these hours/));
+    fireEvent.change(screen.getByLabelText('Start time'), { target: { value: '23:00' } });
+    fireEvent.change(screen.getByLabelText('End time'), { target: { value: '07:00' } });
+    await userEvent.click(screen.getByRole('button', { name: 'Tuesday' }));
+    await userEvent.selectOptions(await screen.findByLabelText('When downloads finish:'), 'script');
+    await userEvent.type(await screen.findByLabelText('Script:'), '/tmp/done.sh');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+    const saved = vi.mocked(api.saveSettings).mock.calls[0][0];
+    expect(saved.schedule_days).toEqual([true, false, true, true, true, true, true]);
+    expect(saved.completion_action).toBe('script');
+    expect(saved.completion_script).toBe('/tmp/done.sh');
   });
 
   it('explains how to install a missing yt-dlp', async () => {

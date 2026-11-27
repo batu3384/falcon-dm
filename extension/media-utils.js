@@ -323,6 +323,10 @@
     return { url: raw, format: null };
   }
 
+  // ponytail: same selector as the in-app sheet (src/lib/ytFormats.ts) — m4a is
+  // YouTube's native audio container, so yt-dlp downloads it without re-encoding.
+  const AUDIO_ONLY_FORMAT = 'bestaudio[ext=m4a]/bestaudio';
+
   function overlayEnqueuePayload(pageUrl, selected) {
     const page = String(pageUrl || '').split('#')[0];
     const src = String((selected && selected.url) || '').trim();
@@ -330,6 +334,9 @@
       return { url: src, format: null };
     }
     if (isYoutubeWatchPage(page)) {
+      if (selected && selected.audioOnly) {
+        return { url: page, format: AUDIO_ONLY_FORMAT };
+      }
       const h = Number(selected && selected.height) || Number(selected && selected.label) || 720;
       const height = Math.min(Math.max(h, 144), 2160);
       return {
@@ -605,7 +612,7 @@
       { height: 1080, label: '1080' },
     ];
     const hint = _i18n('youtubeHint', 'YouTube via yt-dlp');
-    return tiers.map(({ height, label }) => ({
+    const cards = tiers.map(({ height, label }) => ({
       url: watch,
       title: `${height}p · MP4 · ${_i18n('kindVideoAudio', 'Video+Audio')}`,
       subtitle: hint,
@@ -619,6 +626,21 @@
       score: height,
       ext: 'mp4',
     }));
+    // Audio-only parity with the in-app sheet: same card, same selector.
+    cards.push({
+      url: watch,
+      title: _i18n('qualityAudioOnly', 'Audio only (M4A)'),
+      subtitle: hint,
+      quality: '',
+      format: 'M4A',
+      muxed: false,
+      isAudio: true,
+      audioOnly: true,
+      isHls: false,
+      score: 0,
+      ext: 'm4a',
+    });
+    return cards;
   }
 
   function collectPageBlobSources() {

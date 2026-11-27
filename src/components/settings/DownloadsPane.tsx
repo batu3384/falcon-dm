@@ -5,6 +5,8 @@ import * as api from '../../api/commands';
 import { Check, FormRow } from './FormRow';
 import { NumberField } from './NumberField';
 import { lastSpeedLimit, rememberSpeedLimit } from '../../lib/speedLimit';
+import { ALL_SCHEDULE_DAYS } from '../../lib/scheduler';
+import { WeekdayPicker } from './WeekdayPicker';
 import type { PaneProps, ScheduleDraft } from './types';
 
 const CATEGORY_FOLDERS = [
@@ -30,10 +32,25 @@ export function DownloadsPane({
   const showToast = useToastStore((s) => s.showToast);
   const limit = settings.speed_limit_kbps ?? 0;
   const folders = settings.category_paths ?? {};
+  const scheduleDays = settings.schedule_days ?? ALL_SCHEDULE_DAYS;
+  const completionAction = settings.completion_action ?? 'none';
 
   const pickFolder = async (current: string, apply: (path: string) => void) => {
     try {
       const picked = await openDialog({ directory: true, multiple: false, defaultPath: current });
+      if (typeof picked === 'string') apply(picked);
+    } catch (e) {
+      showToast('error', api.extractTauriError(e));
+    }
+  };
+
+  const pickScript = async (current: string, apply: (path: string) => void) => {
+    try {
+      const picked = await openDialog({
+        directory: false,
+        multiple: false,
+        defaultPath: current || undefined,
+      });
       if (typeof picked === 'string') apply(picked);
     } catch (e) {
       showToast('error', api.extractTauriError(e));
@@ -164,12 +181,64 @@ export function DownloadsPane({
             aria-invalid={scheduleError ? true : undefined}
           />
         </div>
+        <WeekdayPicker
+          value={scheduleDays}
+          disabled={!schedule.active}
+          onChange={(schedule_days) => update({ schedule_days })}
+        />
         {scheduleError && (
           <p className="field-error" role="alert">
             {scheduleError}
           </p>
         )}
       </FormRow>
+      <div className="form-sep" />
+      <FormRow label={t('settings.completion_action')} htmlFor="set-completion-action">
+        <select
+          id="set-completion-action"
+          className="select"
+          value={completionAction}
+          onChange={(e) =>
+            update({ completion_action: e.target.value as 'none' | 'sleep' | 'script' })
+          }
+          aria-describedby="set-completion-action-hint"
+        >
+          <option value="none">{t('settings.completion_none')}</option>
+          <option value="sleep">{t('settings.completion_sleep')}</option>
+          <option value="script">{t('settings.completion_script')}</option>
+        </select>
+        <p id="set-completion-action-hint" className="hint">
+          {t('settings.completion_hint')}
+        </p>
+      </FormRow>
+      {completionAction === 'script' && (
+        <FormRow label={t('settings.completion_script_label')} htmlFor="set-completion-script">
+          <div className="input-row">
+            <input
+              id="set-completion-script"
+              className="input"
+              value={settings.completion_script ?? ''}
+              onChange={(e) => update({ completion_script: e.target.value })}
+              spellCheck={false}
+              aria-describedby="set-completion-script-hint"
+            />
+            <button
+              type="button"
+              className="btn"
+              onClick={() =>
+                void pickScript(settings.completion_script ?? '', (path) =>
+                  update({ completion_script: path }),
+                )
+              }
+            >
+              {t('common.choose')}
+            </button>
+          </div>
+          <p id="set-completion-script-hint" className="hint">
+            {t('settings.completion_script_hint')}
+          </p>
+        </FormRow>
+      )}
     </>
   );
 }

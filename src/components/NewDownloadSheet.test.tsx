@@ -85,4 +85,42 @@ describe('NewDownloadSheet', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('http:// or https://');
     expect(addDownload).not.toHaveBeenCalled();
   });
+
+  it('reports junk lines next to the link count', () => {
+    render(
+      <NewDownloadSheet
+        initialText={
+          'junk words\nhttps://cdn.example.com/a.zip\nmagnet:?xt=urn:btih:abc\nhttps://cdn.example.com/b.zip'
+        }
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('2 links · 2 lines skipped')).toBeInTheDocument();
+  });
+
+  it('reports a single skipped line in singular', () => {
+    render(
+      <NewDownloadSheet
+        initialText={'junk words\nhttps://cdn.example.com/a.zip'}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('1 line skipped')).toBeInTheDocument();
+  });
+
+  it('summarizes skipped lines in the result toast', async () => {
+    const { useToastStore } = await import('../store/toast');
+    useToastStore.setState({ toasts: [] });
+    render(
+      <NewDownloadSheet
+        initialText={'junk words\nhttps://cdn.example.com/a.zip'}
+        onClose={vi.fn()}
+      />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Download' }));
+    await waitFor(() => expect(addDownload).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(useToastStore.getState().toasts.map((t) => t.msg)).toContain('1 added, 1 skipped'),
+    );
+  });
 });

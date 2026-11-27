@@ -211,12 +211,31 @@ assert(blobJob.url.startsWith('blob:'), 'blob on watch stays blob');
 assert(blobJob.format === null, 'blob skip yt-dlp format');
 assert(!FM.isJunkUrl('https://www.youtube.com/watch?v=abc'), 'watch URL is not junk');
 
+const audioJob = FM.overlayEnqueuePayload('https://www.youtube.com/watch?v=abc', {
+  url: 'https://www.youtube.com/watch?v=abc',
+  audioOnly: true,
+  isAudio: true,
+});
+assert(audioJob.url.includes('watch?v='), 'audio overlay enqueues page URL');
+assert(
+  audioJob.format === 'bestaudio[ext=m4a]/bestaudio',
+  `audio overlay sends the same selector as the app sheet, got ${audioJob.format}`,
+);
+
 const cards = FM.youtubeFallbackSources('https://www.youtube.com/watch?v=abc');
 const best = FM.pickBest(cards);
 assert(best && best.height === 1080, 'pickBest selects highest muxed fallback');
 assert(
   cards.filter((c) => c.url === best.url).length === cards.length,
   'watch fallback cards share page URL — UI must not key selection on url',
+);
+const audioCard = cards.find((c) => c.audioOnly);
+assert(audioCard, 'watch fallback includes an audio-only card');
+assert(audioCard.isAudio && audioCard.ext === 'm4a', 'audio-only card is m4a audio');
+assert(!best.audioOnly, 'pickBest never auto-selects the audio-only card');
+assert(
+  cards.indexOf(audioCard) === cards.length - 1,
+  'audio-only card sorts after the video tiers',
 );
 
 function tick(ms = 30) {
@@ -367,6 +386,11 @@ function loadScripts(win, files) {
     assert(activeAfter.length === 1, 'clicking 360 leaves one active card');
     assert(activeAfter[0].textContent.includes('360'), '360p stays selected after click');
 
+    assert(
+      [...panel.querySelectorAll('.fm-card')].some((c) => /audio only/i.test(c.textContent)),
+      'overlay offers an audio-only card on watch pages',
+    );
+
     const goBtn = [...panel.querySelectorAll('button')].find((b) => /start download/i.test(b.textContent));
     assert(goBtn, 'Start Download button exists');
     goBtn.click();
@@ -378,6 +402,71 @@ function loadScripts(win, files) {
     assert(
       String(job.format || '').includes('height<=360'),
       `format follows selected 360, got ${job.format}`,
+    );
+  });
+}
+
+{
+  const sentBox = { sent: [] };
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <div id="movie_player">
+        <video class="html5-main-video" src="https://example.com/x.mp4"></video>
+      </div>
+    </body></html>`,
+    {
+      url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      pretendToBeVisual: true,
+      runScripts: 'dangerously',
+      beforeParse(win) {
+        patchVisual(win);
+        sentBox.sent = installChrome(win, {
+          onSend(payload) {
+            if (payload.action === 'download_video') return { success: true };
+            return { ok: true };
+          },
+        });
+      },
+    },
+  );
+  const win = dom.window;
+  await withDomGlobals(win, async () => {
+    loadScripts(win, ['media-utils.js', 'content.js']);
+
+    const fabHost = win.document.querySelector('[data-falcon-fab]');
+    const fabBtn = fabHost.shadowRoot && fabHost.shadowRoot.querySelector('.fm-fab');
+    fabBtn.click();
+    await tick();
+
+    const overlayHost = [...win.document.querySelectorAll('div')].find(
+      (node) => node.shadowRoot && node.shadowRoot.querySelector('[role="dialog"]'),
+    );
+    const panel = overlayHost.shadowRoot.querySelector('[role="dialog"]');
+    const audioCard = [...panel.querySelectorAll('.fm-card')].find((c) =>
+      /audio only/i.test(c.textContent),
+    );
+    assert(audioCard, 'audio-only card renders on the watch overlay');
+    audioCard.click();
+    await tick();
+
+    const active = [...panel.querySelectorAll('.fm-card.active')];
+    assert(
+      active.length === 1 && /audio only/i.test(active[0].textContent),
+      'audio card becomes the active selection',
+    );
+    const nameInput = panel.querySelector('#fm-filename');
+    assert(/\.m4a$/i.test(nameInput.value), `audio card filenames as m4a, got ${nameInput.value}`);
+
+    const goBtn = [...panel.querySelectorAll('button')].find((b) => /start download/i.test(b.textContent));
+    goBtn.click();
+    await tick(80);
+
+    const job = sentBox.sent.find((p) => p.action === 'download_video');
+    assert(job, 'audio card Start Download posts download_video');
+    assert(String(job.url).includes('watch?v='), 'audio enqueue uses watch URL');
+    assert(
+      job.format === 'bestaudio[ext=m4a]/bestaudio',
+      `audio card enqueues the app-sheet selector, got ${job.format}`,
     );
   });
 }

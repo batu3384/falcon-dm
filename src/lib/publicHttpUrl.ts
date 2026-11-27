@@ -82,13 +82,26 @@ export function publicHttpUrlsFromText(text: string): string[] {
 
 /** CSV / space / uri-list paste. Do not split query commas (`?ids=1,2`). */
 export function publicHttpUrlsFromMixedText(text: string): string[] {
+  return mixedTextLinkStats(text).urls;
+}
+
+/**
+ * Batch-paste extraction plus a per-line verdict: `skippedLines` counts
+ * non-empty, non-comment lines no valid public link could be extracted from,
+ * so the sheet can report them instead of dropping them silently. A line
+ * whose only link is a duplicate still counts as a link line, not junk.
+ */
+export function mixedTextLinkStats(text: string): { urls: string[]; skippedLines: number } {
   const lines: string[] = [];
+  let skippedLines = 0;
   for (const line of text.split(/\r?\n/)) {
     const value = line.trim();
     if (!value || value.startsWith('#')) continue;
-    lines.push(...value.split(/[,;\s]+(?=https?:\/\/)/i));
+    const tokens = value.split(/[,;\s]+(?=https?:\/\/)/i);
+    if (!tokens.some((token) => isPublicHttpUrl(token))) skippedLines += 1;
+    lines.push(...tokens);
   }
-  return publicHttpUrlsFromText(lines.join('\n'));
+  return { urls: publicHttpUrlsFromText(lines.join('\n')), skippedLines };
 }
 
 /** Cookie header only attaches when cookie_url origin matches the download (Rust). */

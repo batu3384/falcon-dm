@@ -33,6 +33,8 @@ describe('localizeDownloadError', () => {
     expect(localizeDownloadError('ERR_VIDEO_UNAVAILABLE', t)).toBe('errors.video_unavailable');
     expect(localizeDownloadError('ERR_VIDEO_PRIVATE', t)).toBe('errors.video_private');
     expect(localizeDownloadError('ERR_LOGIN_REQUIRED', t)).toBe('errors.login_required');
+    expect(localizeDownloadError('ERR_CHECKSUM_MISMATCH', t)).toBe('errors.checksum_mismatch');
+    expect(localizeDownloadError('ERR_CHECKSUM_INVALID', t)).toBe('errors.checksum_invalid');
   });
 
   it('groups HTTP status codes by what the user can do', () => {

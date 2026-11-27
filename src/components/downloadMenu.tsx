@@ -8,6 +8,7 @@ import {
   FolderInput,
   Pause,
   Play,
+  RefreshCw,
   RotateCw,
   Search,
   Trash2,
@@ -72,6 +73,14 @@ export function buildDownloadMenu(
       icon: <Copy {...ICON} />,
       run: () => void actions.copyUrl(row),
     });
+    if (cap.refresh) {
+      entries.push({
+        id: 'refresh',
+        label: t('actions.refresh_link'),
+        icon: <RefreshCw {...ICON} />,
+        run: () => actions.refresh(row),
+      });
+    }
     if (cap.move) {
       entries.push({
         id: 'move',

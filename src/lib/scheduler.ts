@@ -1,5 +1,9 @@
 /** Keep rules aligned with `validate_schedule` in queue.rs. */
 
+/** Monday through Sunday; matches `ALL_SCHEDULE_DAYS` in settings.rs. */
+export type WeekdayMask = [boolean, boolean, boolean, boolean, boolean, boolean, boolean];
+export const ALL_SCHEDULE_DAYS: WeekdayMask = [true, true, true, true, true, true, true];
+
 export type ScheduleCheck = {
   start_time?: string | null;
   stop_time?: string | null;

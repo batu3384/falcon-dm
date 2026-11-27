@@ -9,8 +9,10 @@ import * as api from '../api/commands';
 import {
   enqueueCookieUrl,
   isYoutubePageUrl,
+  mixedTextLinkStats,
   publicHttpUrlsFromMixedText,
 } from '../lib/publicHttpUrl';
+import { canonicalizeChecksum } from '../lib/checksum';
 import { YT_QUALITIES, ytFormatFor, type YtQualityId } from '../lib/ytFormats';
 import { displayPath } from '../types';
 
@@ -39,6 +41,8 @@ export default function NewDownloadSheet({ initialText, onClose, onAdded }: NewD
   const [referrer, setReferrer] = useState('');
   const [userAgent, setUserAgent] = useState('');
   const [cookies, setCookies] = useState('');
+  const [checksum, setChecksum] = useState('');
+  const [checksumError, setChecksumError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [dragOver, setDragOver] = useState(false);
@@ -46,7 +50,7 @@ export default function NewDownloadSheet({ initialText, onClose, onAdded }: NewD
   const dirty = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const urls = useMemo(() => publicHttpUrlsFromMixedText(text), [text]);
+  const { urls, skippedLines } = useMemo(() => mixedTextLinkStats(text), [text]);
   const single = urls.length <= 1;
   const hasYoutube = urls.some(isYoutubePageUrl);
 
@@ -106,6 +110,13 @@ export default function NewDownloadSheet({ initialText, onClose, onAdded }: NewD
       setError(t('new_download.invalid_url'));
       return;
     }
+    // A checksum only makes sense for one file; lenient input is validated
+    // here and re-validated (fail-closed) at enqueue.
+    const expectedHash = single ? canonicalizeChecksum(checksum) : null;
+    if (single && checksum.trim() && !expectedHash) {
+      setChecksumError(t('errors.checksum_invalid'));
+      return;
+    }
     setSubmitting(true);
     setError('');
     localStorage.setItem(QUALITY_KEY, quality);
@@ -121,6 +132,7 @@ export default function NewDownloadSheet({ initialText, onClose, onAdded }: NewD
           cookies: cookies.trim() || undefined,
           cookieUrl,
           format: isYoutubePageUrl(url) ? ytFormatFor(quality) : undefined,
+          expectedHash: expectedHash ?? undefined,
         }),
       ),
     );
@@ -138,7 +150,12 @@ export default function NewDownloadSheet({ initialText, onClose, onAdded }: NewD
     const added = results.length - failures.length;
     if (added) onAdded?.();
     if (!failures.length) {
-      showToast('success', t('new_download.added', { count: added }));
+      showToast(
+        'success',
+        skippedLines
+          ? t('new_download.added_skipped', { added, skipped: skippedLines })
+          : t('new_download.added', { count: added }),
+      );
       onClose();
       return;
     }
@@ -148,17 +165,29 @@ export default function NewDownloadSheet({ initialText, onClose, onAdded }: NewD
     }
     showToast(
       added ? 'info' : 'error',
-      t('new_download.partial', { added, failed: failures.length, reason: failures[0].reason }),
+      skippedLines
+        ? t('new_download.partial_skipped', {
+            added,
+            failed: failures.length,
+            skipped: skippedLines,
+            reason: failures[0].reason,
+          })
+        : t('new_download.partial', {
+            added,
+            failed: failures.length,
+            reason: failures[0].reason,
+          }),
     );
     if (added) onClose();
   };
 
+  const countParts: string[] = [];
+  if (urls.length > 1) countParts.push(t('new_download.link_count', { count: urls.length }));
+  if (urls.length && skippedLines) {
+    countParts.push(t('new_download.skipped_count', { count: skippedLines }));
+  }
   const countLabel =
-    urls.length > 1
-      ? t('new_download.link_count', { count: urls.length })
-      : text.trim() && !urls.length
-        ? t('new_download.no_link')
-        : '';
+    countParts.join(' · ') || (text.trim() && !urls.length ? t('new_download.no_link') : '');
 
   return (
     <>
@@ -350,6 +379,31 @@ export default function NewDownloadSheet({ initialText, onClose, onAdded }: NewD
                 />
                 <p className="hint">{t('new_download.cookies_hint')}</p>
               </div>
+              {single && (
+                <div className="field">
+                  <label htmlFor={`${ids.url}-sum`}>{t('new_download.checksum')}</label>
+                  <input
+                    id={`${ids.url}-sum`}
+                    className="input"
+                    value={checksum}
+                    placeholder="sha256:…"
+                    onChange={(e) => {
+                      edit(setChecksum)(e.target.value);
+                      setChecksumError('');
+                    }}
+                    spellCheck={false}
+                    autoComplete="off"
+                    aria-invalid={checksumError ? true : undefined}
+                  />
+                  {checksumError ? (
+                    <p className="field-error" role="alert">
+                      {checksumError}
+                    </p>
+                  ) : (
+                    <p className="hint">{t('new_download.checksum_hint')}</p>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>

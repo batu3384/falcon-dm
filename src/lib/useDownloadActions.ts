@@ -14,6 +14,7 @@ export function useDownloadActions() {
   const showToast = useToastStore((s) => s.showToast);
   const askRemove = useUiStore((s) => s.askRemove);
   const setMoveTarget = useUiStore((s) => s.setMoveTarget);
+  const setRefreshTarget = useUiStore((s) => s.setRefreshTarget);
 
   return useMemo(() => {
     const fail = (e: unknown) =>
@@ -75,6 +76,7 @@ export function useDownloadActions() {
         api.archiveDownload(row.id, archived).catch(fail),
       priority: (row: DownloadModel, up: boolean) => api.changePriority(row.id, up).catch(fail),
       moveRename: (row: DownloadModel) => setMoveTarget(row),
+      refresh: (row: DownloadModel) => setRefreshTarget(row),
       redownload: async (row: DownloadModel) => {
         try {
           const added = await api.addDownload({
@@ -90,7 +92,7 @@ export function useDownloadActions() {
         }
       },
     };
-  }, [askRemove, setMoveTarget, showToast, t]);
+  }, [askRemove, setMoveTarget, setRefreshTarget, showToast, t]);
 }
 
 export type DownloadActions = ReturnType<typeof useDownloadActions>;

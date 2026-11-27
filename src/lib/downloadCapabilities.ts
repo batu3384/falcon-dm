@@ -8,6 +8,7 @@ export interface DownloadCapabilities {
   archive: boolean;
   open: boolean;
   priority: boolean;
+  refresh: boolean;
 }
 
 const CAPABILITIES: Record<DownloadStatus, DownloadCapabilities> = {
@@ -19,6 +20,7 @@ const CAPABILITIES: Record<DownloadStatus, DownloadCapabilities> = {
     archive: false,
     open: false,
     priority: true,
+    refresh: false,
   },
   Downloading: {
     pause: true,
@@ -28,6 +30,7 @@ const CAPABILITIES: Record<DownloadStatus, DownloadCapabilities> = {
     archive: false,
     open: false,
     priority: false,
+    refresh: false,
   },
   Merging: {
     pause: true,
@@ -37,6 +40,7 @@ const CAPABILITIES: Record<DownloadStatus, DownloadCapabilities> = {
     archive: false,
     open: false,
     priority: false,
+    refresh: false,
   },
   Paused: {
     pause: false,
@@ -46,6 +50,7 @@ const CAPABILITIES: Record<DownloadStatus, DownloadCapabilities> = {
     archive: false,
     open: false,
     priority: false,
+    refresh: true,
   },
   Completed: {
     pause: false,
@@ -55,6 +60,7 @@ const CAPABILITIES: Record<DownloadStatus, DownloadCapabilities> = {
     archive: true,
     open: true,
     priority: false,
+    refresh: false,
   },
   Failed: {
     pause: false,
@@ -64,6 +70,7 @@ const CAPABILITIES: Record<DownloadStatus, DownloadCapabilities> = {
     archive: true,
     open: false,
     priority: false,
+    refresh: true,
   },
 };
 

@@ -27,6 +27,7 @@ import { SettingsSheet, CLIPBOARD_KEY } from './components/settings/SettingsShee
 import { OnboardingWizard, ONBOARDING_KEY } from './components/OnboardingWizard';
 import { PairRequestDialog } from './components/PairRequestDialog';
 import { MoveRenameDialog } from './components/MoveRenameDialog';
+import { RefreshLinkDialog } from './components/RefreshLinkDialog';
 import { LogPanel } from './components/LogPanel';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -40,6 +41,7 @@ import {
   onDownloadProgress,
   onDownloadRemoved,
   onDownloadUpdated,
+  onOpenNewDownload,
   onPairRequest,
 } from './api/events';
 import * as api from './api/commands';
@@ -127,6 +129,9 @@ function App() {
       onPairRequest((request) => {
         showPairPrompt(request);
         void refreshExtension();
+      }),
+      onOpenNewDownload(() => {
+        useUiStore.getState().openNewDownload();
       }),
     ];
     return () => {
@@ -382,6 +387,9 @@ function App() {
       )}
       {ui.moveTarget && (
         <MoveRenameDialog row={ui.moveTarget} onClose={() => ui.setMoveTarget(null)} />
+      )}
+      {ui.refreshTarget && (
+        <RefreshLinkDialog row={ui.refreshTarget} onClose={() => ui.setRefreshTarget(null)} />
       )}
       {removing && (
         <ConfirmDialog

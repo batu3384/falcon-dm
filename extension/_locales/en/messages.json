@@ -68,6 +68,9 @@
   "qualityHint": {
     "message": "Choose quality and format. HLS streams are merged automatically by Falcon DM."
   },
+  "qualityAudioOnly": {
+    "message": "Audio only (M4A)"
+  },
   "labelQuality": {
     "message": "Quality & format"
   },

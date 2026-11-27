@@ -29,6 +29,14 @@ describe('getDownloadCapabilities', () => {
     expect(getDownloadCapabilities('Downloading').priority).toBe(false);
   });
 
+  it('refreshes the link of stopped rows only, like the backend', () => {
+    expect(getDownloadCapabilities('Failed').refresh).toBe(true);
+    expect(getDownloadCapabilities('Paused').refresh).toBe(true);
+    for (const status of ['Queued', 'Downloading', 'Merging', 'Completed'] as const) {
+      expect(getDownloadCapabilities(status).refresh).toBe(false);
+    }
+  });
+
   it('treats Downloading and Merging as live', () => {
     expect(isLive('Downloading')).toBe(true);
     expect(isLive('Merging')).toBe(true);

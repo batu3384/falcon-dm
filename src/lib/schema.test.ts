@@ -138,6 +138,34 @@ describe('SettingsSchema', () => {
     });
     expect(parsed.theme).toBe('dark');
   });
+
+  it('keeps weekly schedule days and completion action fields', () => {
+    const parsed = SettingsSchema.parse({
+      theme: 'dark',
+      default_download_path: '~/Downloads',
+      max_concurrent_downloads: 3,
+      max_connections_per_server: 16,
+      proxy: null,
+      schedule_days: [true, false, true, true, true, true, true],
+      completion_action: 'script',
+      completion_script: '/Users/demo/bin/done.sh',
+    });
+    expect(parsed.schedule_days).toEqual([true, false, true, true, true, true, true]);
+    expect(parsed.completion_action).toBe('script');
+    expect(parsed.completion_script).toBe('/Users/demo/bin/done.sh');
+  });
+
+  it('rejects malformed weekday masks and completion actions', () => {
+    const base = {
+      theme: 'dark',
+      default_download_path: '~/Downloads',
+      max_concurrent_downloads: 3,
+      max_connections_per_server: 16,
+      proxy: null,
+    };
+    expect(() => SettingsSchema.parse({ ...base, schedule_days: [true, false, true] })).toThrow();
+    expect(() => SettingsSchema.parse({ ...base, completion_action: 'shutdown' })).toThrow();
+  });
 });
 
 describe('ExtensionStatusSchema', () => {

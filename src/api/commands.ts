@@ -53,6 +53,8 @@ const ERROR_CODES: Record<string, string> = {
   ERR_FILE_MISSING: 'errors.file_missing',
   ERR_PARTIAL_RESPONSE: 'errors.partial_response',
   ERR_CONTENT_ENCODING: 'errors.content_encoding',
+  ERR_CHECKSUM_MISMATCH: 'errors.checksum_mismatch',
+  ERR_CHECKSUM_INVALID: 'errors.checksum_invalid',
   ERR_VIDEO_UNAVAILABLE: 'errors.video_unavailable',
   ERR_VIDEO_PRIVATE: 'errors.video_private',
   ERR_LOGIN_REQUIRED: 'errors.login_required',
@@ -118,6 +120,8 @@ export interface AddDownloadParams {
   cookieUrl?: string;
   /** yt-dlp format selector (YouTube quality). */
   format?: string;
+  /** Lenient checksum input; canonicalized before send, verified on completion. */
+  expectedHash?: string;
 }
 
 export async function addDownload(params: AddDownloadParams): Promise<DownloadModel> {
@@ -225,6 +229,14 @@ export async function moveDownload(
 /** Archived downloads leave the main list but stay in the DB and on disk. */
 export async function archiveDownload(id: number, archived: boolean): Promise<void> {
   await invoke('archive_download', { id, archived });
+}
+
+/**
+ * Replace the link of a failed or paused download with a fresh one.
+ * The partial file is kept: the download resumes where it stopped.
+ */
+export async function refreshDownloadUrl(id: number, newUrl: string): Promise<void> {
+  await invoke('refresh_download_url', { id, newUrl });
 }
 
 export interface UpdateCheckResult {

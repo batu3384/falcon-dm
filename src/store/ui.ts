@@ -13,6 +13,8 @@ interface UiState {
   /** Rows waiting for the remove confirmation. */
   confirmRemove: DownloadModel[] | null;
   moveTarget: DownloadModel | null;
+  /** Row waiting for a fresh link (expired URL renewal). */
+  refreshTarget: DownloadModel | null;
   inspectorVisible: boolean;
 
   openNewDownload: (prefill?: string) => void;
@@ -25,6 +27,7 @@ interface UiState {
   askRemove: (rows: DownloadModel[]) => void;
   closeRemove: () => void;
   setMoveTarget: (row: DownloadModel | null) => void;
+  setRefreshTarget: (row: DownloadModel | null) => void;
   toggleInspector: () => void;
 }
 
@@ -38,6 +41,7 @@ export const useUiStore = create<UiState>((set) => ({
   onboardingOpen: false,
   confirmRemove: null,
   moveTarget: null,
+  refreshTarget: null,
   inspectorVisible: localStorage.getItem(INSPECTOR_KEY) !== '1',
 
   openNewDownload: (prefill = '') => set({ newDownload: prefill }),
@@ -50,6 +54,7 @@ export const useUiStore = create<UiState>((set) => ({
   askRemove: (rows) => set({ confirmRemove: rows.length ? rows : null }),
   closeRemove: () => set({ confirmRemove: null }),
   setMoveTarget: (moveTarget) => set({ moveTarget }),
+  setRefreshTarget: (refreshTarget) => set({ refreshTarget }),
   toggleInspector: () =>
     set((state) => {
       const inspectorVisible = !state.inspectorVisible;
