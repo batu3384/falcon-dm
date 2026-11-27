@@ -19,13 +19,15 @@ bash scripts/provision-sidecars.test.sh
 
 ## Layout
 
-- `src-tauri/src/download/` — engines: `http.rs` (offset writes, per-range `.state` resume, work stealing), `hls.rs` (native MPEG-TS; encrypted/fMP4/byte-range/split-audio go to yt-dlp), `ytdlp.rs` (progress templates, stable work dir per id), `queue.rs` (non-blocking tick, `StopReason`, retry budget), `progress.rs` (2 Hz events, EMA speed), `limiter.rs` (global token bucket), `job.rs` (rename/finalize without overwriting), `tools.rs` (finds ffmpeg/yt-dlp with Homebrew paths).
-- `src-tauri/src/pairing.rs` + `local_api.rs` — extension pairing by 6-digit code, API protocol 2.
+- `src-tauri/src/download/` — engines: `http.rs` (offset writes, per-range `.state` resume with entity-validator verification, work stealing, malformed-206/content-encoding rejection), `hls.rs` (native MPEG-TS with playlist-fingerprint cache; encrypted/fMP4/byte-range/split-audio/discontinuity go to yt-dlp), `ytdlp.rs` (progress templates, stable work dir per id, exact-host Netscape cookies, process-group kill, input URL validation), `queue.rs` (non-blocking tick, `StopReason`, retry budget, shutdown/remove claim tombstones), `progress.rs` (2 Hz events, EMA speed, no publish before counts known), `limiter.rs` (global token bucket, decimal rates, full debt repayment), `checksum.rs` (sha256/md5 verify before finalize), `job.rs` (rename/finalize without overwriting, `FinalizeHints`).
+- `src-tauri/src/pairing.rs` + `local_api.rs` — extension pairing by 6-digit code, API protocol 2. Token handoff is one-shot per approved code: re-pairing always needs fresh user approval, there is no silent reissue.
 - `src/store/` — `downloads.ts` (rows, selection, live speeds), `app.ts` (stats, extension, schedule), `ui.ts` (sheets).
 - `src/components/` — macOS-style shell; `settings/` holds the Settings panes.
 - `extension/` — `pairing.js`, `popup.*`, `options.*`, `content.js` overlay (shadow DOM).
 
 ## Conventions
+
+- Downloads table is schema v5+ (`expected_hash`); per-download `speed_limit_kbps` lands with v6. Migration chain lives in `storage/database.rs` — always extend it, never edit released migrations.
 
 - Status changes reach the UI only as full rows (`download-updated`); `download-progress` carries counters for live rows. A progress tick must never revive a stopped row.
 - Backend error codes (`ERR_DISK_FULL`, `HTTP 403`, …) are localized in `localizeDownloadError` (`src/api/commands.ts`). Add new codes there and to both locale files.
