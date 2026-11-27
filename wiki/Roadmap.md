@@ -23,7 +23,7 @@ Product direction for **Falcon DM**. This page tracks milestones — not a relea
 | HLS proxy, speed limit, segment resume | Temp dir `hls-{download_id}.falcondm-temp`; length sidecars and playlist fingerprints validate cached segments |
 | HLS live-stream rejection | Live/upcoming playlists fail with `ERR_HLS_LIVE` instead of saving a partial replay |
 | yt-dlp proxy, speed limit, real progress | Output-template parsing, stable work dir per download, pause resumes from yt-dlp `.part` files |
-| yt-dlp hardening | Private/loopback input validation, exact-host cookie file, 2023.07.06 version floor, process-group cancellation |
+| yt-dlp hardening | Private/loopback input validation, validating egress proxy, exact-host cookie file, 2023.07.06 version floor, process-group cancellation |
 | Fail-closed capture by default | Browser fallback is opt-in in extension options |
 | Extension capture rules | File-type list plus per-site never-capture rules with wildcard host support |
 | Link grabber batch limit | 100 URLs per batch |
