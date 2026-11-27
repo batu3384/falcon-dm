@@ -61,6 +61,10 @@ Yes. On macOS it holds an idle-sleep assertion only while downloads are active a
 
 The close button hides Falcon DM to the menu-bar tray; downloads continue. Clicking the Dock icon or tray icon reopens the window. The tray menu includes **Show Falcon DM**, **New Download**, **Pause All**, **Resume All**, a **Speed Limit** checkmark and **Quit**. Quit stops active workers and gives them up to three seconds to persist resume state. Window size and position are remembered.
 
+## Can one download be slower than the rest?
+
+Yes. Select the row and set **Speed limit** in the Inspector (decimal KB/s). Empty or 0 means the row follows the global cap. Both caps apply concurrently — the effective rate is whichever is stricter — and HTTP/HLS rows react live.
+
 ## How do I update?
 
 - **In app:** Settings → **Check for Updates** (opens GitHub Release when newer).

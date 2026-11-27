@@ -41,7 +41,7 @@
 
 | Area | What you get |
 |------|----------------|
-| **HTTP(S)** | Multi-connection range downloads, byte-exact resume after pause/crash/restart, validator-checked remote changes, DNS-pinned streaming, global speed limit, proxy |
+| **HTTP(S)** | Multi-connection range downloads, byte-exact resume after pause/crash/restart, validator-checked remote changes, DNS-pinned streaming, global and per-download speed limits, proxy |
 | **HLS (m3u8)** | Parallel MPEG-TS segments with safe resume, playlist fingerprinting, proxy/speed limit, ffmpeg mux; complex playlists use yt-dlp; live streams are rejected |
 | **YouTube / DASH** | Watch URLs and quality selection (including audio-only M4A) through `yt-dlp`, real progress, resumable work directories, optional browser cookies, custom binary path |
 | **Browser extension** | Automatic capture by file type, per-site never-capture rules, video picker, link grabber (batch ≤100), controllable offline fallback |
