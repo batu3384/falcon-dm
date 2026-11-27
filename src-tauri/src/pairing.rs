@@ -32,6 +32,8 @@ pub(crate) enum PairRequestOutcome {
     Pending {
         is_new: bool,
     },
+    /// The user approved this extension/code pair; the token may be handed over once.
+    Approved,
     Rejected,
     TooMany,
 }
@@ -39,18 +41,26 @@ pub(crate) enum PairRequestOutcome {
 #[derive(Default)]
 pub struct PairingState {
     pending: Vec<Pending>,
+    approved: Vec<(String, String, Instant)>,
     rejected: Vec<(String, String, Instant)>,
 }
 
 impl PairingState {
     fn purge(&mut self, now: Instant) {
         self.pending.retain(|p| now.duration_since(p.seen) < PENDING_TTL);
+        self.approved.retain(|(_, _, at)| now.duration_since(*at) < PENDING_TTL);
         self.rejected.retain(|(_, _, at)| now.duration_since(*at) < REJECTED_TTL);
     }
 
     pub(crate) fn request(&mut self, extension_id: &str, code: &str) -> PairRequestOutcome {
         let now = Instant::now();
         self.purge(now);
+        if let Some(index) =
+            self.approved.iter().position(|(id, c, _)| id == extension_id && c == code)
+        {
+            self.approved.remove(index);
+            return PairRequestOutcome::Approved;
+        }
         if self.rejected.iter().any(|(id, c, _)| id == extension_id && c == code) {
             return PairRequestOutcome::Rejected;
         }
@@ -80,9 +90,17 @@ impl PairingState {
             .collect()
     }
 
-    /// Drop the prompt for an approved extension.
-    pub fn resolve(&mut self, extension_id: &str) {
-        self.pending.retain(|p| p.extension_id != extension_id);
+    /// Move the prompt into a one-time approved handoff for that exact code.
+    pub fn approve(&mut self, extension_id: &str) -> bool {
+        let now = Instant::now();
+        self.purge(now);
+        let Some(index) = self.pending.iter().position(|p| p.extension_id == extension_id) else {
+            return false;
+        };
+        let pending = self.pending.remove(index);
+        self.approved.retain(|(id, _, _)| id != extension_id);
+        self.approved.push((pending.extension_id, pending.code, now));
+        true
     }
 
     pub fn reject(&mut self, extension_id: &str) {
@@ -95,6 +113,7 @@ impl PairingState {
 
     pub fn clear(&mut self) {
         self.pending.clear();
+        self.approved.clear();
         self.rejected.clear();
     }
 }
@@ -141,13 +160,24 @@ mod tests {
     }
 
     #[test]
-    fn resolve_removes_only_that_extension() {
+    fn approve_removes_only_that_extension_from_pending() {
         let mut state = PairingState::default();
         state.request(EXT_A, "111111");
         state.request(EXT_B, "222222");
-        state.resolve(EXT_A);
+        assert!(state.approve(EXT_A));
+        assert!(!state.approve(EXT_A));
         assert_eq!(state.pending().len(), 1);
         assert_eq!(state.pending()[0].extension_id, EXT_B);
+    }
+
+    #[test]
+    fn approval_is_a_one_time_token_handoff() {
+        let mut state = PairingState::default();
+        assert_eq!(state.request(EXT_A, "111111"), PairRequestOutcome::Pending { is_new: true });
+        assert!(state.approve(EXT_A));
+        assert_eq!(state.request(EXT_A, "111111"), PairRequestOutcome::Approved);
+        // The next use of the same code is a fresh ceremony, not silent reissue.
+        assert_eq!(state.request(EXT_A, "111111"), PairRequestOutcome::Pending { is_new: true });
     }
 
     #[test]

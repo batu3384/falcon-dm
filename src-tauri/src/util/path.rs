@@ -487,6 +487,39 @@ pub fn write_file_exclusive(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Write a secret file, creating it owner-only on Unix instead of relying on a later chmod.
+pub fn write_file_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut output = match options.open(path) {
+        Ok(file) => file,
+        Err(error) => return Err(error.to_string()),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Pre-existing files do not inherit `mode`; tighten them before writing the secret.
+        if let Err(error) = output.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(path);
+            return Err(error.to_string());
+        }
+    }
+    if let Err(error) = output.write_all(bytes) {
+        let _ = std::fs::remove_file(path);
+        return Err(error.to_string());
+    }
+    if let Err(error) = output.sync_all() {
+        let _ = std::fs::remove_file(path);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +698,23 @@ mod tests {
         );
         assert_eq!(std::fs::read(&first).unwrap(), b"one");
         assert!(write_file_exclusive(&first, b"nope").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_file_write_is_owner_only_even_when_rewritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("falcon-dm-private-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("secret.key");
+        write_file_private(&path, b"secret").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_file_private(&path, b"new-secret").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new-secret");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         std::fs::remove_dir_all(root).unwrap();
     }
 

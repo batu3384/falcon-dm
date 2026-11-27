@@ -149,6 +149,21 @@ pub struct AppState {
     pub ui_lang: Arc<Mutex<String>>,
 }
 
+#[cfg(test)]
+pub(crate) fn test_app_state(token: &str, ext_id: &str) -> AppState {
+    let settings =
+        Settings { allowed_extension_ids: vec![ext_id.to_string()], ..Default::default() };
+    AppState {
+        db: Database::in_memory().unwrap(),
+        queue: QueueManager::new(),
+        api_token: Arc::new(Mutex::new(token.to_string())),
+        settings: Arc::new(Mutex::new(settings)),
+        rate_bucket: Arc::new(Mutex::new(VecDeque::new())),
+        pairing: Arc::new(Mutex::new(PairingState::default())),
+        ui_lang: Arc::new(Mutex::new("en".into())),
+    }
+}
+
 pub(crate) fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -668,36 +683,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn api_state(token: &str, ext_id: &str) -> AppState {
-        let settings =
-            Settings { allowed_extension_ids: vec![ext_id.to_string()], ..Default::default() };
-        AppState {
-            db: Database::in_memory().unwrap(),
-            queue: QueueManager::new(),
-            api_token: Arc::new(Mutex::new(token.to_string())),
-            settings: Arc::new(Mutex::new(settings)),
-            rate_bucket: Arc::new(Mutex::new(VecDeque::new())),
-            pairing: Arc::new(Mutex::new(PairingState::default())),
-            ui_lang: Arc::new(Mutex::new("en".into())),
-        }
-    }
-
     #[test]
     fn intercept_auth_requires_token_origin_and_allowlist() {
         let ext = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let token = "live-hijack-token";
-        let state = api_state(token, ext);
+        let state = test_app_state(token, ext);
         let origin = format!("chrome-extension://{ext}");
         let mut headers = HeaderMap::new();
         headers.insert("x-falcon-token", token.parse().unwrap());
         assert!(check_api_token(&headers, &state, Some(&origin)).is_ok());
         assert_eq!(check_api_token(&headers, &state, None), Err(StatusCode::FORBIDDEN));
-        let unknown = api_state(token, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let unknown = test_app_state(token, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert_eq!(check_api_token(&headers, &unknown, Some(&origin)), Err(StatusCode::FORBIDDEN));
         let mut bad = HeaderMap::new();
         bad.insert("x-falcon-token", "wrong".parse().unwrap());
         assert_eq!(check_api_token(&bad, &state, Some(&origin)), Err(StatusCode::UNAUTHORIZED));
-        let legacy = api_state(LEGACY_DEFAULT_API_TOKEN, ext);
+        let legacy = test_app_state(LEGACY_DEFAULT_API_TOKEN, ext);
         assert_eq!(
             check_api_token(&headers, &legacy, Some(&origin)),
             Err(StatusCode::UNAUTHORIZED)

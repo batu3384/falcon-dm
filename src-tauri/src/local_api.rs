@@ -14,23 +14,55 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Requests per minute. A 100-link grab plus popup polling stays well below.
 const RATE_LIMIT_PER_MINUTE: usize = 600;
+/// Blob uploads can write tens of megabytes each, so they get a much smaller bucket.
+const UPLOAD_RATE_LIMIT_PER_MINUTE: usize = 10;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+// The local API is a loopback singleton, so its upload bucket is process-wide.
+static UPLOAD_RATE_BUCKET: Mutex<VecDeque<Instant>> = Mutex::new(VecDeque::new());
+
+fn consume_rate_token(bucket: &mut VecDeque<Instant>, now: Instant, limit: usize) -> bool {
+    while bucket.front().is_some_and(|t| now.duration_since(*t) > RATE_WINDOW) {
+        bucket.pop_front();
+    }
+    if bucket.len() >= limit {
+        return false;
+    }
+    bucket.push_back(now);
+    true
+}
 
 fn check_rate_limit(state: &AppState) -> Result<(), StatusCode> {
     let mut bucket = lock_or_recover(&state.rate_bucket);
-    let now = Instant::now();
-    let window = Duration::from_secs(60);
-    while bucket.front().is_some_and(|t| now.duration_since(*t) > window) {
-        bucket.pop_front();
+    if consume_rate_token(&mut bucket, Instant::now(), RATE_LIMIT_PER_MINUTE) {
+        Ok(())
+    } else {
+        Err(StatusCode::TOO_MANY_REQUESTS)
     }
-    if bucket.len() >= RATE_LIMIT_PER_MINUTE {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
+}
+
+fn check_upload_rate_limit() -> Result<(), StatusCode> {
+    let mut bucket = lock_or_recover(&UPLOAD_RATE_BUCKET);
+    if consume_rate_token(&mut bucket, Instant::now(), UPLOAD_RATE_LIMIT_PER_MINUTE) {
+        Ok(())
+    } else {
+        Err(StatusCode::TOO_MANY_REQUESTS)
     }
-    bucket.push_back(now);
+}
+
+fn check_rate_limit_for_path(state: &AppState, path: &str) -> Result<(), StatusCode> {
+    // Uploads still count globally; the small upload bucket is additional.
+    check_rate_limit(state)?;
+    if path == "/api/upload" {
+        check_upload_rate_limit()?;
+    }
     Ok(())
 }
 
@@ -39,11 +71,12 @@ pub(crate) async fn rate_limit_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if req.uri().path() == "/api/health" {
+    let path = req.uri().path();
+    if path == "/api/health" {
         return Ok(next.run(req).await);
     }
     let state = app.state::<AppState>();
-    check_rate_limit(&state)?;
+    check_rate_limit_for_path(&state, path)?;
     Ok(next.run(req).await)
 }
 
@@ -192,11 +225,55 @@ pub(crate) struct PairRequest {
     pub code: String,
 }
 
+struct PairReply {
+    status: StatusCode,
+    body: Option<serde_json::Value>,
+    prompt_user: bool,
+}
+
+impl PairReply {
+    fn status_only(status: StatusCode) -> Self {
+        Self { status, body: None, prompt_user: false }
+    }
+}
+
+/// Pairing state machine without the UI side effects. An allowlisted id still
+/// receives only a pending response until the user approves that exact code.
+fn pair_reply(state: &AppState, id: &str, code: &str) -> PairReply {
+    let token = lock_or_recover(&state.api_token).clone();
+    if token.trim().is_empty() || token == LEGACY_DEFAULT_API_TOKEN {
+        return PairReply::status_only(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    match lock_or_recover(&state.pairing).request(id, code) {
+        PairRequestOutcome::Approved => {
+            // Approval is not a permanent bearer grant: revocation before the
+            // handoff closes it, and the pairing state consumes it after one use.
+            if !lock_or_recover(&state.settings).allowed_extension_ids.iter().any(|x| x == id) {
+                return PairReply::status_only(StatusCode::FORBIDDEN);
+            }
+            PairReply {
+                status: StatusCode::OK,
+                body: Some(serde_json::json!({ "ok": true, "token": token, "extension_id": id })),
+                prompt_user: false,
+            }
+        }
+        PairRequestOutcome::Rejected => PairReply::status_only(StatusCode::FORBIDDEN),
+        PairRequestOutcome::TooMany => PairReply::status_only(StatusCode::TOO_MANY_REQUESTS),
+        PairRequestOutcome::Pending { is_new } => PairReply {
+            status: StatusCode::ACCEPTED,
+            body: Some(serde_json::json!({ "ok": false, "pending": true, "extension_id": id })),
+            prompt_user: is_new,
+        },
+    }
+}
+
 /// Pair browser extension ↔ desktop.
 ///
 /// The browser sets `Origin` for extension requests and web pages cannot forge
-/// a `chrome-extension://` origin. An unknown extension gets nothing until the
-/// user compares the code in both windows and approves.
+/// a `chrome-extension://` origin. Every pairing request — including one from
+/// an already allowlisted extension — waits for user approval before the token
+/// is handed over exactly once.
 pub(crate) async fn handle_pair(
     AxumState(app): AxumState<AppHandle>,
     headers: HeaderMap,
@@ -213,34 +290,16 @@ pub(crate) async fn handle_pair(
     }
 
     let state = app.state::<AppState>();
-    let token = lock_or_recover(&state.api_token).clone();
-    if token.trim().is_empty() || token == LEGACY_DEFAULT_API_TOKEN {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    let reply = pair_reply(&state, id, &payload.code);
+    if reply.prompt_user {
+        let _ = app
+            .emit("pair-request", serde_json::json!({ "extension_id": id, "code": payload.code }));
+        // The prompt is useless behind other windows.
+        crate::show_main_window(&app);
     }
-    if lock_or_recover(&state.settings).allowed_extension_ids.iter().any(|x| x == id) {
-        return Json(serde_json::json!({ "ok": true, "token": token, "extension_id": id }))
-            .into_response();
-    }
-
-    let outcome = lock_or_recover(&state.pairing).request(id, &payload.code);
-    match outcome {
-        PairRequestOutcome::Rejected => StatusCode::FORBIDDEN.into_response(),
-        PairRequestOutcome::TooMany => StatusCode::TOO_MANY_REQUESTS.into_response(),
-        PairRequestOutcome::Pending { is_new } => {
-            if is_new {
-                let _ = app.emit(
-                    "pair-request",
-                    serde_json::json!({ "extension_id": id, "code": payload.code }),
-                );
-                // The prompt is useless behind other windows.
-                crate::show_main_window(&app);
-            }
-            (
-                StatusCode::ACCEPTED,
-                Json(serde_json::json!({ "ok": false, "pending": true, "extension_id": id })),
-            )
-                .into_response()
-        }
+    match reply.body {
+        Some(body) => (reply.status, Json(body)).into_response(),
+        None => reply.status.into_response(),
     }
 }
 
@@ -312,6 +371,81 @@ mod tests {
         assert_eq!(body["service"], "falcon-dm");
         assert_eq!(body["protocol"], 2);
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn allowed_extension_pairing_requires_approval_before_token() {
+        let ext = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let state = crate::test_app_state("live-token", ext);
+        let reply = pair_reply(&state, ext, "123456");
+        assert_eq!(reply.status, StatusCode::ACCEPTED);
+        assert!(reply.prompt_user);
+        let body = reply.body.expect("pending response body");
+        assert_eq!(body["pending"], true);
+        assert!(body.get("token").is_none(), "unapproved pairing must not leak a token: {body}");
+    }
+
+    #[test]
+    fn approved_repair_returns_token_once_and_keeps_allowlist() {
+        let ext = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token = "live-token";
+        let state = crate::test_app_state(token, ext);
+        let first = pair_reply(&state, ext, "123456");
+        assert_eq!(first.status, StatusCode::ACCEPTED);
+        assert!(first.body.expect("pending body").get("token").is_none());
+
+        assert!(crate::util::lock_or_recover(&state.pairing).approve(ext));
+        let approved = pair_reply(&state, ext, "123456");
+        assert_eq!(approved.status, StatusCode::OK);
+        let body = approved.body.expect("approved response body");
+        assert_eq!(body["token"], token);
+        assert!(crate::util::lock_or_recover(&state.settings)
+            .allowed_extension_ids
+            .iter()
+            .any(|id| id == ext));
+
+        let replay = pair_reply(&state, ext, "123456");
+        assert_eq!(replay.status, StatusCode::ACCEPTED);
+        assert!(replay.body.expect("fresh pending body").get("token").is_none());
+    }
+
+    #[test]
+    fn approved_handoff_requires_extension_to_stay_allowlisted() {
+        let ext = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let state = crate::test_app_state("live-token", ext);
+        assert_eq!(pair_reply(&state, ext, "123456").status, StatusCode::ACCEPTED);
+        assert!(crate::util::lock_or_recover(&state.pairing).approve(ext));
+        crate::util::lock_or_recover(&state.settings).allowed_extension_ids.clear();
+        let reply = pair_reply(&state, ext, "123456");
+        assert_eq!(reply.status, StatusCode::FORBIDDEN);
+        assert!(reply.body.is_none());
+    }
+
+    #[test]
+    fn rate_bucket_blocks_at_limit_and_prunes_after_window() {
+        let start = Instant::now();
+        let mut bucket = std::collections::VecDeque::new();
+        for _ in 0..10 {
+            assert!(consume_rate_token(&mut bucket, start, 10));
+        }
+        assert!(!consume_rate_token(&mut bucket, start, 10));
+        assert!(consume_rate_token(&mut bucket, start + Duration::from_secs(61), 10));
+    }
+
+    #[test]
+    fn upload_path_is_limited_to_ten_requests_per_minute() {
+        crate::util::lock_or_recover(&UPLOAD_RATE_BUCKET).clear();
+        let ext = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let state = crate::test_app_state("live-token", ext);
+        for _ in 0..UPLOAD_RATE_LIMIT_PER_MINUTE {
+            assert!(check_rate_limit_for_path(&state, "/api/upload").is_ok());
+        }
+        assert_eq!(
+            check_rate_limit_for_path(&state, "/api/upload"),
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        );
+        assert!(check_rate_limit_for_path(&state, "/api/add").is_ok());
+        crate::util::lock_or_recover(&UPLOAD_RATE_BUCKET).clear();
     }
 
     #[test]

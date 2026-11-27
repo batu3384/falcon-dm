@@ -79,13 +79,7 @@ fn load_key() -> [u8; KEY_LEN] {
             }
         }
         let key = random_bytes::<KEY_LEN>();
-        if fs::write(&path, key).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-            }
-        }
+        let _ = crate::util::write_file_private(&path, &key);
         #[cfg(all(target_os = "macos", not(test)))]
         store_keychain(&key);
         key

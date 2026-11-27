@@ -286,7 +286,9 @@ pub fn approve_extension_pair(
     }
     settings.save(&app_data_dir())?;
     *lock_or_recover(&state.settings) = settings;
-    lock_or_recover(&state.pairing).resolve(id);
+    if !lock_or_recover(&state.pairing).approve(id) {
+        return Err("Pairing request expired before approval".into());
+    }
     Ok(())
 }
 
@@ -301,7 +303,7 @@ pub fn reject_extension_pair(
 }
 
 /// Disconnect one extension. The token is rotated so its cached copy is dead;
-/// extensions that stay approved pick up the new one on their next request.
+/// extensions that stay approved must complete a fresh user-approved pairing.
 #[tauri::command]
 pub fn revoke_extension(extension_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let id = parse_extension_id(&extension_id)?;

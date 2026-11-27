@@ -57,35 +57,75 @@ pub fn is_dash_url(url: &str) -> bool {
     path.ends_with(".mpd") || path.contains(".mpd/")
 }
 
+fn is_blocked_v4(v4: std::net::Ipv4Addr) -> bool {
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_multicast()
+        || v4.is_broadcast()
+        || {
+            let o = v4.octets();
+            o[0] == 0
+                || o[0] >= 224
+                || (o[0] == 100 && (64..=127).contains(&o[1]))
+                // IETF protocol assignments, 6to4 relay anycast, and benchmarking.
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 192 && o[1] == 88 && o[2] == 99)
+                || (o[0] == 198 && (18..=19).contains(&o[1]))
+        }
+}
+
+fn segment_octets(segment: u16) -> (u8, u8) {
+    ((segment >> 8) as u8, segment as u8)
+}
+
+/// IPv4 embedded in the fixed NAT64 transition prefixes or in 6to4.
+fn transition_embedded_v4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let s = v6.segments();
+    // NAT64 well-known 64:ff9b::/96 and local-use 64:ff9b:1::/48;
+    // this filter decodes both fixed prefixes from their last 32 bits.
+    let nat64_well_known =
+        s[0] == 0x0064 && s[1] == 0xff9b && s[2..6].iter().all(|segment| *segment == 0);
+    let nat64_local_use = s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 1;
+    if nat64_well_known || nat64_local_use {
+        let (a, b) = segment_octets(s[6]);
+        let (c, d) = segment_octets(s[7]);
+        return Some(std::net::Ipv4Addr::new(a, b, c, d));
+    }
+    // 6to4 2002:<v4-first-16>:<v4-last-16>::/16.
+    if s[0] == 0x2002 {
+        let (a, b) = segment_octets(s[1]);
+        let (c, d) = segment_octets(s[2]);
+        return Some(std::net::Ipv4Addr::new(a, b, c, d));
+    }
+    None
+}
+
 /// True if a resolved IP lands in a non-routable/private range (SSRF target).
 /// Covers loopback, RFC1918, link-local, unspecified, 0.0.0.0/8, multicast/broadcast,
-/// CGNAT (100.64.0.0/10), IPv6 ULA/link-local/multicast, and IPv4-mapped IPv6.
+/// CGNAT (100.64.0.0/10), special-use IPv4, IPv6 ULA/link-local/multicast, Teredo,
+/// and IPv4-embedding IPv6 transition forms.
 fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
     if loopback_exception(ip) {
         return false;
     }
     match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_multicast()
-                || v4.is_broadcast()
-                || {
-                    let o = v4.octets();
-                    o[0] == 0 || o[0] >= 224 || (o[0] == 100 && (64..=127).contains(&o[1]))
-                }
-        }
+        std::net::IpAddr::V4(v4) => is_blocked_v4(v4),
         std::net::IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || {
                     let s = v6.segments();
-                    // unique local fc00::/7 and link-local fe80::/10
-                    (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
+                    // unique local fc00::/7, link-local fe80::/10, and Teredo 2001::/32
+                    (s[0] & 0xfe00) == 0xfc00
+                        || (s[0] & 0xffc0) == 0xfe80
+                        || (s[0] == 0x2001 && s[1] == 0)
                 }
+                || transition_embedded_v4(v6)
+                    .map(|v4| is_blocked_ip(std::net::IpAddr::V4(v4)))
+                    .unwrap_or(false)
                 || v6.to_ipv4().map(|v4| is_blocked_ip(std::net::IpAddr::V4(v4))).unwrap_or(false)
         }
     }
@@ -679,6 +719,32 @@ mod tests {
         assert!(is_blocked_download_host("255.255.255.255"));
         assert!(is_blocked_download_host("foo.localhost"));
         assert!(is_blocked_download_host("ff02::1"));
+    }
+
+    #[test]
+    fn transition_prefixes_cannot_hide_blocked_ipv4_addresses() {
+        assert!(is_blocked_download_host("64:ff9b::a9fe:a9fe"));
+        assert!(!is_blocked_download_host("64:ff9b::808:808"));
+        assert!(is_blocked_download_host("64:ff9b:1::a9fe:a9fe"));
+        assert!(!is_blocked_download_host("64:ff9b:1::808:808"));
+        assert!(is_blocked_download_host("2002:a9fe:a9fe::"));
+        assert!(!is_blocked_download_host("2002:808:808::"));
+        assert!(is_blocked_download_host("2001::1"));
+        assert!(is_blocked_download_host("2001::ffff:ffff"));
+    }
+
+    #[test]
+    fn additional_special_use_ipv4_ranges_are_blocked() {
+        assert!(is_blocked_download_host("192.0.0.1"));
+        assert!(is_blocked_download_host("192.0.0.255"));
+        assert!(!is_blocked_download_host("192.0.1.1"));
+        assert!(is_blocked_download_host("198.18.0.1"));
+        assert!(is_blocked_download_host("198.19.255.255"));
+        assert!(!is_blocked_download_host("198.17.255.255"));
+        assert!(!is_blocked_download_host("198.20.0.1"));
+        assert!(is_blocked_download_host("192.88.99.1"));
+        assert!(is_blocked_download_host("192.88.99.255"));
+        assert!(!is_blocked_download_host("192.88.98.1"));
     }
 
     #[test]

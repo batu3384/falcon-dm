@@ -271,12 +271,7 @@ impl Settings {
         // fs::write can leave a half-written settings.json if the app crashes
         // mid-write, silently wiping the user's config on the next load.
         let tmp_path = app_data_dir.join(format!("settings.json.tmp.{}", uuid::Uuid::new_v4()));
-        fs::write(&tmp_path, &content).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
-        }
+        crate::util::write_file_private(&tmp_path, content.as_bytes())?;
         fs::rename(&tmp_path, &settings_path).map_err(|e| {
             // Best-effort cleanup of the temp file if rename failed.
             let _ = fs::remove_file(&tmp_path);
