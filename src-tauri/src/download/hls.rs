@@ -86,6 +86,10 @@ fn unsupported_feature(playlist: &MediaPlaylist) -> Option<&'static str> {
         if segment.byte_range.is_some() {
             return Some("byte-range segments");
         }
+        // Concat stream-copy cannot retimestamp codec/ad breaks correctly.
+        if segment.discontinuity {
+            return Some("discontinuity");
+        }
     }
     None
 }
@@ -128,6 +132,32 @@ struct Plan {
     segments: Vec<Url>,
     /// `BANDWIDTH × duration` from the master playlist, when known.
     estimated_bytes: Option<u64>,
+    /// Resolved media playlist URL — informational, for the cache manifest.
+    media_url: String,
+    /// FNV-1a over the ordered, query-stripped segment URIs. Query strings are
+    /// excluded on purpose: signed-URL rotation must not invalidate the cache,
+    /// while a re-cut or re-laddered playlist (different paths) must.
+    fingerprint: String,
+}
+
+/// Stable fingerprint of the segment sequence (FNV-1a, length-prefixed URIs).
+fn plan_fingerprint(segments: &[Url]) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for segment in segments {
+        let mut normalized = segment.clone();
+        normalized.set_query(None);
+        normalized.set_fragment(None);
+        let text = normalized.as_str();
+        feed(&(text.len() as u64).to_le_bytes());
+        feed(text.as_bytes());
+    }
+    format!("{hash:016x}")
 }
 
 async fn resolve_plan(
@@ -194,6 +224,8 @@ async fn resolve_plan(
     }
     Ok(Plan {
         source,
+        fingerprint: plan_fingerprint(&segments),
+        media_url: media_base.to_string(),
         segments,
         estimated_bytes: bandwidth
             .filter(|bw| *bw > 0 && duration > 0.0)
@@ -203,6 +235,45 @@ async fn resolve_plan(
 
 type HostClient = Option<(String, Client)>;
 
+/// Mutex serialising progress adjustments so a rollback cannot clobber the
+/// bytes parallel workers added between its read and its write.
+type ProgressLock = Arc<std::sync::Mutex<()>>;
+
+/// Live byte accounting for one segment attempt. Bytes count as they arrive so
+/// big segments stream progress; dropping the guard before `commit` rolls back
+/// exactly what this attempt added — never what other workers committed.
+struct AttemptProgress {
+    progress: crate::download::progress::Progress,
+    lock: ProgressLock,
+    counted: u64,
+    committed: bool,
+}
+
+impl AttemptProgress {
+    fn new(progress: &crate::download::progress::Progress, lock: &ProgressLock) -> Self {
+        Self { progress: progress.clone(), lock: lock.clone(), counted: 0, committed: false }
+    }
+
+    fn add(&mut self, bytes: u64) {
+        let _guard = crate::util::lock_or_recover(&self.lock);
+        self.progress.add(bytes);
+        self.counted += bytes;
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for AttemptProgress {
+    fn drop(&mut self) {
+        if !self.committed && self.counted > 0 {
+            let _guard = crate::util::lock_or_recover(&self.lock);
+            self.progress.set_downloaded(self.progress.downloaded().saturating_sub(self.counted));
+        }
+    }
+}
+
 /// One attempt: stream a segment into `tmp`. Returns the bytes written.
 async fn fetch_segment_once(
     ctx: &JobContext,
@@ -211,6 +282,7 @@ async fn fetch_segment_once(
     headers: &HttpHeaders,
     client: &mut HostClient,
     tmp: &Path,
+    progress_lock: &ProgressLock,
 ) -> Result<u64, DownloadError> {
     let host = target.host_str().unwrap_or_default().to_string();
     let reuse = client.as_ref().filter(|(h, _)| *h == host).map(|(_, c)| c);
@@ -227,6 +299,7 @@ async fn fetch_segment_once(
     let mut file = tokio::fs::File::create(tmp)
         .await
         .map_err(|e| DownloadError::fatal(format!("could not create segment file: {e}")))?;
+    let mut counted = AttemptProgress::new(&ctx.progress, progress_lock);
     let mut written = 0u64;
     let mut chunks = response.bytes_stream();
     while let Some(chunk) = chunks.next().await {
@@ -243,17 +316,34 @@ async fn fetch_segment_once(
                 DownloadError::fatal(format!("segment write failed: {e}"))
             }
         })?;
-        ctx.progress.add(chunk.len() as u64);
+        counted.add(chunk.len() as u64);
         ctx.limiter.acquire(chunk.len() as u64, &ctx.cancel).await?;
     }
     file.flush().await.map_err(|e| DownloadError::fatal(e.to_string()))?;
+    // Resume trusts this file across restarts: it must be on disk, not in cache.
+    file.sync_all().await.map_err(|e| DownloadError::fatal(format!("segment sync failed: {e}")))?;
     if written == 0 {
         return Err(DownloadError::transient("segment is empty"));
     }
     if expected.is_some_and(|len| len != written) {
         return Err(DownloadError::transient("segment is incomplete"));
     }
+    counted.commit();
     Ok(written)
+}
+
+/// Write the byte-length sidecar that lets a later run trust the segment.
+/// Best effort: without it the segment is simply fetched again on resume.
+async fn write_len_sidecar(dir: &Path, index: usize, bytes: u64) {
+    let sidecar = dir.join(format!("{}.len", segment_name(index)));
+    let written = async {
+        let mut file = tokio::fs::File::create(&sidecar).await.ok()?;
+        file.write_all(bytes.to_string().as_bytes()).await.ok()?;
+        file.sync_all().await.ok()
+    };
+    if written.await.is_none() {
+        log::warn!("could not write the length sidecar of segment {index}");
+    }
 }
 
 /// Download one segment with retries. The final name only exists once the
@@ -265,6 +355,7 @@ async fn fetch_segment(
     client: &mut HostClient,
     index: usize,
     dir: &Path,
+    progress_lock: &ProgressLock,
 ) -> Result<u64, DownloadError> {
     let path = dir.join(segment_name(index));
     let tmp = dir.join(format!("{}.tmp", segment_name(index)));
@@ -272,9 +363,8 @@ async fn fetch_segment(
     let mut attempt = 0u32;
     loop {
         ctx.check_cancel()?;
-        let before = ctx.progress.downloaded();
         let result = tokio::select! {
-            result = fetch_segment_once(ctx, &plan.source, &plan.segments[index], headers, client, &tmp) => result,
+            result = fetch_segment_once(ctx, &plan.source, &plan.segments[index], headers, client, &tmp, progress_lock) => result,
             _ = cancelled(&mut cancel) => Err(DownloadError::Cancelled),
         };
         match result {
@@ -282,11 +372,14 @@ async fn fetch_segment(
                 tokio::fs::rename(&tmp, &path)
                     .await
                     .map_err(|e| DownloadError::fatal(format!("segment rename failed: {e}")))?;
+                // The sidecar lands after the segment: a crash in between just
+                // re-downloads it, never trusts a partial file.
+                write_len_sidecar(dir, index, bytes).await;
                 return Ok(bytes);
             }
             Err(error) => {
-                // Partial bytes of a failed attempt are not progress.
-                ctx.progress.set_downloaded(before);
+                // Partial bytes of a failed attempt never reached the counter:
+                // AttemptProgress rolled back exactly what this attempt added.
                 let _ = tokio::fs::remove_file(&tmp).await;
                 attempt += 1;
                 match error {
@@ -306,6 +399,78 @@ async fn fetch_segment(
     }
 }
 
+/// What the cache remembers of the playlist the segments were fetched for.
+/// Per-segment byte lengths live in `seg_NNNNN.ts.len` sidecars (written once
+/// per segment, so parallel workers never serialize on a shared file).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CacheManifest {
+    version: u32,
+    playlist: String,
+    fingerprint: String,
+    segments: usize,
+}
+
+fn manifest_path(dir: &Path) -> PathBuf {
+    dir.join("manifest.json")
+}
+
+async fn write_manifest(dir: &Path, plan: &Plan) -> Result<(), DownloadError> {
+    let manifest = CacheManifest {
+        version: 1,
+        playlist: plan.media_url.clone(),
+        fingerprint: plan.fingerprint.clone(),
+        segments: plan.segments.len(),
+    };
+    let body = serde_json::to_vec(&manifest)
+        .map_err(|e| DownloadError::fatal(format!("could not encode cache manifest: {e}")))?;
+    let tmp = dir.join("manifest.json.tmp");
+    tokio::fs::write(&tmp, body)
+        .await
+        .map_err(|e| DownloadError::fatal(format!("could not write cache manifest: {e}")))?;
+    tokio::fs::rename(&tmp, manifest_path(dir))
+        .await
+        .map_err(|e| DownloadError::fatal(format!("could not write cache manifest: {e}")))?;
+    Ok(())
+}
+
+/// A cached segment is trusted only when its byte length matches the sidecar
+/// written right after it completed — truncated nonzero files are corruption.
+async fn trusted_segment_len(dir: &Path, index: usize) -> Option<u64> {
+    let name = segment_name(index);
+    let meta = tokio::fs::metadata(dir.join(&name)).await.ok()?;
+    if meta.len() == 0 {
+        return None;
+    }
+    let sidecar = tokio::fs::read(dir.join(format!("{name}.len"))).await.ok()?;
+    let recorded = std::str::from_utf8(&sidecar).ok()?.trim().parse::<u64>().ok()?;
+    (recorded == meta.len()).then_some(meta.len())
+}
+
+/// Drop anything a previous run left when the playlist no longer matches:
+/// mixing segments of two different cuts produces a silently broken file.
+async fn validate_cache(dir: &Path, plan: &Plan) -> Result<(), DownloadError> {
+    let cached: Option<CacheManifest> = tokio::fs::read(manifest_path(dir))
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let matches = cached.as_ref().is_some_and(|manifest| {
+        manifest.version == 1
+            && manifest.fingerprint == plan.fingerprint
+            && manifest.segments == plan.segments.len()
+    });
+    if matches {
+        return Ok(());
+    }
+    if cached.is_some() {
+        log::info!("HLS playlist changed since the cache was written — restarting clean");
+    }
+    let _ = tokio::fs::remove_dir_all(dir).await;
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|e| DownloadError::fatal(format!("could not create temp folder: {e}")))?;
+    write_manifest(dir, plan).await
+}
+
 /// Fetch every missing segment. Returns the segment file names in play order.
 async fn download_segments(
     ctx: &JobContext,
@@ -316,14 +481,19 @@ async fn download_segments(
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| DownloadError::fatal(format!("could not create temp folder: {e}")))?;
+    validate_cache(dir, plan).await?;
     let count = plan.segments.len();
     // Complete segments from an earlier run. `*.tmp` leftovers are never trusted.
     let mut have_bytes = 0u64;
     let mut missing = Vec::new();
     for index in 0..count {
-        match tokio::fs::metadata(dir.join(segment_name(index))).await {
-            Ok(meta) if meta.len() > 0 => have_bytes += meta.len(),
-            _ => missing.push(index),
+        if let Some(bytes) = trusted_segment_len(dir, index).await {
+            have_bytes += bytes;
+        } else {
+            missing.push(index);
+            let name = segment_name(index);
+            let _ = tokio::fs::remove_file(dir.join(&name)).await;
+            let _ = tokio::fs::remove_file(dir.join(format!("{name}.len"))).await;
         }
     }
     let done_segments = Arc::new(AtomicU64::new((count - missing.len()) as u64));
@@ -337,17 +507,21 @@ async fn download_segments(
     let queue = Arc::new(std::sync::Mutex::new(
         missing.into_iter().collect::<std::collections::VecDeque<_>>(),
     ));
+    let progress_lock: ProgressLock = Arc::new(std::sync::Mutex::new(()));
     let workers = (0..connections).map(|_| {
         let queue = queue.clone();
         let done_segments = done_segments.clone();
         let done_bytes = done_bytes.clone();
+        let progress_lock = progress_lock.clone();
         async move {
             let mut client: HostClient = None;
             loop {
                 let Some(index) = crate::util::lock_or_recover(&queue).pop_front() else {
                     return Ok::<(), DownloadError>(());
                 };
-                let bytes = fetch_segment(ctx, plan, headers, &mut client, index, dir).await?;
+                let bytes =
+                    fetch_segment(ctx, plan, headers, &mut client, index, dir, &progress_lock)
+                        .await?;
                 let segments = done_segments.fetch_add(1, Ordering::Relaxed) + 1;
                 let total_bytes = done_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
                 // Sizes seen so far project the total better than peak BANDWIDTH.
@@ -378,6 +552,47 @@ fn output_extension(dest: &Path) -> &'static str {
         Some("ts") => "ts",
         _ => "mp4",
     }
+}
+
+/// A name ending in a playlist extension must not hold container bytes:
+/// `master.m3u8` becomes `master.mp4`. Any other name is the user's choice.
+fn container_corrected_name(dest: &Path) -> Option<String> {
+    let ext = dest.extension().and_then(|e| e.to_str())?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "m3u8" | "m3u") {
+        return None;
+    }
+    let stem = dest.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
+    Some(format!("{stem}.{}", output_extension(dest)))
+}
+
+/// Expired signed URLs surface as fatal auth errors on segments. Re-resolving
+/// the playlist mints fresh tokens — but only once per run.
+fn is_expired_credentials(error: &DownloadError) -> bool {
+    matches!(error, DownloadError::Fatal(message) if matches!(message.as_str(), "HTTP 401" | "HTTP 403" | "HTTP 410"))
+}
+
+const STDERR_TAIL_BYTES: usize = 16 * 1024;
+
+/// Drain a pipe to EOF keeping only the tail. ffmpeg can spew megabytes of
+/// per-packet noise on corrupt input; a pipe nothing drains blocks the writer
+/// and the merge never finishes.
+async fn drain_tail<R: tokio::io::AsyncRead + Unpin>(mut pipe: R) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut kept = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                kept.extend_from_slice(&chunk[..n]);
+                if kept.len() > STDERR_TAIL_BYTES {
+                    let excess = kept.len() - STDERR_TAIL_BYTES;
+                    kept.drain(..excess);
+                }
+            }
+        }
+    }
+    kept
 }
 
 /// Remux the segments into one container with ffmpeg (stream copy, no re-encode).
@@ -420,24 +635,37 @@ async fn merge_segments(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| DownloadError::fatal(format!("could not start ffmpeg: {e}")))?;
-    let mut stderr = child.stderr.take();
-    let read_stderr = async {
-        let mut text = Vec::new();
-        if let Some(pipe) = stderr.as_mut() {
-            use tokio::io::AsyncReadExt;
-            let _ = pipe.take(16 * 1024).read_to_end(&mut text).await;
-        }
-        String::from_utf8_lossy(&text).trim().to_string()
-    };
+    // stderr drains continuously in its own task for the whole lifetime of the
+    // child; only the tail is kept for the error message.
+    let drain = child.stderr.take().map(|pipe| tokio::spawn(drain_tail(pipe)));
     let mut cancel = ctx.cancel.clone();
-    let (status, detail) = tokio::select! {
-        result = async { let detail = read_stderr.await; (child.wait().await, detail) } => result,
-        _ = cancelled(&mut cancel) => {
-            return Err(DownloadError::Cancelled);
+    let outcome = tokio::select! {
+        status = child.wait() => Some(status),
+        _ = cancelled(&mut cancel) => None,
+    };
+    let Some(status) = outcome else {
+        // kill() signals and reaps; the extra wait collects the exit status.
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        if let Some(task) = drain {
+            let _ = task.await;
         }
+        // A half-written container is useless on the next attempt (ffmpeg
+        // rewrites it anyway) and must not leak disk.
+        let _ = tokio::fs::remove_file(output).await;
+        return Err(DownloadError::Cancelled);
+    };
+    // The child is reaped, so its stderr is at EOF: the drain ends here.
+    let detail = match drain {
+        Some(task) => task
+            .await
+            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
+            .unwrap_or_default(),
+        None => String::new(),
     };
     let status = status.map_err(|e| DownloadError::fatal(format!("ffmpeg failed: {e}")))?;
     if !status.success() {
+        let _ = tokio::fs::remove_file(output).await;
         let line = detail.lines().last().unwrap_or("unknown error");
         return Err(DownloadError::fatal(format!("ffmpeg merge failed: {line}")));
     }
@@ -451,17 +679,38 @@ pub async fn process_hls_stream(
     out_path: &str,
     headers: HttpHeaders,
 ) -> Result<PathBuf, DownloadError> {
-    let dest = PathBuf::from(out_path);
+    let mut dest = PathBuf::from(out_path);
     let _ticker = ctx.progress.start();
-    let plan = resolve_plan(ctx, url, &headers).await?;
+    let mut plan = resolve_plan(ctx, url, &headers).await?;
     // Fail before hours of segments if the merge tool is missing.
     find_ffmpeg().map_err(DownloadError::Fatal)?;
     let dir = hls_session_dir(ctx.id);
-    let names = download_segments(ctx, &plan, &headers, &dir).await?;
+    // Signed segment URLs can expire mid-download. Re-resolving the playlist
+    // mints fresh tokens — once per run; cache validation decides whether the
+    // re-resolved cut still matches the bytes on disk.
+    let mut reresolved = false;
+    let names = loop {
+        match download_segments(ctx, &plan, &headers, &dir).await {
+            Ok(names) => break names,
+            Err(error) if !reresolved && is_expired_credentials(&error) => {
+                reresolved = true;
+                log::info!(
+                    "download {}: segment URLs rejected ({}), re-resolving the playlist once",
+                    ctx.id,
+                    error.message()
+                );
+                plan = resolve_plan(ctx, url, &headers).await?;
+            }
+            Err(error) => return Err(error),
+        }
+    };
 
     ctx.progress.set_merging();
     let output = dir.join(format!("output.{}", output_extension(&dest)));
     merge_segments(ctx, &dir, &names, &output).await?;
+    if let Some(wanted) = container_corrected_name(&dest) {
+        dest = ctx.rename(&dest, &wanted);
+    }
     let landed = ctx.finalize(&output, &dest).await?;
     let _ = tokio::fs::remove_dir_all(&dir).await;
     Ok(landed)
@@ -547,6 +796,80 @@ mod tests {
              #EXT-X-ENDLIST\n",
         );
         assert_eq!(unsupported_feature(&ranged), Some("byte-range segments"));
+    }
+
+    #[test]
+    fn fingerprint_ignores_query_but_not_paths_order_or_count() {
+        let urls =
+            |list: &[&str]| list.iter().map(|u| Url::parse(u).unwrap()).collect::<Vec<Url>>();
+        let a = plan_fingerprint(&urls(&[
+            "https://cdn.example.com/s/seg0.ts?tok=A",
+            "https://cdn.example.com/s/seg1.ts?tok=A",
+        ]));
+        let rotated = plan_fingerprint(&urls(&[
+            "https://cdn.example.com/s/seg0.ts?tok=B&expires=9",
+            "https://cdn.example.com/s/seg1.ts?tok=B&expires=9",
+        ]));
+        assert_eq!(a, rotated, "signed-URL rotation must not change the fingerprint");
+        let recut = plan_fingerprint(&urls(&[
+            "https://cdn.example.com/s/seg0.ts?tok=A",
+            "https://cdn.example.com/s/other.ts?tok=A",
+        ]));
+        assert_ne!(a, recut, "different paths are a different cut");
+        let fewer = plan_fingerprint(&urls(&["https://cdn.example.com/s/seg0.ts?tok=A"]));
+        assert_ne!(a, fewer, "segment count matters");
+        let swapped = plan_fingerprint(&urls(&[
+            "https://cdn.example.com/s/seg1.ts?tok=A",
+            "https://cdn.example.com/s/seg0.ts?tok=A",
+        ]));
+        assert_ne!(a, swapped, "play order matters");
+    }
+
+    #[test]
+    fn playlist_names_take_the_container_extension() {
+        let corrected = |name: &str| container_corrected_name(Path::new(name));
+        assert_eq!(corrected("/dl/master.m3u8").as_deref(), Some("master.mp4"));
+        assert_eq!(corrected("/dl/SHOW.M3U8").as_deref(), Some("SHOW.mp4"));
+        assert_eq!(corrected("/dl/a.m3u").as_deref(), Some("a.mp4"));
+        assert_eq!(corrected("/dl/video.mkv"), None, "explicit user container names stay");
+        assert_eq!(corrected("/dl/clip.ts"), None);
+        assert_eq!(corrected("/dl/plain"), None);
+        assert_eq!(corrected("/dl/movie.mp4"), None);
+    }
+
+    #[test]
+    fn attempt_progress_rolls_back_exactly_what_it_added() {
+        let progress = crate::download::progress::Progress::new(None, None, 1);
+        let lock: ProgressLock = Arc::new(std::sync::Mutex::new(()));
+        let mut a = AttemptProgress::new(&progress, &lock);
+        let mut b = AttemptProgress::new(&progress, &lock);
+        a.add(100);
+        b.add(50);
+        assert_eq!(progress.downloaded(), 150);
+        // The failed attempt gives back only its own bytes, never the parallel ones.
+        drop(a);
+        assert_eq!(progress.downloaded(), 50);
+        b.commit();
+        assert_eq!(progress.downloaded(), 50, "committed bytes stay counted");
+    }
+
+    #[tokio::test]
+    async fn drain_tail_bounds_memory_and_keeps_the_end() {
+        let (mut tx, rx) = tokio::io::duplex(4096);
+        let writer = tokio::spawn(async move {
+            for i in 0u32..4096 {
+                let line = format!("noise line {i} payload payload payload\n");
+                if tx.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let tail = drain_tail(rx).await;
+        writer.await.unwrap();
+        assert!(tail.len() <= STDERR_TAIL_BYTES, "unbounded: {}", tail.len());
+        let text = String::from_utf8_lossy(&tail);
+        assert!(text.contains("noise line 4095"), "the tail survives: {text}");
+        assert!(!text.contains("noise line 100 "), "the head is dropped");
     }
 
     struct Fixture {
@@ -660,18 +983,23 @@ mod tests {
         let fixture = serve(fake_stream(), Vec::new()).await;
         let dir = std::env::temp_dir().join(format!("falcon-hls-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("seg_00000.ts"), b"SEGMENT-0-DATA").unwrap();
-        // A crash mid-write: must be fetched again.
-        std::fs::write(dir.join("seg_00001.ts.tmp"), b"SEGM").unwrap();
         let (ctx, _tx) = JobContext::for_tests(2);
         let _g = crate::util::allow_loopback_for_tests();
         let plan = resolve_plan(&ctx, &format!("{}/high/index.m3u8", fixture.base), &headers(2))
             .await
             .unwrap();
+        // A complete first run leaves the trusted cache: manifest + sidecars.
         download_segments(&ctx, &plan, &headers(2), &dir).await.unwrap();
+        // Lose one segment (with its sidecar) and drop a crash leftover instead.
+        std::fs::remove_file(dir.join("seg_00001.ts")).unwrap();
+        std::fs::remove_file(dir.join("seg_00001.ts.len")).unwrap();
+        std::fs::write(dir.join("seg_00001.ts.tmp"), b"SEGM").unwrap();
+        let (ctx2, _tx2) = JobContext::for_tests(5);
+        download_segments(&ctx2, &plan, &headers(2), &dir).await.unwrap();
         let hits = fixture.hits.lock().unwrap().clone();
-        assert!(!hits.contains_key("/high/seg0.ts"), "finished segment must not be re-fetched");
-        assert_eq!(hits["/high/seg1.ts"], 1);
+        assert_eq!(hits["/high/seg0.ts"], 1, "finished segment must not be re-fetched");
+        assert_eq!(hits["/high/seg1.ts"], 2, "the lost segment is fetched exactly once more");
+        assert_eq!(hits["/high/seg2.ts"], 1, "finished segment must not be re-fetched");
         assert_eq!(std::fs::read(dir.join("seg_00001.ts")).unwrap(), b"SEGMENT-1-DATA");
         assert!(!dir.join("seg_00001.ts.tmp").exists());
         std::fs::remove_dir_all(dir).unwrap();
@@ -715,20 +1043,162 @@ mod tests {
         assert!(matches!(enc, Err(DownloadError::NeedsYtDlp)));
     }
 
-    /// Real MPEG-TS segments → one playable MP4. Skipped when ffmpeg is absent.
+    /// Static file server whose contents the test can mutate mid-flight.
+    async fn serve_mutable(
+        files: HashMap<String, Vec<u8>>,
+    ) -> (Fixture, Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>) {
+        use tokio::io::AsyncReadExt;
+        let files = Arc::new(std::sync::Mutex::new(files));
+        let hits = Arc::new(std::sync::Mutex::new(HashMap::<String, usize>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits_c = hits.clone();
+        let files_c = files.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let (files, hits) = (files_c.clone(), hits_c.clone());
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let Ok(n) = sock.read(&mut buf).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/")
+                        .to_string();
+                    {
+                        let mut hits = hits.lock().unwrap();
+                        *hits.entry(path.clone()).or_insert(0) += 1;
+                    }
+                    let body = files.lock().unwrap().get(&path).cloned();
+                    let Some(body) = body else {
+                        let _ = sock.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                        return;
+                    };
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body).await;
+                });
+            }
+        });
+        (Fixture { base: format!("http://127.0.0.1:{}", addr.port()), hits }, files)
+    }
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("falcon-hls-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A cache written for one playlist must never mix with a re-cut one.
     #[tokio::test]
-    async fn end_to_end_remux_produces_an_mp4() {
-        let Ok(ffmpeg) = find_ffmpeg() else {
-            eprintln!("ffmpeg not found — skipping HLS end-to-end test");
-            return;
-        };
-        let src = std::env::temp_dir().join(format!("falcon-hls-src-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&src).unwrap();
+    async fn mutated_playlist_invalidates_cache() {
+        let mut files = HashMap::new();
+        files.insert(
+            "/index.m3u8".to_string(),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nseg0.ts\n#EXTINF:1.0,\nseg1.ts\n#EXTINF:1.0,\nseg2.ts\n#EXT-X-ENDLIST\n".to_vec(),
+        );
+        for i in 0..3 {
+            files.insert(format!("/seg{i}.ts"), format!("SEGMENT-{i}-DATA").into_bytes());
+        }
+        let (fixture, files) = serve_mutable(files).await;
+        let dir = fresh_dir("mutate");
+        let _g = crate::util::allow_loopback_for_tests();
+        let (ctx, _tx) = JobContext::for_tests(20);
+        let plan =
+            resolve_plan(&ctx, &format!("{}/index.m3u8", fixture.base), &headers(2)).await.unwrap();
+        download_segments(&ctx, &plan, &headers(2), &dir).await.unwrap();
+
+        // The CDN re-cuts the stream: new segment names, one segment less.
+        {
+            let mut files = files.lock().unwrap();
+            files.insert(
+                "/index.m3u8".to_string(),
+                b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nnew0.ts\n#EXTINF:1.0,\nnew1.ts\n#EXT-X-ENDLIST\n".to_vec(),
+            );
+            files.insert("/new0.ts".to_string(), b"NEW-0-DATA".to_vec());
+            files.insert("/new1.ts".to_string(), b"NEW-1-DATA".to_vec());
+        }
+        let (ctx2, _tx2) = JobContext::for_tests(21);
+        let plan2 = resolve_plan(&ctx2, &format!("{}/index.m3u8", fixture.base), &headers(2))
+            .await
+            .unwrap();
+        let names = download_segments(&ctx2, &plan2, &headers(2), &dir).await.unwrap();
+        assert_eq!(names.len(), 2);
+        let joined: Vec<u8> =
+            names.iter().flat_map(|name| std::fs::read(dir.join(name)).unwrap()).collect();
+        assert_eq!(joined, b"NEW-0-DATANEW-1-DATA", "no stale bytes may survive a re-cut");
+        assert!(!dir.join("seg_00002.ts").exists(), "orphaned segment of the old cut is removed");
+        assert!(!dir.join("seg_00003.ts").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Resume must trust only byte-exact segments; a truncated nonzero file is
+    /// fetched again instead of silently corrupting the merge.
+    #[tokio::test]
+    async fn resume_detects_truncated_segment_and_keeps_valid_cache() {
+        let fixture = serve(fake_stream(), Vec::new()).await;
+        let dir = fresh_dir("trunc");
+        let _g = crate::util::allow_loopback_for_tests();
+        let (ctx, _tx) = JobContext::for_tests(22);
+        let plan = resolve_plan(&ctx, &format!("{}/high/index.m3u8", fixture.base), &headers(2))
+            .await
+            .unwrap();
+        download_segments(&ctx, &plan, &headers(2), &dir).await.unwrap();
+        assert_eq!(fixture.hits.lock().unwrap()["/high/seg0.ts"], 1);
+
+        // Power loss after the rename: the file is nonzero but short.
+        let path = dir.join("seg_00001.ts");
+        let data = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &data[..data.len() - 3]).unwrap();
+
+        let (ctx2, _tx2) = JobContext::for_tests(23);
+        download_segments(&ctx2, &plan, &headers(2), &dir).await.unwrap();
+        let hits = fixture.hits.lock().unwrap().clone();
+        assert_eq!(hits["/high/seg0.ts"], 1, "intact segment stays cached");
+        assert_eq!(hits["/high/seg2.ts"], 1, "intact segment stays cached");
+        assert_eq!(hits["/high/seg1.ts"], 2, "truncated segment is fetched again");
+        assert_eq!(std::fs::read(dir.join("seg_00001.ts")).unwrap(), b"SEGMENT-1-DATA");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn discontinuity_playlist_defers_to_ytdlp() {
+        let discontinuity = media(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\na.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:4.0,\nb.ts\n#EXT-X-ENDLIST\n",
+        );
+        assert_eq!(unsupported_feature(&discontinuity), Some("discontinuity"));
+        let mut files = HashMap::new();
+        files.insert(
+            "/disc.m3u8".to_string(),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\na.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:2.0,\nb.ts\n#EXT-X-ENDLIST\n".to_vec(),
+        );
+        let fixture = serve(files, Vec::new()).await;
+        let (ctx, _tx) = JobContext::for_tests(24);
+        let _g = crate::util::allow_loopback_for_tests();
+        let result = resolve_plan(&ctx, &format!("{}/disc.m3u8", fixture.base), &headers(1)).await;
+        assert!(matches!(result, Err(DownloadError::NeedsYtDlp)), "expected NeedsYtDlp");
+    }
+
+    /// ffmpeg `-f hls` output of a few seconds, or None when ffmpeg is missing.
+    fn make_hls_parts(src: &Path) -> Option<usize> {
+        let ffmpeg = find_ffmpeg().ok()?;
         let made = std::process::Command::new(&ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("testsrc=duration=3:size=160x120:rate=10")
             .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=3"])
-            // H.264 like real HLS; MPEG-4 part 2 in TS cannot be stream-copied to MP4.
             .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "10"])
             .args(["-c:a", "aac", "-f", "hls", "-hls_time", "1"])
             .args(["-hls_playlist_type", "vod", "-hls_segment_filename"])
@@ -738,23 +1208,467 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         if !made {
+            return None;
+        }
+        let count = std::fs::read_dir(src)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".ts"))
+            .count();
+        (count >= 2).then_some(count)
+    }
+
+    fn load_parts(src: &Path) -> HashMap<String, Vec<u8>> {
+        let mut files = HashMap::new();
+        for entry in std::fs::read_dir(src).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            files.insert(format!("/{name}"), std::fs::read(entry.path()).unwrap());
+        }
+        files
+    }
+
+    /// Signed-URL server: the token handed out in the playlist expires after
+    /// the first segment it protects. The next playlist fetch mints a fresh
+    /// token (and optionally re-cut segment names).
+    struct Rotating {
+        base: String,
+        hits: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    }
+
+    async fn serve_signed_segments(segment: Vec<u8>, recut: bool) -> Rotating {
+        use tokio::io::AsyncReadExt;
+        let hits = Arc::new(std::sync::Mutex::new(HashMap::<String, usize>::new()));
+        let playlist_fetches = Arc::new(AtomicU64::new(0));
+        let token_a_dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits_c = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let (hits, fetches, dead, segment) = (
+                    hits_c.clone(),
+                    playlist_fetches.clone(),
+                    token_a_dead.clone(),
+                    segment.clone(),
+                );
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let Ok(n) = sock.read(&mut buf).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let target = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    {
+                        let mut hits = hits.lock().unwrap();
+                        *hits.entry(target.clone()).or_insert(0) += 1;
+                    }
+                    let path = target.split('?').next().unwrap_or("/");
+                    let token =
+                        target.split('?').nth(1).and_then(|q| q.strip_prefix("tok=")).unwrap_or("");
+                    let reply = |status: &str, body: &[u8]| {
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes()
+                        .into_iter()
+                        .chain(body.iter().copied())
+                        .collect::<Vec<u8>>()
+                    };
+                    if path == "/index.m3u8" {
+                        let fetch = fetches.fetch_add(1, Ordering::Relaxed) + 1;
+                        let (tok, prefix) = if fetch == 1 {
+                            ("A", "seg")
+                        } else if recut {
+                            ("B", "cut")
+                        } else {
+                            ("B", "seg")
+                        };
+                        let body = format!(
+                            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\n{prefix}0.ts?tok={tok}\n#EXTINF:1.0,\n{prefix}1.ts?tok={tok}\n#EXTINF:1.0,\n{prefix}2.ts?tok={tok}\n#EXT-X-ENDLIST\n"
+                        );
+                        let _ = sock.write_all(&reply("200 OK", body.as_bytes())).await;
+                        return;
+                    }
+                    let index = path
+                        .trim_start_matches('/')
+                        .trim_start_matches("seg")
+                        .trim_start_matches("cut")
+                        .trim_end_matches(".ts")
+                        .to_string();
+                    if !matches!(index.as_str(), "0" | "1" | "2") {
+                        let _ = sock.write_all(&reply("404 Not Found", b"")).await;
+                        return;
+                    }
+                    let forbidden = match token {
+                        "A" if dead.load(Ordering::Relaxed) => true,
+                        "A" => {
+                            // The first successful segment burns the token.
+                            dead.store(true, Ordering::Relaxed);
+                            false
+                        }
+                        "B" => false,
+                        _ => true,
+                    };
+                    if forbidden {
+                        let _ = sock.write_all(&reply("403 Forbidden", b"")).await;
+                    } else {
+                        let _ = sock.write_all(&reply("200 OK", &segment)).await;
+                    }
+                });
+            }
+        });
+        Rotating { base: format!("http://127.0.0.1:{}", addr.port()), hits }
+    }
+
+    fn signed_fixture_parts() -> Option<(PathBuf, Vec<u8>)> {
+        let src = std::env::temp_dir().join(format!("falcon-hls-src-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&src).unwrap();
+        make_hls_parts(&src)?;
+        let bytes = std::fs::read(src.join("part0.ts")).unwrap();
+        Some((src, bytes))
+    }
+
+    /// Signed URLs expire mid-download: the engine re-resolves the playlist
+    /// once and continues with fresh URLs, reusing the valid cache.
+    #[tokio::test]
+    async fn expired_signed_urls_reresolve_once_and_keep_cache() {
+        let Some((src, segment)) = signed_fixture_parts() else {
+            eprintln!("ffmpeg not found — skipping signed URL test");
+            return;
+        };
+        let fixture = serve_signed_segments(segment, false).await;
+        let out_dir = fresh_dir("signed-out");
+        let dest = out_dir.join("clip.mp4");
+        let id = 910_000 + i64::from(std::process::id());
+        remove_artifacts(id);
+        let (ctx, _tx) = JobContext::for_tests(id);
+        let _g = crate::util::allow_loopback_for_tests();
+        let landed = process_hls_stream(
+            &ctx,
+            &format!("{}/index.m3u8", fixture.base),
+            dest.to_str().unwrap(),
+            headers(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(landed, dest.canonicalize().unwrap());
+        let hits = fixture.hits.lock().unwrap().clone();
+        assert_eq!(hits["/seg0.ts?tok=A"], 1, "first segment succeeds before expiry");
+        assert_eq!(hits["/seg1.ts?tok=A"], 1, "the expired token is rejected once");
+        assert_eq!(hits["/seg1.ts?tok=B"], 1, "fresh token fetches the rest");
+        assert_eq!(hits["/seg2.ts?tok=B"], 1);
+        assert!(
+            !hits.contains_key("/seg0.ts?tok=B"),
+            "a cache-valid segment is not fetched again after re-signing"
+        );
+        let _ = std::fs::remove_dir_all(src);
+        let _ = std::fs::remove_dir_all(out_dir);
+        remove_artifacts(id);
+    }
+
+    /// Server whose segments never authorize: every request is a 403, however
+    /// fresh the token. Guards the re-resolve loop.
+    async fn serve_always_forbidden() -> Rotating {
+        use tokio::io::AsyncReadExt;
+        let hits = Arc::new(std::sync::Mutex::new(HashMap::<String, usize>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits_c = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let hits = hits_c.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let Ok(n) = sock.read(&mut buf).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let target = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    {
+                        let mut hits = hits.lock().unwrap();
+                        *hits.entry(target.clone()).or_insert(0) += 1;
+                    }
+                    let path = target.split('?').next().unwrap_or("/");
+                    if path == "/index.m3u8" {
+                        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = sock.write_all(head.as_bytes()).await;
+                        let _ = sock.write_all(body).await;
+                    } else {
+                        let _ = sock
+                            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .await;
+                    }
+                });
+            }
+        });
+        Rotating { base: format!("http://127.0.0.1:{}", addr.port()), hits }
+    }
+
+    /// One re-resolve per run: permanently forbidden segments end fatal,
+    /// not in a loop of playlist fetches.
+    #[tokio::test]
+    async fn permanently_forbidden_segments_fail_after_one_reresolve() {
+        if find_ffmpeg().is_err() {
+            eprintln!("ffmpeg not found — skipping re-resolve guard test");
+            return;
+        }
+        let fixture = serve_always_forbidden().await;
+        let out_dir = fresh_dir("forbidden-out");
+        let dest = out_dir.join("clip.mp4");
+        let id = 940_000 + i64::from(std::process::id());
+        remove_artifacts(id);
+        let (ctx, _tx) = JobContext::for_tests(id);
+        let _g = crate::util::allow_loopback_for_tests();
+        let result = process_hls_stream(
+            &ctx,
+            &format!("{}/index.m3u8", fixture.base),
+            dest.to_str().unwrap(),
+            headers(1),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(DownloadError::Fatal(ref m)) if m == "HTTP 403"),
+            "{result:?}"
+        );
+        let hits = fixture.hits.lock().unwrap().clone();
+        assert_eq!(
+            hits["/index.m3u8"], 2,
+            "exactly one re-resolution: the initial fetch plus one retry"
+        );
+        let _ = std::fs::remove_dir_all(out_dir);
+        remove_artifacts(id);
+    }
+
+    /// When the re-resolved playlist is a different cut, the cache cannot be
+    /// trusted: everything restarts against the new segments.
+    #[tokio::test]
+    async fn reresolve_with_recut_playlist_restarts_clean() {
+        let Some((src, segment)) = signed_fixture_parts() else {
+            eprintln!("ffmpeg not found — skipping signed URL recut test");
+            return;
+        };
+        let fixture = serve_signed_segments(segment, true).await;
+        let out_dir = fresh_dir("signed-recut");
+        let dest = out_dir.join("clip.mp4");
+        let id = 920_000 + i64::from(std::process::id());
+        remove_artifacts(id);
+        let (ctx, _tx) = JobContext::for_tests(id);
+        let _g = crate::util::allow_loopback_for_tests();
+        process_hls_stream(
+            &ctx,
+            &format!("{}/index.m3u8", fixture.base),
+            dest.to_str().unwrap(),
+            headers(1),
+        )
+        .await
+        .unwrap();
+        let hits = fixture.hits.lock().unwrap().clone();
+        assert_eq!(hits["/seg0.ts?tok=A"], 1);
+        for i in 0..3 {
+            assert_eq!(
+                hits[&format!("/cut{i}.ts?tok=B")],
+                1,
+                "re-cut segments are all fetched once"
+            );
+        }
+        let _ = std::fs::remove_dir_all(src);
+        let _ = std::fs::remove_dir_all(out_dir);
+        remove_artifacts(id);
+    }
+
+    /// A `.m3u8` output name is corrected to the container ffmpeg produced.
+    #[tokio::test]
+    async fn m3u8_destination_is_renamed_to_the_container() {
+        let src = std::env::temp_dir().join(format!("falcon-hls-src-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&src).unwrap();
+        if make_hls_parts(&src).is_none() {
+            eprintln!("ffmpeg not found — skipping rename test");
+            let _ = std::fs::remove_dir_all(&src);
+            return;
+        }
+        let fixture = serve(load_parts(&src), Vec::new()).await;
+        let out_dir = fresh_dir("rename-out");
+        let dest = out_dir.join("master.m3u8");
+        let id = 930_000 + i64::from(std::process::id());
+        remove_artifacts(id);
+        let (ctx, _tx) = JobContext::for_tests(id);
+        let _g = crate::util::allow_loopback_for_tests();
+        let landed = process_hls_stream(
+            &ctx,
+            &format!("{}/index.m3u8", fixture.base),
+            dest.to_str().unwrap(),
+            headers(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            landed.file_name().and_then(|n| n.to_str()),
+            Some("master.mp4"),
+            "the container extension wins over the playlist name"
+        );
+        let bytes = std::fs::read(&landed).unwrap();
+        assert_eq!(&bytes[4..8], b"ftyp", "output must be an MP4 container");
+        let _ = std::fs::remove_dir_all(src);
+        let _ = std::fs::remove_dir_all(out_dir);
+        remove_artifacts(id);
+    }
+
+    /// Long MPEG-TS file with packet payloads corrupted past the probe region.
+    /// `heavy` corruption fails the mux; the lighter varied one only makes it
+    /// complain loudly (decode errors) while it keeps going.
+    fn make_noisy_segments(dir: &Path, copies: usize, heavy: bool) -> Option<Vec<String>> {
+        let ffmpeg = find_ffmpeg().ok()?;
+        let big = dir.join("big.ts");
+        let made = std::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc=duration=10:size=320x240:rate=20")
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=10"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "15"])
+            .args(["-c:a", "aac", "-f", "mpegts", "-y"])
+            .arg(&big)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            return None;
+        }
+        let base = std::fs::read(&big).unwrap();
+        std::fs::remove_file(&big).unwrap();
+        let mut names = Vec::new();
+        for copy in 0..copies {
+            let mut data = base.clone();
+            let mut off = 8000 - (8000 % 188);
+            let mut hit = 0usize;
+            while off + 188 <= data.len() {
+                if data[off] == 0x47 {
+                    hit += 1;
+                    if (hit + copy).is_multiple_of(2) {
+                        let (start, width) =
+                            if heavy { (4, 96) } else { (20, 30 + (copy * 13) % 50) };
+                        for j in start..start + width {
+                            data[off + j] ^= 0xFF;
+                        }
+                    }
+                }
+                off += 188;
+            }
+            let name = segment_name(copy);
+            std::fs::write(dir.join(&name), &data).unwrap();
+            names.push(name);
+        }
+        Some(names)
+    }
+
+    /// ffmpeg spewing more than the old 16 KiB stderr cap must still finish:
+    /// the pipe is drained for as long as ffmpeg writes.
+    #[tokio::test]
+    async fn noisy_ffmpeg_stderr_does_not_hang_merge() {
+        let dir = fresh_dir("noisy");
+        let Some(names) = make_noisy_segments(&dir, 30, false) else {
+            eprintln!("ffmpeg not found — skipping noisy merge test");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        let (ctx, _tx) = JobContext::for_tests(30);
+        let output = dir.join("output.mp4");
+        let merged = tokio::time::timeout(
+            Duration::from_secs(60),
+            merge_segments(&ctx, &dir, &names, &output),
+        )
+        .await;
+        let merged = merged.unwrap_or_else(|_| panic!("merge deadlocked on noisy ffmpeg stderr"));
+        // Corrupt input may fail the merge; it must never hang it.
+        if merged.is_err() {
+            assert!(!output.exists(), "a failed merge leaves no partial output");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The partial output of a failed merge is deleted, not left to leak.
+    #[tokio::test]
+    async fn failed_merge_deletes_partial_output() {
+        let dir = fresh_dir("failmerge");
+        let Some(names) = make_noisy_segments(&dir, 1, true) else {
+            eprintln!("ffmpeg not found — skipping failed merge test");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        let (ctx, _tx) = JobContext::for_tests(31);
+        let output = dir.join("output.mp4");
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            merge_segments(&ctx, &dir, &names, &output),
+        )
+        .await
+        .expect("merge must not hang");
+        assert!(result.is_err(), "heavily corrupt input fails the merge");
+        assert!(!output.exists(), "partial output is removed after a failed merge");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Cancelling the merge kills ffmpeg, reaps the child and cleans up.
+    #[tokio::test]
+    async fn cancelled_merge_reaps_ffmpeg() {
+        let dir = fresh_dir("cancelmerge");
+        let Some(names) = make_noisy_segments(&dir, 4, false) else {
+            eprintln!("ffmpeg not found — skipping cancel merge test");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        let (ctx, tx) = JobContext::for_tests(32);
+        // Already cancelled when the merge starts: the cancel branch must still
+        // reap the spawned child instead of leaking it to kill_on_drop.
+        tx.send(true).unwrap();
+        let output = dir.join("output.mp4");
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            merge_segments(&ctx, &dir, &names, &output),
+        )
+        .await
+        .expect("cancelled merge must not hang");
+        assert!(matches!(result, Err(DownloadError::Cancelled)), "{result:?}");
+        assert!(!output.exists(), "a cancelled merge leaves no partial output");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Real MPEG-TS segments → one playable MP4. Skipped when ffmpeg is absent.
+    #[tokio::test]
+    async fn end_to_end_remux_produces_an_mp4() {
+        let src = std::env::temp_dir().join(format!("falcon-hls-src-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&src).unwrap();
+        if make_hls_parts(&src).is_none() {
             eprintln!("ffmpeg could not build a fixture — skipping HLS end-to-end test");
             let _ = std::fs::remove_dir_all(&src);
             return;
         }
-        let mut files = HashMap::new();
-        for entry in std::fs::read_dir(&src).unwrap().flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            files.insert(format!("/{name}"), std::fs::read(entry.path()).unwrap());
-        }
-        let segment_count = files.keys().filter(|k| k.ends_with(".ts")).count();
-        assert!(segment_count >= 2, "fixture should have several segments");
-        let fixture = serve(files, Vec::new()).await;
+        let fixture = serve(load_parts(&src), Vec::new()).await;
 
         let out_dir = std::env::temp_dir().join(format!("falcon-hls-out-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&out_dir).unwrap();
         let dest = out_dir.join("clip.mp4");
         let id = 900_000 + i64::from(std::process::id());
+        remove_artifacts(id);
         let (ctx, _tx) = JobContext::for_tests(id);
         let _g = crate::util::allow_loopback_for_tests();
         let landed = process_hls_stream(
