@@ -1333,6 +1333,8 @@ dependencies = [
  "libc",
  "log",
  "m3u8-rs",
+ "objc2",
+ "objc2-app-kit",
  "percent-encoding",
  "r2d2",
  "r2d2_sqlite",

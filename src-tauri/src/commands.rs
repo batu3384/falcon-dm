@@ -4,8 +4,8 @@ use crate::pairing::PendingPair;
 use crate::settings::Settings;
 use crate::storage::models::{Download, DownloadFilter, DownloadStatus};
 use crate::util::{
-    app_data_dir, free_disk_space, lock_or_recover, move_file_exclusive, resolve_download_target,
-    sanitize_filename, validate_open_path, LEGACY_DEFAULT_API_TOKEN,
+    app_data_dir, free_disk_space, full_file_path, lock_or_recover, move_file_exclusive,
+    resolve_download_target, sanitize_filename, validate_open_path, LEGACY_DEFAULT_API_TOKEN,
 };
 use crate::{
     current_settings, emit_row, enqueue_download, parse_extension_id, remove_download_artifacts,
@@ -111,22 +111,29 @@ pub async fn remove_download(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.db.get_download(id).map_err(|e| e.to_string())?;
-    if !state.queue.stop_and_wait(id, StopReason::Remove).await {
-        return Err("Download is still stopping; try removing it again shortly".into());
-    }
-    // Read again: the worker may have renamed the file while finishing.
-    let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-    if delete_file.unwrap_or(false) && dl.status == DownloadStatus::Completed {
-        let file_path = resolve_download_target(&dl.save_path, &dl.filename)?;
-        if file_path.exists() {
-            std::fs::remove_file(&file_path)
-                .map_err(|e| format!("Could not delete file from disk: {e}"))?;
+    // Keep the row out of queue claims until the row delete has fully finished.
+    state.queue.begin_remove(id);
+    let result: Result<(), String> = async {
+        if !state.queue.stop_and_wait(id, StopReason::Remove).await {
+            Err("Download is still stopping; try removing it again shortly".to_string())?;
         }
+        // Read again: the worker may have renamed the file while finishing.
+        let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
+        if delete_file.unwrap_or(false) && dl.status == DownloadStatus::Completed {
+            let file_path = resolve_download_target(&dl.save_path, &dl.filename)?;
+            if file_path.exists() {
+                std::fs::remove_file(&file_path)
+                    .map_err(|e| format!("Could not delete file from disk: {e}"))?;
+            }
+        }
+        remove_download_artifacts(&dl.save_path, &dl.filename, id);
+        state.db.delete_download(id).map_err(|e| e.to_string())?;
+        let _ = app.emit("download-removed", id);
+        Ok(())
     }
-    remove_download_artifacts(&dl.save_path, &dl.filename, id);
-    state.db.delete_download(id).map_err(|e| e.to_string())?;
-    let _ = app.emit("download-removed", id);
-    Ok(())
+    .await;
+    state.queue.end_remove(id);
+    result
 }
 
 #[tauri::command]
@@ -179,9 +186,22 @@ pub fn get_schedule(state: State<'_, AppState>) -> Result<ScheduleOptions, Strin
     Ok(state.queue.get_schedule())
 }
 
+/// Exact file location of every download row, archived or not. `open` on a
+/// recorded path is legitimate even when the save dir lives outside the
+/// download roots (custom per-download or category folder on any volume).
+fn recorded_download_files(db: &crate::storage::Database) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for archived in [None, Some(true)] {
+        if let Ok(rows) = db.get_downloads(&DownloadFilter { archived, ..Default::default() }) {
+            files.extend(rows.iter().map(|row| full_file_path(&row.save_path, &row.filename)));
+        }
+    }
+    files
+}
+
 #[tauri::command]
-pub async fn open_folder(path: String) -> Result<(), String> {
-    let safe = validate_open_path(&path)?;
+pub async fn open_folder(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let safe = validate_open_path(&path, &recorded_download_files(&state.db))?;
     #[cfg(target_os = "macos")]
     {
         // Reveal the file when it exists, else open the folder it will land in.
@@ -204,8 +224,8 @@ pub async fn open_folder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn open_file(path: String) -> Result<(), String> {
-    let safe = validate_open_path(&path)?;
+pub async fn open_file(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let safe = validate_open_path(&path, &recorded_download_files(&state.db))?;
     if !safe.is_file() {
         return Err("ERR_FILE_MISSING".into());
     }

@@ -209,10 +209,64 @@ fn spawn_local_api(app_handle: tauri::AppHandle) {
     });
 }
 
+/// Idle-sleep prevention while bytes are moving. `caffeinate -w <own pid>`
+/// ties the assertion to this process, so even a crash cannot leave the Mac
+/// awake forever; a clean finish is handled by killing the child.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct SleepAssertion {
+    child: Option<std::process::Child>,
+    // Spawn failures are not retried until the queue goes fully idle once:
+    // a missing caffeinate must not spin a failing spawn every tick.
+    spawn_failed: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl SleepAssertion {
+    fn update(&mut self, downloading: bool) {
+        if !downloading {
+            self.spawn_failed = false;
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return;
+        }
+        // Reap an unexpected exit so the assertion can be raised again.
+        if let Some(child) = self.child.as_mut() {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                self.child = None;
+            }
+        }
+        if self.child.is_none() && !self.spawn_failed {
+            let spawn = std::process::Command::new("/usr/bin/caffeinate")
+                .arg("-i")
+                .arg("-w")
+                .arg(std::process::id().to_string())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match spawn {
+                Ok(child) => {
+                    log::info!("idle sleep prevented while downloads are active");
+                    self.child = Some(child);
+                }
+                Err(e) => {
+                    self.spawn_failed = true;
+                    log::warn!("could not spawn caffeinate; sleep is not prevented: {e}");
+                }
+            }
+        }
+    }
+}
+
 fn spawn_queue_loop(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        #[cfg(target_os = "macos")]
+        let mut sleep_assertion = SleepAssertion::default();
         loop {
             interval.tick().await;
             // One panic must not freeze download management.
@@ -227,6 +281,8 @@ fn spawn_queue_loop(app_handle: tauri::AppHandle) {
                 Ok(Err(e)) => log::warn!("queue tick failed: {e}"),
                 Err(panic) => log::error!("queue tick panicked, continuing: {panic:?}"),
             }
+            #[cfg(target_os = "macos")]
+            sleep_assertion.update(!app_handle.state::<AppState>().queue.active_ids().is_empty());
         }
     });
 }
@@ -297,6 +353,9 @@ pub fn run() {
     restore_orphan_downloads(&db);
 
     let settings = Settings::load(&data_dir);
+    // Manual theme choice reaches the NSWindow before first paint — the
+    // frontend re-applies it too, but only after loading settings over IPC.
+    let startup_theme = settings.theme.clone();
     // Partial data of unfinished downloads is what makes resume possible: only
     // temp files nobody owns any more are removed.
     let keep = resumable_ids(&db);
@@ -358,6 +417,14 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 let _ = apply_vibrancy(&window, NSVisualEffectMaterial::Sidebar, None, None);
+                let dark = match startup_theme.as_str() {
+                    "dark" => Some(true),
+                    "light" => Some(false),
+                    _ => None,
+                };
+                if dark.is_some() {
+                    let _ = apply_ns_window_appearance(&window, dark);
+                }
             }
 
             setup_tray(app, &system_lang)?;
@@ -394,6 +461,7 @@ pub fn run() {
             crate::commands::open_file,
             crate::commands::check_for_updates,
             crate::commands::read_clipboard,
+            set_window_appearance,
             set_ui_language
         ])
         .build(tauri::generate_context!())
@@ -435,6 +503,7 @@ fn start_shutdown(app_handle: &AppHandle) -> bool {
     if STARTED.swap(true, Ordering::SeqCst) {
         return false;
     }
+    app_handle.state::<AppState>().queue.begin_shutdown();
     let app_handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let state = app_handle.state::<AppState>();
@@ -454,6 +523,58 @@ fn start_shutdown(app_handle: &AppHandle) -> bool {
     true
 }
 
+/// Force the window's NSAppearance to the in-app theme override.
+///
+/// The sidebar vibrancy material resolves against the window appearance, not
+/// the webview's CSS, so a manual dark/light choice must reach AppKit — with
+/// `None` (system) the appearance is cleared and follows the OS again.
+/// Sync command: Tauri runs those on the main thread, which AppKit requires.
+#[cfg(target_os = "macos")]
+fn apply_ns_window_appearance(
+    window: &tauri::WebviewWindow,
+    dark: Option<bool>,
+) -> Result<(), String> {
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+        NSWindow,
+    };
+    let ptr = window.ns_window().map_err(|e| e.to_string())?;
+    let Some(ptr) = std::ptr::NonNull::new(ptr) else {
+        return Err("main window has no native NSWindow".into());
+    };
+    // SAFETY: `ns_window` returns the live NSWindow of this webview window, and
+    // callers run on the main thread (app setup, or a sync command — Tauri
+    // executes those on the main thread), as AppKit mutation requires.
+    let ns_window: &NSWindow = unsafe { ptr.cast().as_ref() };
+    let appearance = match dark {
+        // SAFETY: the extern statics are immutable, process-wide constants.
+        Some(true) => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }),
+        Some(false) => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
+        None => None,
+    };
+    ns_window.setAppearance(appearance.as_deref());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_window_appearance(app: AppHandle, theme: Option<String>) -> Result<(), String> {
+    let dark = match theme.as_deref() {
+        Some("dark") => Some(true),
+        Some("light") => Some(false),
+        _ => None,
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let window = app.get_webview_window("main").ok_or("main window missing")?;
+        apply_ns_window_appearance(&window, dark)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, dark);
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub fn set_ui_language(app: AppHandle, lang: String) -> Result<(), String> {
     *util::lock_or_recover(&app.state::<AppState>().ui_lang) = lang.clone();
@@ -467,6 +588,34 @@ pub fn set_ui_language(app: AppHandle, lang: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ns_appearance_names_resolve() {
+        use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
+        // SAFETY: the extern statics are immutable, process-wide constants.
+        assert!(NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).is_some());
+        assert!(NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }).is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sleep_assertion_spawns_once_and_releases() {
+        let mut assertion = SleepAssertion::default();
+        assertion.update(false);
+        assert!(assertion.child.is_none());
+        assertion.update(true);
+        let pid = assertion.child.as_ref().map(std::process::Child::id);
+        assert!(pid.is_some(), "caffeinate should run while downloads are active");
+        assertion.update(true);
+        assert_eq!(
+            assertion.child.as_ref().map(std::process::Child::id),
+            pid,
+            "a steady state must not respawn caffeinate every tick"
+        );
+        assertion.update(false);
+        assert!(assertion.child.is_none(), "idle queue releases the sleep assertion");
+    }
 
     #[test]
     fn locale_is_turkish_matches_tr_tags() {

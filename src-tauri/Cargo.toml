@@ -83,3 +83,12 @@ strip = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = "4.2.0"
+# objc2/objc2-app-kit: force the NSWindow appearance when the user overrides the
+# theme in-app — vibrancy materials resolve against it, not against CSS.
+# Same versions window-vibrancy already pulls in; no new crates enter the tree.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "NSWindow",
+    "NSResponder",
+    "NSAppearance",
+] }
