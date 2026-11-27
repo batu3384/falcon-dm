@@ -78,6 +78,52 @@ pub fn find_ytdlp(preferred: Option<&str>) -> Result<PathBuf, String> {
     find_in_path("yt-dlp").ok_or_else(|| "ERR_YTDLP_MISSING".to_string())
 }
 
+/// First yt-dlp release whose redirect handling stopped forwarding a caller-supplied Cookie header.
+pub const MIN_YTDLP_VERSION: (u32, u32, u32) = (2023, 7, 6);
+
+/// Parse `yt-dlp --version` (`YYYY.MM.DD`; nightly builds may append numeric segments).
+pub fn parse_ytdlp_version(output: &str) -> Option<(u32, u32, u32)> {
+    let text = output.split_whitespace().next()?;
+    let mut parts = text.split('.');
+    let year = parts.next()?.parse::<u32>().ok()?;
+    let month = parts.next()?.parse::<u32>().ok()?;
+    let day = parts.next()?.parse::<u32>().ok()?;
+    if !(2000..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    if parts.any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+/// Unknown versions pass: only a detectably vulnerable release is rejected.
+pub fn ytdlp_version_needs_upgrade(output: &str) -> bool {
+    parse_ytdlp_version(output).is_some_and(|version| version < MIN_YTDLP_VERSION)
+}
+
+/// Best-effort `--version` probe. Failure means "unknown", not "unsafe".
+pub async fn detect_ytdlp_version(path: &Path) -> Option<String> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        tokio::process::Command::new(path)
+            .arg("--version")
+            .env("PATH", augmented_path())
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = stdout.lines().next()?.trim();
+    (!version.is_empty()).then(|| version.chars().take(40).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +138,19 @@ mod tests {
         {
             assert_eq!(parts.first(), Some(&first), "inherited PATH order must win");
         }
+    }
+
+    #[test]
+    fn ytdlp_version_dates_parse_and_compare_security_floor() {
+        assert_eq!(parse_ytdlp_version("2023.07.06"), Some((2023, 7, 6)));
+        assert_eq!(parse_ytdlp_version("2023.07.06.123456\n"), Some((2023, 7, 6)));
+        assert_eq!(parse_ytdlp_version("2024.10.22"), Some((2024, 10, 22)));
+        assert_eq!(parse_ytdlp_version("not-a-version"), None);
+        assert_eq!(parse_ytdlp_version("2023.13.01"), None);
+        assert!(ytdlp_version_needs_upgrade("2023.07.05"));
+        assert!(!ytdlp_version_needs_upgrade("2023.07.06"));
+        assert!(!ytdlp_version_needs_upgrade("2024.01.01"));
+        assert!(!ytdlp_version_needs_upgrade("custom build"));
     }
 
     #[test]

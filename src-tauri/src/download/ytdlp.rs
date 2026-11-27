@@ -6,9 +6,15 @@
 
 use crate::download::job::JobContext;
 use crate::download::limiter::cancelled;
-use crate::download::tools::{augmented_path, find_ffmpeg, find_ytdlp};
+use crate::download::tools::{
+    augmented_path, detect_ytdlp_version, find_ffmpeg, find_ytdlp, ytdlp_version_needs_upgrade,
+    MIN_YTDLP_VERSION,
+};
 use crate::download::DownloadError;
-use crate::util::{sanitize_filename, sanitize_header_value, sanitize_ytdlp_format};
+use crate::util::{
+    sanitize_filename, sanitize_header_value, sanitize_ytdlp_format, validate_fetch_url_async,
+    write_file_private,
+};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -284,12 +290,82 @@ async fn postprocess_output_size(run_dir: &Path) -> u64 {
     bytes
 }
 
+const COOKIE_FILE_NAME: &str = "cookies.txt";
+
+fn parse_cookie_header(header: &str) -> Vec<(String, String)> {
+    header
+        .split(';')
+        .filter_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Netscape jar for one download. A bare host plus `FALSE` is the host-only form.
+fn netscape_cookie_file(host: &str, secure: bool, header: &str) -> Option<String> {
+    if host.is_empty() || host.chars().any(|c| c <= ' ' || c == '\u{7f}') {
+        return None;
+    }
+    let pairs = parse_cookie_header(&sanitize_header_value(header));
+    if pairs.is_empty() {
+        return None;
+    }
+    let secure = if secure { "TRUE" } else { "FALSE" };
+    let mut out = String::from("# Netscape HTTP Cookie File\n");
+    for (name, value) in pairs {
+        out.push_str(host);
+        out.push_str("\tFALSE\t/\t");
+        out.push_str(secure);
+        out.push_str("\t0\t");
+        out.push_str(&name);
+        out.push('\t');
+        out.push_str(&value);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+struct CookieFileGuard(PathBuf);
+
+impl Drop for CookieFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+async fn write_cookie_file(
+    run_dir: &Path,
+    url: &url::Url,
+    cookies: Option<&str>,
+) -> Result<Option<CookieFileGuard>, DownloadError> {
+    let Some(header) = cookies.map(sanitize_header_value).filter(|c| !c.is_empty()) else {
+        return Ok(None);
+    };
+    let host = url.host_str().ok_or_else(|| DownloadError::fatal("URL has no host"))?;
+    let Some(contents) = netscape_cookie_file(host, url.scheme() == "https", &header) else {
+        return Err(DownloadError::fatal("Cookie header has no valid name=value pairs"));
+    };
+    let path = run_dir.join(COOKIE_FILE_NAME);
+    let write_path = path.clone();
+    tokio::task::spawn_blocking(move || write_file_private(&write_path, contents.as_bytes()))
+        .await
+        .map_err(|e| DownloadError::fatal(format!("cookie file write failed: {e}")))?
+        .map_err(|e| DownloadError::fatal(format!("could not write cookie file: {e}")))?;
+    Ok(Some(CookieFileGuard(path)))
+}
+
 fn build_command(
     bin: &Path,
     url: &str,
     run_dir: &Path,
     audio_only: bool,
     opts: &YtDlpOptions,
+    cookie_file: Option<&Path>,
 ) -> Command {
     let format = opts
         .format
@@ -325,9 +401,8 @@ fn build_command(
     if let Ok(ffmpeg) = find_ffmpeg() {
         cmd.arg("--ffmpeg-location").arg(ffmpeg);
     }
-    let cookies = opts.cookies.as_deref().map(sanitize_header_value).filter(|c| !c.is_empty());
-    if let Some(cookies) = &cookies {
-        cmd.arg("--add-header").arg(format!("Cookie: {cookies}"));
+    if let Some(cookie_file) = cookie_file {
+        cmd.arg("--cookies").arg(cookie_file);
     } else if opts.use_browser_cookies {
         cmd.args(["--cookies-from-browser", "chrome"]);
     }
@@ -349,7 +424,25 @@ fn build_command(
     }
     cmd.arg("--").arg(url);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd
+}
+
+/// Kill yt-dlp's whole process group, then reap the direct child. ffmpeg and
+/// other postprocessor grandchildren inherit the group; `start_kill` covers a
+/// direct child that unexpectedly moved itself out of it.
+async fn kill_process_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pgid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+            // SAFETY: `kill` only sends a signal. The negative pid targets the
+            // process group created by `process_group(0)`, never this process.
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        }
+    }
+    let _ = child.start_kill();
+    let _ = child.wait().await;
 }
 
 /// Download `url` with yt-dlp into `out_path`. Returns where the file landed.
@@ -359,11 +452,20 @@ pub async fn process_ytdlp(
     out_path: &str,
     opts: YtDlpOptions,
 ) -> Result<PathBuf, DownloadError> {
+    let validated_url = validate_fetch_url_async(url).await?;
     let preferred = opts.ytdlp_path.clone();
     let bin = tokio::task::spawn_blocking(move || find_ytdlp(preferred.as_deref()))
         .await
         .map_err(|e| DownloadError::fatal(format!("yt-dlp lookup failed: {e}")))?
         .map_err(DownloadError::Fatal)?;
+    if let Some(version) = detect_ytdlp_version(&bin).await {
+        if ytdlp_version_needs_upgrade(&version) {
+            let (year, month, day) = MIN_YTDLP_VERSION;
+            return Err(DownloadError::fatal(format!(
+                "yt-dlp {year:04}.{month:02}.{day:02} or newer is required (installed: {version})"
+            )));
+        }
+    }
     let mut dest = PathBuf::from(out_path);
     let dir =
         dest.parent().ok_or_else(|| DownloadError::fatal("Invalid output path"))?.to_path_buf();
@@ -373,13 +475,16 @@ pub async fn process_ytdlp(
     tokio::fs::create_dir_all(&run_dir)
         .await
         .map_err(|e| DownloadError::fatal(format!("could not create work folder: {e}")))?;
+    let cookie_file = write_cookie_file(&run_dir, &validated_url, opts.cookies.as_deref()).await?;
     let audio_only = dest_is_audio(&dest);
     let _ticker = ctx.progress.start();
     ctx.progress.set_connections(opts.max_connections.clamp(1, 8) as u32);
 
-    let mut child = build_command(&bin, url, &run_dir, audio_only, &opts)
-        .spawn()
-        .map_err(|e| DownloadError::fatal(format!("yt-dlp could not start: {e}")))?;
+    let cookie_path = cookie_file.as_ref().map(|guard| guard.0.as_path());
+    let mut child =
+        build_command(&bin, validated_url.as_str(), &run_dir, audio_only, &opts, cookie_path)
+            .spawn()
+            .map_err(|e| DownloadError::fatal(format!("yt-dlp could not start: {e}")))?;
     let stdout = child.stdout.take().ok_or_else(|| DownloadError::fatal("yt-dlp has no stdout"))?;
     let stderr = child.stderr.take().ok_or_else(|| DownloadError::fatal("yt-dlp has no stderr"))?;
     // Both pipes are drained: an unread pipe would block yt-dlp once it fills.
@@ -416,7 +521,7 @@ pub async fn process_ytdlp(
                 continue;
             }
             _ = cancelled(&mut cancel) => {
-                let _ = child.kill().await;
+                kill_process_tree(&mut child).await;
                 // The work dir stays: the next run resumes yt-dlp's part files.
                 return Err(DownloadError::Cancelled);
             }
@@ -424,7 +529,7 @@ pub async fn process_ytdlp(
         match parse_line(&line) {
             Line::Meta { total, title: found, live } => {
                 if live {
-                    let _ = child.kill().await;
+                    kill_process_tree(&mut child).await;
                     return Err(DownloadError::fatal("ERR_HLS_LIVE"));
                 }
                 tracker.expected_total = total.filter(|t| *t > 0);
@@ -457,7 +562,7 @@ pub async fn process_ytdlp(
     let status = tokio::select! {
         status = child.wait() => status.map_err(|e| DownloadError::fatal(e.to_string()))?,
         _ = cancelled(&mut cancel) => {
-            let _ = child.kill().await;
+            kill_process_tree(&mut child).await;
             return Err(DownloadError::Cancelled);
         }
     };
@@ -670,6 +775,31 @@ mod tests {
     }
 
     #[test]
+    fn netscape_cookie_file_scopes_pairs_to_the_exact_host() {
+        let file = netscape_cookie_file(
+            "media.example.com",
+            true,
+            "sid=secret; theme=dark; encoded=a=b; empty=; broken",
+        )
+        .unwrap();
+        assert!(file.starts_with("# Netscape HTTP Cookie File\n"));
+        assert!(file.contains("media.example.com\tFALSE\t/\tTRUE\t0\tsid\tsecret\n"));
+        assert!(file.contains("media.example.com\tFALSE\t/\tTRUE\t0\ttheme\tdark\n"));
+        assert!(file.contains("media.example.com\tFALSE\t/\tTRUE\t0\tencoded\ta=b\n"));
+        assert!(file.contains("media.example.com\tFALSE\t/\tTRUE\t0\tempty\t\n"));
+        assert!(
+            !file.contains(".media.example.com"),
+            "host-only entries must not use a leading dot"
+        );
+        assert!(!file.contains("broken"), "malformed pairs are not written");
+        assert!(netscape_cookie_file("media.example.com", true, "not-a-cookie").is_none());
+        let sanitized =
+            netscape_cookie_file("media.example.com", true, "sid=secret\r\nX-Evil: 1").unwrap();
+        assert_eq!(sanitized.lines().count(), 2, "CR/LF must not create cookie entries");
+        assert!(sanitized.contains("sid\tsecretX-Evil: 1\n"));
+    }
+
+    #[test]
     fn resolve_output_skips_partials_and_other_stems() {
         let run_dir =
             std::env::temp_dir().join(format!("falcon-dm-ytdlp-run-{}", uuid::Uuid::new_v4()));
@@ -692,8 +822,14 @@ mod tests {
             max_connections: 16,
             ..Default::default()
         };
-        let cmd =
-            build_command(Path::new("yt-dlp"), "--exec=evil", Path::new("/tmp/run"), false, &opts);
+        let cmd = build_command(
+            Path::new("yt-dlp"),
+            "--exec=evil",
+            Path::new("/tmp/run"),
+            false,
+            &opts,
+            Some(Path::new("/tmp/run/cookies.txt")),
+        );
         let args: Vec<String> =
             cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         let dashdash = args.iter().position(|a| a == "--").expect("-- separator");
@@ -701,7 +837,9 @@ mod tests {
         assert_eq!(dashdash + 2, args.len(), "URL must be the last argument");
         let fmt = &args[args.iter().position(|a| a == "-f").unwrap() + 1];
         assert_eq!(fmt, DEFAULT_VIDEO_FORMAT, "unsafe selector falls back to the default");
-        assert!(args.contains(&"Cookie: sid=1X-Evil: 1".to_string()));
+        assert!(args.windows(2).any(|w| w == ["--cookies", "/tmp/run/cookies.txt"]));
+        assert!(!args.iter().any(|a| a == "--add-header"), "cookies must not be a raw header");
+        assert!(!args.iter().any(|a| a.starts_with("Cookie:")));
         assert!(args.windows(2).any(|w| w == ["--limit-rate", "512K"]));
         assert!(args.windows(2).any(|w| w == ["-N", "8"]));
         assert!(args.iter().any(|a| a == "--merge-output-format"));
@@ -717,20 +855,35 @@ mod tests {
                 && w[1].contains("live_status !=? is_upcoming")
         }));
 
-        let audio =
-            build_command(Path::new("yt-dlp"), "https://x", Path::new("/tmp/run"), true, &opts);
+        let audio = build_command(
+            Path::new("yt-dlp"),
+            "https://x",
+            Path::new("/tmp/run"),
+            true,
+            &opts,
+            Some(Path::new("/tmp/run/cookies.txt")),
+        );
         assert!(!audio.as_std().get_args().any(|a| a == "--merge-output-format"));
     }
 
     #[cfg(unix)]
-    fn write_fake_ytdlp(dir: &Path, body: &str) -> PathBuf {
+    const TEST_INPUT_URL: &str = "https://127.0.0.1/stream.mpd";
+
+    #[cfg(unix)]
+    fn write_fake_ytdlp_with_version(dir: &Path, version: &str, body: &str) -> PathBuf {
         let path = dir.join("yt-dlp");
         let script = format!(
             r#"#!/bin/sh
+if [ "${{1-}}" = "--version" ]; then
+  printf '%s\n' '{version}'
+  exit 0
+fi
 out=
+cookie_file=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) shift; out="$1" ;;
+    --cookies) shift; cookie_file="$1" ;;
   esac
   shift || break
 done
@@ -745,6 +898,11 @@ out=$(printf '%s' "$out" | sed 's/%(ext)s/mp4/g')
     }
 
     #[cfg(unix)]
+    fn write_fake_ytdlp(dir: &Path, body: &str) -> PathBuf {
+        write_fake_ytdlp_with_version(dir, "2024.01.01", body)
+    }
+
+    #[cfg(unix)]
     fn fake_success_body() -> &'static str {
         r#"printf 'FALCON_DL|finished|2048|2048|NA|best\n'
 dd if=/dev/zero of="$out" bs=1024 count=2 >/dev/null 2>&1
@@ -753,10 +911,11 @@ dd if=/dev/zero of="$out" bs=1024 count=2 >/dev/null 2>&1
 
     #[cfg(unix)]
     async fn run_fake_ytdlp(root: &Path, id: i64, bin: &Path) -> Result<PathBuf, DownloadError> {
+        let _loopback = crate::util::allow_loopback_for_tests();
         let (ctx, _cancel) = JobContext::for_tests(id);
         process_ytdlp(
             &ctx,
-            "https://www.youtube.com/watch?v=fake",
+            TEST_INPUT_URL,
             root.join("video.mp4").to_str().unwrap(),
             YtDlpOptions {
                 ytdlp_path: Some(bin.to_string_lossy().into_owned()),
@@ -764,6 +923,126 @@ dd if=/dev/zero of="$out" bs=1024 count=2 >/dev/null 2>&1
             },
         )
         .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_input_urls_are_rejected_before_ytdlp_runs() {
+        for (offset, url) in [
+            "http://127.0.0.1/stream.mpd",
+            "http://[::1]/stream.mpd",
+            "http://169.254.169.254/latest/meta-data",
+            "http://192.168.1.1/stream.mpd",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let root =
+                std::env::temp_dir().join(format!("falcon-ytdlp-ssrf-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let marker = root.join("started");
+            let bin = write_fake_ytdlp(
+                &root,
+                &format!("touch \"{}\"\n{}", marker.display(), fake_success_body()),
+            );
+            let (ctx, _cancel) = JobContext::for_tests(120 + offset as i64);
+            let out_path = root.join("video.mp4").to_string_lossy().into_owned();
+            let result = process_ytdlp(
+                &ctx,
+                url,
+                &out_path,
+                YtDlpOptions {
+                    ytdlp_path: Some(bin.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            match result {
+                Err(DownloadError::Fatal(message)) => {
+                    assert!(message.contains("Private/loopback"), "{message}")
+                }
+                other => panic!("private input was not rejected fatally: {other:?}"),
+            }
+            assert!(!marker.exists(), "yt-dlp ran for a private input URL");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detectably_old_ytdlp_is_refused_before_it_runs() {
+        let _loopback = crate::util::allow_loopback_for_tests();
+        let root = std::env::temp_dir().join(format!("falcon-ytdlp-old-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let marker = root.join("started");
+        let bin = write_fake_ytdlp_with_version(
+            &root,
+            "2023.07.05",
+            &format!("touch \"{}\"\n{}", marker.display(), fake_success_body()),
+        );
+        let (ctx, _cancel) = JobContext::for_tests(124);
+        let out_path = root.join("video.mp4").to_string_lossy().into_owned();
+        let result = process_ytdlp(
+            &ctx,
+            TEST_INPUT_URL,
+            &out_path,
+            YtDlpOptions {
+                ytdlp_path: Some(bin.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )
+        .await;
+        match result {
+            Err(DownloadError::Fatal(message)) => {
+                assert!(message.contains("yt-dlp 2023.07.06 or newer"), "{message}")
+            }
+            other => panic!("old yt-dlp was not refused: {other:?}"),
+        }
+        assert!(!marker.exists(), "old yt-dlp reached the download path");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cookies_use_scoped_netscape_file_and_are_removed_after_run() {
+        let _loopback = crate::util::allow_loopback_for_tests();
+        let root =
+            std::env::temp_dir().join(format!("falcon-ytdlp-cookies-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let captured = root.join("captured-cookies.txt");
+        let captured_mode = root.join("captured-cookies.mode");
+        let bin = write_fake_ytdlp(
+            &root,
+            &format!(
+                "if [ -n \"$cookie_file\" ]; then\n  cp \"$cookie_file\" \"{}\"\n  ( stat -f '%Lp' \"$cookie_file\" 2>/dev/null || stat -c '%a' \"$cookie_file\" 2>/dev/null ) > \"{}\"\nfi\nprintf 'ERROR: stop after cookie capture\\n' >&2\nexit 1\n",
+                captured.display(),
+                captured_mode.display()
+            ),
+        );
+        let (ctx, _cancel) = JobContext::for_tests(125);
+        let out_path = root.join("video.mp4").to_string_lossy().into_owned();
+        let result = process_ytdlp(
+            &ctx,
+            TEST_INPUT_URL,
+            &out_path,
+            YtDlpOptions {
+                cookies: Some("sid=secret; encoded=a=b".into()),
+                ytdlp_path: Some(bin.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(result.is_err(), "the fixture should stop after capturing cookies");
+        let written = std::fs::read_to_string(&captured).unwrap();
+        assert!(written.starts_with("# Netscape HTTP Cookie File\n"));
+        assert!(written.contains("127.0.0.1\tFALSE\t/\tTRUE\t0\tsid\tsecret\n"));
+        assert!(written.contains("127.0.0.1\tFALSE\t/\tTRUE\t0\tencoded\ta=b\n"));
+        assert_eq!(std::fs::read_to_string(&captured_mode).unwrap().trim(), "600");
+        assert!(
+            !run_dir_for(root.to_str().unwrap(), 125).join("cookies.txt").exists(),
+            "the cookie file must be removed even when the run fails"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -830,6 +1109,7 @@ printf 'FALCON_PP|finished|Merger\n'
 mv "$tmp" "$out"
 "#,
         );
+        let _loopback = crate::util::allow_loopback_for_tests();
         let (ctx, _cancel) = JobContext::for_tests(94);
         let progress = ctx.progress.clone();
         let out_path = root.join("video.mp4").to_string_lossy().into_owned();
@@ -837,9 +1117,8 @@ mv "$tmp" "$out"
             ytdlp_path: Some(bin.to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let worker = tokio::spawn(async move {
-            process_ytdlp(&ctx, "https://www.youtube.com/watch?v=fake", &out_path, opts).await
-        });
+        let worker =
+            tokio::spawn(async move { process_ytdlp(&ctx, TEST_INPUT_URL, &out_path, opts).await });
         let mut intermediate = std::collections::BTreeSet::new();
         while !worker.is_finished() {
             let bytes = progress.downloaded();
@@ -855,6 +1134,63 @@ mv "$tmp" "$out"
             "postprocess bytes did not grow visibly; samples: {intermediate:?}"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_kills_ytdlp_process_group_including_grandchildren() {
+        let root = std::env::temp_dir().join(format!("falcon-ytdlp-kill-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let heartbeat = root.join("heartbeat");
+        let pid_file = root.join("grandchild.pid");
+        let bin = write_fake_ytdlp(
+            &root,
+            &format!(
+                "printf 'FALCON_DL|downloading|1|2048|NA|best\\n'\n\
+                 heartbeat=\"{heartbeat}\"\n\
+                 pid_file=\"{pid_file}\"\n\
+                 sh -c 'while :; do printf x >> \"$1\"; sleep 0.05; done' sh \"$heartbeat\" &\n\
+                 echo $! > \"$pid_file\"\n\
+                 wait\n",
+                heartbeat = heartbeat.display(),
+                pid_file = pid_file.display()
+            ),
+        );
+        let _loopback = crate::util::allow_loopback_for_tests();
+        let (ctx, cancel) = JobContext::for_tests(95);
+        let out_path = root.join("video.mp4").to_string_lossy().into_owned();
+        let opts = YtDlpOptions {
+            ytdlp_path: Some(bin.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let worker =
+            tokio::spawn(async move { process_ytdlp(&ctx, TEST_INPUT_URL, &out_path, opts).await });
+        for _ in 0..100 {
+            if pid_file.exists() && heartbeat.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(pid_file.exists(), "fake ffmpeg did not start");
+        cancel.send(true).unwrap();
+        let result = worker.await.unwrap();
+
+        // Give a survivor time to prove it is alive, then sample twice: a zombie
+        // pid cannot keep appending, but a live orphan can.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let first = heartbeat.metadata().map(|m| m.len()).unwrap_or(0);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let second = heartbeat.metadata().map(|m| m.len()).unwrap_or(0);
+        if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = pid.trim().parse::<i32>() {
+                // Test cleanup only: the assertion below decides whether production killed it.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+        let heartbeat_stopped = first == second;
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result, Err(DownloadError::Cancelled));
+        assert!(heartbeat_stopped, "grandchild survived cancellation ({first} -> {second} bytes)");
     }
 
     #[test]
