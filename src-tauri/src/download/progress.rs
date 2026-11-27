@@ -288,6 +288,7 @@ mod tests {
                 attempts: 0,
                 retry_at: None,
                 expected_hash: None,
+                speed_limit_kbps: None,
             })
             .unwrap();
         let progress = Progress::new(None, Some(db.clone()), id);

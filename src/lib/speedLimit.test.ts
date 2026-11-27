@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_LIMIT_KBPS,
   lastSpeedLimit,
+  parsePerDownloadSpeedLimit,
   rememberSpeedLimit,
   toggleSpeedLimit,
 } from './speedLimit';
@@ -45,5 +46,29 @@ describe('speed limit memory', () => {
     vi.mocked(api.getSettings).mockResolvedValue({ ...baseSettings, speed_limit_kbps: 0 });
     await expect(toggleSpeedLimit()).resolves.toBe(512);
     expect(vi.mocked(api.saveSettings).mock.calls[1][0].speed_limit_kbps).toBe(512);
+  });
+});
+
+describe('parsePerDownloadSpeedLimit', () => {
+  it('treats empty and zero as the global limit', () => {
+    expect(parsePerDownloadSpeedLimit('')).toBe(0);
+    expect(parsePerDownloadSpeedLimit('   ')).toBe(0);
+    expect(parsePerDownloadSpeedLimit('0')).toBe(0);
+    expect(parsePerDownloadSpeedLimit('000')).toBe(0);
+  });
+
+  it('accepts a positive integer KB/s value', () => {
+    expect(parsePerDownloadSpeedLimit('512')).toBe(512);
+    expect(parsePerDownloadSpeedLimit(' 384 ')).toBe(384);
+  });
+
+  it('clamps to the same maximum as the global limit', () => {
+    expect(parsePerDownloadSpeedLimit('1048577')).toBe(1_048_576);
+  });
+
+  it('rejects negative, decimal, and non-numeric input', () => {
+    for (const input of ['-1', '1.5', '1e3', 'fast', '12x']) {
+      expect(parsePerDownloadSpeedLimit(input), input).toBeNull();
+    }
   });
 });

@@ -1,5 +1,7 @@
 //! Per-download context handed to every worker (HTTP, HLS, yt-dlp).
 
+use crate::download::limiter::CompositeRateLimiter;
+#[cfg(test)]
 use crate::download::limiter::RateLimiter;
 use crate::download::progress::Progress;
 use crate::download::DownloadError;
@@ -10,6 +12,7 @@ use crate::util::{
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
@@ -20,7 +23,7 @@ pub struct JobContext {
     pub app: Option<AppHandle>,
     pub db: Option<Database>,
     pub cancel: watch::Receiver<bool>,
-    pub limiter: Arc<RateLimiter>,
+    pub limiter: CompositeRateLimiter,
     pub progress: Progress,
 }
 
@@ -30,7 +33,7 @@ impl JobContext {
         app: Option<AppHandle>,
         db: Option<Database>,
         cancel: watch::Receiver<bool>,
-        limiter: Arc<RateLimiter>,
+        limiter: CompositeRateLimiter,
     ) -> Self {
         let progress = Progress::new(app.as_ref(), db.clone(), id);
         Self { id, app, db, cancel, limiter, progress }
@@ -161,7 +164,16 @@ impl JobContext {
     /// Context without UI or DB, plus the sender that cancels it.
     pub fn for_tests(id: i64) -> (Self, watch::Sender<bool>) {
         let (tx, rx) = watch::channel(false);
-        (Self::new(id, None, None, rx, Arc::new(RateLimiter::new(0))), tx)
+        (
+            Self::new(
+                id,
+                None,
+                None,
+                rx,
+                CompositeRateLimiter::global_only(Arc::new(RateLimiter::new(0))),
+            ),
+            tx,
+        )
     }
 }
 
@@ -289,10 +301,17 @@ mod tests {
                 attempts: 0,
                 retry_at: None,
                 expected_hash: expected_hash.map(str::to_string),
+                speed_limit_kbps: None,
             })
             .unwrap();
         let (_cancel, rx) = watch::channel(false);
-        let ctx = JobContext::new(id, None, Some(db.clone()), rx, Arc::new(RateLimiter::new(0)));
+        let ctx = JobContext::new(
+            id,
+            None,
+            Some(db.clone()),
+            rx,
+            CompositeRateLimiter::global_only(Arc::new(RateLimiter::new(0))),
+        );
         (db, ctx, id)
     }
 

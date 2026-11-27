@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Copy, ExternalLink, Pause, Play, RotateCw, Search, Trash2, X } from 'lucide-react';
 import type { DownloadModel } from '../types';
@@ -15,6 +16,7 @@ import { localizeDownloadError } from '../api/commands';
 import { downloadEngine } from '../lib/publicHttpUrl';
 import { retryCountdown, sizeProgress } from '../lib/downloadText';
 import { checksumAlgoLabel } from '../lib/checksum';
+import { MAX_SPEED_LIMIT_KBPS, parsePerDownloadSpeedLimit } from '../lib/speedLimit';
 import type { DownloadActions } from '../lib/useDownloadActions';
 import { FileIcon } from './FileIcon';
 
@@ -27,6 +29,71 @@ interface InspectorProps {
 
 function cleanUrl(url: string): string {
   return url.replace(/#falconfmt=.*$/, '');
+}
+
+function speedLimitText(kbps: number): string {
+  return kbps > 0 ? String(kbps) : '';
+}
+
+function SpeedLimitField({ row, onSave }: { row: DownloadModel; onSave: (kbps: number) => void }) {
+  const { t } = useTranslation();
+  const current = row.speed_limit_kbps ?? 0;
+  const [text, setText] = useState(() => speedLimitText(current));
+  const committed = useRef(current);
+
+  // Progress events replace the row object constantly; resync only when the
+  // persisted cap itself (or the inspected row) changes, never while typing.
+  useEffect(() => {
+    committed.current = current;
+    setText(speedLimitText(current));
+  }, [row.id, current]);
+
+  const reset = () => setText(speedLimitText(committed.current));
+  const commit = () => {
+    const parsed = parsePerDownloadSpeedLimit(text);
+    if (parsed === null) {
+      reset();
+      return;
+    }
+    setText(speedLimitText(parsed));
+    if (parsed !== committed.current) {
+      committed.current = parsed;
+      onSave(parsed);
+    }
+  };
+
+  return (
+    <>
+      <div className="stepper">
+        <input
+          className="input narrow"
+          type="number"
+          inputMode="numeric"
+          min={0}
+          max={MAX_SPEED_LIMIT_KBPS}
+          step={1}
+          value={text}
+          placeholder={t('inspector.speed_limit_global')}
+          aria-label={t('inspector.speed_limit')}
+          spellCheck={false}
+          onChange={(event) => setText(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              commit();
+              event.currentTarget.blur();
+            } else if (event.key === 'Escape') {
+              event.preventDefault();
+              reset();
+            }
+          }}
+        />
+        <span className="unit">KB/s</span>
+      </div>
+      <p className="hint">{t('inspector.speed_limit_hint')}</p>
+    </>
+  );
 }
 
 export function Inspector({ rows, primary, actions, onClose }: InspectorProps) {
@@ -163,6 +230,10 @@ export function Inspector({ rows, primary, actions, onClose }: InspectorProps) {
             {live && row.segments > 1
               ? ` · ${t('inspector.connections', { count: row.segments })}`
               : ''}
+          </dd>
+          <dt>{t('inspector.speed_limit')}</dt>
+          <dd>
+            <SpeedLimitField row={row} onSave={(kbps) => actions.speedLimit(row, kbps)} />
           </dd>
           <dt>{t('inspector.added')}</dt>
           <dd>{formatLocaleDate(row.created_at, lang)}</dd>

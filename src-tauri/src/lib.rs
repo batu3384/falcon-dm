@@ -324,6 +324,7 @@ pub(crate) async fn enqueue_download(
         attempts: 0,
         retry_at: None,
         expected_hash,
+        speed_limit_kbps: None,
     };
 
     let insert_result = state.db.insert_download_deduped(&mut dl).map_err(|e| e.to_string())?;
@@ -402,6 +403,7 @@ pub(crate) async fn ingest_uploaded_file(
         attempts: 0,
         retry_at: None,
         expected_hash: None,
+        speed_limit_kbps: None,
     };
     let insert_result = state.db.insert_download_deduped(&mut dl).map_err(|e| e.to_string())?;
     let id = insert_result.id();

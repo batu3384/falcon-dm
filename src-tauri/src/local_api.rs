@@ -474,6 +474,7 @@ mod tests {
             attempts: 0,
             retry_at: None,
             expected_hash: None,
+            speed_limit_kbps: None,
         };
         let json = serde_json::to_string(&ApiDownload::from(row)).unwrap();
         assert!(!json.contains("secret.example"), "{json}");

@@ -176,6 +176,9 @@ impl Database {
             // v5 — optional user-supplied checksum (`algo:hex`, sha256 or md5)
             // verified against the finished file before it moves into place.
             M::up("ALTER TABLE downloads ADD COLUMN expected_hash TEXT;"),
+            // v6 — optional per-download speed cap in decimal KB/s. NULL means
+            // the row follows the global token bucket.
+            M::up("ALTER TABLE downloads ADD COLUMN speed_limit_kbps INTEGER;"),
         ]);
         migrations.to_latest(&mut conn).map_err(|e| {
             DatabaseError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
@@ -211,6 +214,7 @@ mod tests {
             attempts: 0,
             retry_at: None,
             expected_hash: None,
+            speed_limit_kbps: None,
         }
     }
 
@@ -954,6 +958,82 @@ mod tests {
         assert_eq!(has_column, 1, "v5 must add the expected_hash column");
         let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
         assert!(version >= 5, "user_version should reach 5, got {version}");
+        drop(conn);
+        drop(db);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn speed_limit_roundtrips_insert_read_full_update_and_direct_set() {
+        let db = Database::in_memory().unwrap();
+        let mut download = create_test_download("limited.bin");
+        download.speed_limit_kbps = Some(512);
+        let id = db.insert_download(&download).unwrap();
+        assert_eq!(db.get_download(id).unwrap().speed_limit_kbps, Some(512));
+
+        // Full-row writes (move_download uses one) must not drop the user setting.
+        let row = db.get_download(id).unwrap();
+        db.update_download(id, &row).unwrap();
+        assert_eq!(db.get_download(id).unwrap().speed_limit_kbps, Some(512));
+
+        assert!(db.set_speed_limit(id, 0).unwrap());
+        assert_eq!(db.get_download(id).unwrap().speed_limit_kbps, None, "0 means global");
+        assert!(db.set_speed_limit(id, 384).unwrap());
+        assert_eq!(db.get_download(id).unwrap().speed_limit_kbps, Some(384));
+        assert!(!db.set_speed_limit(999_999, 384).unwrap());
+    }
+
+    #[test]
+    fn v5_database_migrates_to_v6_without_losing_rows() {
+        let temp_dir = std::env::temp_dir().join(format!("falcon_v5_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        {
+            // Schema as shipped at v5 (checksum column present, no per-download limit).
+            let conn = rusqlite::Connection::open(temp_dir.join("falcon_dm.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE downloads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL,
+                    filename TEXT NOT NULL, save_path TEXT NOT NULL,
+                    total_size INTEGER DEFAULT 0, downloaded_size INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'Queued', category TEXT DEFAULT 'Other',
+                    speed REAL DEFAULT 0.0, segments INTEGER DEFAULT 8,
+                    priority INTEGER DEFAULT 1, created_at TEXT NOT NULL,
+                    completed_at TEXT, error_message TEXT, referrer TEXT,
+                    user_agent TEXT, cookies TEXT,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    attempts INTEGER NOT NULL DEFAULT 0, retry_at INTEGER,
+                    expected_hash TEXT);
+                 CREATE INDEX idx_downloads_status ON downloads(status);
+                 CREATE INDEX idx_downloads_category ON downloads(category);
+                 CREATE INDEX idx_downloads_archived ON downloads(archived);
+                 CREATE UNIQUE INDEX idx_downloads_active_url_unique ON downloads(url)
+                   WHERE status IN ('Queued', 'Downloading', 'Paused', 'Merging')
+                     AND archived = 0;
+                 INSERT INTO downloads (url, filename, save_path, status, created_at, expected_hash)
+                   VALUES ('https://example.com/v5.zip', 'v5.zip', '/tmp', 'Completed',
+                           '2026-07-30T13:00:00Z', 'sha256:abc');
+                 PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        }
+        let db = Database::init(&temp_dir).expect("v5 → v6 migration");
+        let rows = db.get_downloads(&DownloadFilter::default()).unwrap();
+        assert_eq!(rows.len(), 1, "the pre-migration row must survive");
+        assert_eq!(rows[0].expected_hash.as_deref(), Some("sha256:abc"));
+        let conn = db.conn.get().unwrap();
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'speed_limit_kbps'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1, "v6 must add the speed_limit_kbps column");
+        let stored_limit: Option<i64> =
+            conn.query_row("SELECT speed_limit_kbps FROM downloads", [], |row| row.get(0)).unwrap();
+        assert_eq!(stored_limit, None, "existing rows must keep following the global limit");
+        let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert!(version >= 6, "user_version should reach 6, got {version}");
         drop(conn);
         drop(db);
         let _ = fs::remove_dir_all(&temp_dir);

@@ -9,7 +9,12 @@ use std::collections::HashSet;
 /// Column order `row_to_download` expects.
 const DOWNLOAD_COLUMNS: &str = "id, url, filename, save_path, total_size, downloaded_size, \
      status, category, speed, segments, priority, created_at, completed_at, error_message, \
-     referrer, user_agent, cookies, archived, attempts, retry_at, expected_hash";
+     referrer, user_agent, cookies, archived, attempts, retry_at, expected_hash, \
+     speed_limit_kbps";
+
+fn stored_speed_limit(limit: Option<u32>) -> Option<i64> {
+    limit.filter(|kbps| *kbps > 0).map(i64::from)
+}
 
 fn like_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
@@ -57,8 +62,8 @@ impl Database {
             "INSERT INTO downloads (
                 url, filename, save_path, total_size, downloaded_size, status, category,
                 speed, segments, priority, created_at, completed_at, error_message,
-                referrer, user_agent, cookies, archived, expected_hash
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                referrer, user_agent, cookies, archived, expected_hash, speed_limit_kbps
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 download.url,
                 download.filename,
@@ -78,6 +83,7 @@ impl Database {
                 seal_cookies(download.cookies.as_deref()),
                 download.archived as i64,
                 download.expected_hash,
+                stored_speed_limit(download.speed_limit_kbps),
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -142,8 +148,8 @@ impl Database {
             "INSERT INTO downloads (
                 url, filename, save_path, total_size, downloaded_size, status, category,
                 speed, segments, priority, created_at, completed_at, error_message,
-                referrer, user_agent, cookies, archived, expected_hash
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                referrer, user_agent, cookies, archived, expected_hash, speed_limit_kbps
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 download.url,
                 download.filename,
@@ -163,6 +169,7 @@ impl Database {
                 seal_cookies(download.cookies.as_deref()),
                 download.archived as i64,
                 download.expected_hash,
+                stored_speed_limit(download.speed_limit_kbps),
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -217,8 +224,9 @@ impl Database {
                 user_agent = ?15,
                 cookies = ?16,
                 archived = ?17,
-                expected_hash = ?18
-            WHERE id = ?19",
+                expected_hash = ?18,
+                speed_limit_kbps = ?19
+            WHERE id = ?20",
             params![
                 download.url,
                 download.filename,
@@ -238,6 +246,7 @@ impl Database {
                 seal_cookies(download.cookies.as_deref()),
                 download.archived as i64,
                 download.expected_hash,
+                stored_speed_limit(download.speed_limit_kbps),
                 id,
             ],
         )?;
@@ -404,6 +413,18 @@ impl Database {
              END
              WHERE id = ?2",
             params![increase as i64, id],
+        )?;
+        Ok(rows == 1)
+    }
+
+    /// Per-download cap in decimal KB/s. Zero is stored as NULL: the row
+    /// follows the global bucket. Accepted in every status so the inspector can
+    /// prepare a stopped row or adjust a live one.
+    pub fn set_speed_limit(&self, id: i64, kbps: u32) -> Result<bool> {
+        let conn = self.conn.get().map_err(|e| DatabaseError::PoolError(e.to_string()))?;
+        let rows = conn.execute(
+            "UPDATE downloads SET speed_limit_kbps = ?1 WHERE id = ?2",
+            params![stored_speed_limit(Some(kbps)), id],
         )?;
         Ok(rows == 1)
     }
@@ -828,6 +849,7 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
     let attempts: i64 = row.get(18)?;
     let retry_at: Option<i64> = row.get(19)?;
     let expected_hash: Option<String> = row.get(20)?;
+    let speed_limit_kbps: Option<i64> = row.get(21)?;
 
     Ok(Download {
         id: Some(id),
@@ -857,6 +879,9 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
         attempts: attempts.clamp(0, i64::from(u32::MAX)) as u32,
         retry_at,
         expected_hash,
+        speed_limit_kbps: speed_limit_kbps
+            .and_then(|kbps| u32::try_from(kbps).ok())
+            .filter(|kbps| *kbps > 0),
     })
 }
 
@@ -888,6 +913,7 @@ mod tests {
             attempts: 0,
             retry_at: None,
             expected_hash: None,
+            speed_limit_kbps: None,
         }
     }
 

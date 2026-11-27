@@ -43,6 +43,12 @@ describe('DownloadSchema', () => {
     expect(parsed.archived).toBe(false);
     expect(parsed.attempts).toBe(0);
     expect(parsed.retry_at).toBeNull();
+    expect(parsed.speed_limit_kbps).toBeNull();
+  });
+
+  it('keeps a per-download speed limit from the backend', () => {
+    const parsed = DownloadSchema.parse({ ...validDownload, speed_limit_kbps: 512 });
+    expect(parsed.speed_limit_kbps).toBe(512);
   });
 
   it('keeps retry bookkeeping from the backend', () => {

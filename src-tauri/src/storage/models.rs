@@ -149,6 +149,10 @@ pub struct Download {
     /// fails the download, so Completed + a hash here means the file matched.
     #[serde(default)]
     pub expected_hash: Option<String>,
+    /// Per-download cap in decimal KB/s. `None` (stored as NULL, or zero at
+    /// the command boundary) means the row follows the global speed limit.
+    #[serde(default)]
+    pub speed_limit_kbps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

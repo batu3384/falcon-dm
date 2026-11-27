@@ -3,7 +3,7 @@
 
 use crate::download::DownloadError;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -115,6 +115,65 @@ impl RateLimiter {
     }
 }
 
+fn longest_wait(first: Option<Duration>, second: Option<Duration>) -> Option<Duration> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.max(second)),
+        (Some(wait), None) | (None, Some(wait)) => Some(wait),
+        (None, None) => None,
+    }
+}
+
+/// Per-download and global token buckets around one job. Both are charged for
+/// the same already-received bytes before the worker sleeps; the debts run
+/// concurrently, so the wait is their maximum rather than their sum.
+#[derive(Clone)]
+pub struct CompositeRateLimiter {
+    global: Arc<RateLimiter>,
+    per_download: Arc<RateLimiter>,
+}
+
+impl CompositeRateLimiter {
+    pub fn new(global: Arc<RateLimiter>, per_download: Arc<RateLimiter>) -> Self {
+        Self { global, per_download }
+    }
+
+    /// Global-only composition for tests and legacy call sites: a zeroed
+    /// per-download bucket means "unlimited here, still follow the global cap".
+    pub fn global_only(global: Arc<RateLimiter>) -> Self {
+        Self::new(global, Arc::new(RateLimiter::new(0)))
+    }
+
+    /// Charge both buckets synchronously. Splitting this into two awaited
+    /// `acquire` calls would serialize the sleeps and under-deliver bandwidth.
+    fn charge(&self, bytes: u64) -> Option<Duration> {
+        let download_wait = self.per_download.charge(bytes);
+        let global_wait = self.global.charge(bytes);
+        longest_wait(download_wait, global_wait)
+    }
+
+    fn debt_wait(&self) -> Option<Duration> {
+        longest_wait(self.per_download.debt_wait(), self.global.debt_wait())
+    }
+
+    pub async fn acquire(
+        &self,
+        bytes: u64,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(), DownloadError> {
+        let Some(mut wait) = self.charge(bytes) else {
+            return Ok(());
+        };
+        loop {
+            // Re-check long debts so "unlimited" or a higher limit is picked up quickly.
+            sleep_or_cancel(wait.min(Duration::from_secs(2)), cancel).await?;
+            let Some(remaining) = self.debt_wait() else {
+                return Ok(());
+            };
+            wait = remaining;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +195,43 @@ mod tests {
         let second = limiter.charge(100_000).expect("second caller waits longer");
         assert!(first.as_secs_f64() > 0.9 && first.as_secs_f64() < 1.1, "{first:?}");
         assert!(second.as_secs_f64() > 1.9 && second.as_secs_f64() < 2.1, "{second:?}");
+    }
+
+    #[test]
+    fn composite_charge_waits_for_the_stricter_bucket_not_the_sum() {
+        let global = std::sync::Arc::new(RateLimiter::new(2)); // 2000 B/s
+        let download = std::sync::Arc::new(RateLimiter::new(1)); // 1000 B/s
+        let composite = CompositeRateLimiter::new(global.clone(), download.clone());
+
+        let wait = composite.charge(1000).expect("both buckets are limited");
+        assert!(wait.as_secs_f64() > 0.9 && wait.as_secs_f64() < 1.1, "{wait:?}");
+        assert!(
+            wait.as_secs_f64() < 1.4,
+            "charging the buckets one after another would sum their debts ({wait:?})"
+        );
+        assert!(download.debt_wait().is_some(), "the per-download bucket must be charged");
+        assert!(global.debt_wait().is_some(), "the global bucket must also be charged");
+    }
+
+    #[test]
+    fn composite_charge_lets_a_stricter_global_cap_dominate() {
+        let global = std::sync::Arc::new(RateLimiter::new(1)); // 1000 B/s
+        let download = std::sync::Arc::new(RateLimiter::new(2)); // 2000 B/s
+        let composite = CompositeRateLimiter::new(global, download);
+
+        let wait = composite.charge(1000).expect("both buckets are limited");
+        assert!(wait.as_secs_f64() > 0.9 && wait.as_secs_f64() < 1.1, "{wait:?}");
+        assert!(wait.as_secs_f64() < 1.4, "the debts must overlap, not add");
+    }
+
+    #[test]
+    fn composite_charge_treats_zero_per_download_limit_as_follow_global() {
+        let global = std::sync::Arc::new(RateLimiter::new(1));
+        let download = std::sync::Arc::new(RateLimiter::new(0));
+        let composite = CompositeRateLimiter::new(global, download);
+
+        let wait = composite.charge(1000).expect("the global cap still applies");
+        assert!(wait.as_secs_f64() > 0.9 && wait.as_secs_f64() < 1.1, "{wait:?}");
     }
 
     #[test]

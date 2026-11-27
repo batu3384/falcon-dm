@@ -1,6 +1,6 @@
 use crate::download::http_client::HttpHeaders;
 use crate::download::job::JobContext;
-use crate::download::limiter::RateLimiter;
+use crate::download::limiter::{CompositeRateLimiter, RateLimiter};
 use crate::download::ytdlp::YtDlpOptions;
 use crate::download::DownloadError;
 use crate::settings::{Settings, ALL_SCHEDULE_DAYS};
@@ -127,11 +127,19 @@ pub(crate) fn route_queued_download(url: &str, referrer: Option<&str>) -> Downlo
     }
 }
 
-fn ytdlp_speed_limit_kbps(global: u32, active_downloads: usize) -> u32 {
-    if global == 0 {
-        return 0;
+fn ytdlp_speed_limit_kbps(global: u32, active_downloads: usize, per_download: u32) -> u32 {
+    // yt-dlp cannot join the byte-counted bucket, so its process gets the
+    // stricter of its own cap and this row's share of the global cap.
+    let global_share = if global == 0 {
+        0
+    } else {
+        (u64::from(global) / active_downloads.max(1) as u64).max(1) as u32
+    };
+    match (global_share, per_download) {
+        (0, per) => per,
+        (global, 0) => global,
+        (global, per) => global.min(per),
     }
-    (u64::from(global) / active_downloads.max(1) as u64).max(1) as u32
 }
 
 /// Why a running worker was asked to stop. Decides the row's next status.
@@ -150,6 +158,9 @@ pub enum StopReason {
 struct ActiveJob {
     cancel: watch::Sender<bool>,
     stop: Option<StopReason>,
+    /// Shared by every connection of this job; changing it throttles live
+    /// HTTP/HLS workers without restarting them.
+    download_limiter: Arc<RateLimiter>,
 }
 
 #[derive(Default)]
@@ -287,13 +298,29 @@ impl QueueManager {
         lock_or_recover(&self.slots).shutting_down
     }
 
-    fn claim_active_slot(&self, id: i64, cancel: watch::Sender<bool>) -> bool {
+    fn claim_active_slot(
+        &self,
+        id: i64,
+        cancel: watch::Sender<bool>,
+        download_limiter: Arc<RateLimiter>,
+    ) -> bool {
         let mut slots = lock_or_recover(&self.slots);
         if slots.shutting_down || slots.removing.contains_key(&id) || slots.active.contains_key(&id)
         {
             return false;
         }
-        slots.active.insert(id, ActiveJob { cancel, stop: None });
+        slots.active.insert(id, ActiveJob { cancel, stop: None, download_limiter });
+        true
+    }
+
+    /// Adjust the shared per-download bucket of a running job. False only means
+    /// nothing is live right now; the DB write is the durable part for stopped rows.
+    pub fn set_download_speed_limit(&self, id: i64, kbps: u32) -> bool {
+        let slots = lock_or_recover(&self.slots);
+        let Some(job) = slots.active.get(&id) else {
+            return false;
+        };
+        job.download_limiter.set_kbps(kbps);
         true
     }
 
@@ -448,6 +475,8 @@ impl QueueManager {
         };
         let options = lock_or_recover(&self.options).clone();
         let max_connections = self.max_connections.load(Ordering::SeqCst);
+        let per_download_limit = row.speed_limit_kbps.unwrap_or(0);
+        let download_limiter = Arc::new(RateLimiter::new(per_download_limit));
         // Approximation: yt-dlp cannot join the byte-counted bucket, so split the cap across live rows.
         let active_downloads = self.active_ids().len() + 1;
         let headers = HttpHeaders {
@@ -463,7 +492,11 @@ impl QueueManager {
             referrer: row.referrer.clone(),
             format,
             proxy: options.proxy.clone(),
-            speed_limit_kbps: ytdlp_speed_limit_kbps(self.limiter.kbps(), active_downloads),
+            speed_limit_kbps: ytdlp_speed_limit_kbps(
+                self.limiter.kbps(),
+                active_downloads,
+                per_download_limit,
+            ),
             ytdlp_path: options.ytdlp_path.clone(),
             use_browser_cookies: options.ytdlp_use_browser_cookies,
             max_connections,
@@ -488,7 +521,7 @@ impl QueueManager {
 
         let (cancel, rx) = watch::channel(false);
         // Shutdown, removal, and a still-stopping previous worker all claim through the same lock.
-        if !self.claim_active_slot(id, cancel) {
+        if !self.claim_active_slot(id, cancel, download_limiter.clone()) {
             return false;
         }
         if !db
@@ -502,8 +535,13 @@ impl QueueManager {
         crate::emit_row(app, db, id);
 
         let out_path = crate::util::full_file_path(&row.save_path, &row.filename);
-        let ctx =
-            JobContext::new(id, Some(app.clone()), Some(db.clone()), rx, self.limiter.clone());
+        let ctx = JobContext::new(
+            id,
+            Some(app.clone()),
+            Some(db.clone()),
+            rx,
+            CompositeRateLimiter::new(self.limiter.clone(), download_limiter),
+        );
         let guard = JobGuard { id, slots: self.slots.clone(), db: db.clone(), finished: false };
         tokio::spawn(run_job(ctx, kind, out_path, row.attempts, guard));
         true
@@ -706,7 +744,10 @@ mod tests {
 
     fn insert_job(qm: &QueueManager, id: i64) -> watch::Receiver<bool> {
         let (cancel, rx) = watch::channel(false);
-        lock_or_recover(&qm.slots).active.insert(id, ActiveJob { cancel, stop: None });
+        lock_or_recover(&qm.slots).active.insert(
+            id,
+            ActiveJob { cancel, stop: None, download_limiter: Arc::new(RateLimiter::new(0)) },
+        );
         rx
     }
 
@@ -733,6 +774,7 @@ mod tests {
             attempts: 0,
             retry_at: None,
             expected_hash: None,
+            speed_limit_kbps: None,
         }
     }
 
@@ -749,8 +791,17 @@ mod tests {
 
         let qm = QueueManager::new();
         let (cancel, rx) = watch::channel(true);
-        lock_or_recover(&qm.slots).active.insert(id, ActiveJob { cancel, stop: Some(stop) });
-        let ctx = JobContext::new(id, None, Some(db.clone()), rx, Arc::new(RateLimiter::new(0)));
+        lock_or_recover(&qm.slots).active.insert(
+            id,
+            ActiveJob { cancel, stop: Some(stop), download_limiter: Arc::new(RateLimiter::new(0)) },
+        );
+        let ctx = JobContext::new(
+            id,
+            None,
+            Some(db.clone()),
+            rx,
+            CompositeRateLimiter::global_only(Arc::new(RateLimiter::new(0))),
+        );
         ctx.progress.add_transferred(transferred);
         let guard = JobGuard { id, slots: qm.slots.clone(), db: db.clone(), finished: false };
         let root = std::env::temp_dir().join(format!("falcon-queue-test-{}", uuid::Uuid::new_v4()));
@@ -799,20 +850,37 @@ mod tests {
     }
 
     #[test]
+    fn download_speed_limit_update_reaches_the_active_job_limiter() {
+        let qm = QueueManager::new();
+        let download_limiter = Arc::new(RateLimiter::new(0));
+        let (cancel, _rx) = watch::channel(false);
+        assert!(qm.claim_active_slot(7, cancel, download_limiter.clone()));
+
+        assert!(qm.set_download_speed_limit(7, 512));
+        assert_eq!(download_limiter.kbps(), 512);
+        assert!(qm.set_download_speed_limit(7, 0));
+        assert_eq!(download_limiter.kbps(), 0, "zero returns the job to the global cap");
+        assert!(!qm.set_download_speed_limit(8, 512), "a stopped row has no live limiter");
+    }
+
+    #[test]
     fn removal_tombstone_blocks_claiming_until_the_delete_finishes() {
         let qm = QueueManager::new();
         qm.begin_remove(7);
         qm.begin_remove(7);
         let (cancel, _rx) = watch::channel(false);
-        assert!(!qm.claim_active_slot(7, cancel));
+        assert!(!qm.claim_active_slot(7, cancel, Arc::new(RateLimiter::new(0))));
         assert!(!qm.is_active(7));
 
         qm.end_remove(7);
         let (cancel, _rx) = watch::channel(false);
-        assert!(!qm.claim_active_slot(7, cancel), "a concurrent remover still owns the tombstone");
+        assert!(
+            !qm.claim_active_slot(7, cancel, Arc::new(RateLimiter::new(0))),
+            "a concurrent remover still owns the tombstone"
+        );
         qm.end_remove(7);
         let (cancel, _rx) = watch::channel(false);
-        assert!(qm.claim_active_slot(7, cancel));
+        assert!(qm.claim_active_slot(7, cancel, Arc::new(RateLimiter::new(0))));
         assert!(qm.is_active(7));
     }
 
@@ -821,7 +889,7 @@ mod tests {
         let qm = QueueManager::new();
         qm.begin_shutdown();
         let (cancel, _rx) = watch::channel(false);
-        assert!(!qm.claim_active_slot(1, cancel));
+        assert!(!qm.claim_active_slot(1, cancel, Arc::new(RateLimiter::new(0))));
         assert!(qm.active_ids().is_empty());
     }
 
@@ -887,6 +955,7 @@ mod tests {
                 attempts: 0,
                 retry_at: None,
                 expected_hash: None,
+                speed_limit_kbps: None,
             })
             .unwrap();
         let qm = QueueManager::new();
@@ -924,11 +993,18 @@ mod tests {
     }
 
     #[test]
-    fn ytdlp_limit_splits_the_global_cap_across_active_downloads() {
-        assert_eq!(ytdlp_speed_limit_kbps(0, 4), 0);
-        assert_eq!(ytdlp_speed_limit_kbps(1000, 1), 1000);
-        assert_eq!(ytdlp_speed_limit_kbps(1000, 4), 250);
-        assert_eq!(ytdlp_speed_limit_kbps(3, 4), 1, "a configured limit must remain enforceable");
+    fn ytdlp_limit_composes_per_download_and_split_global_caps() {
+        assert_eq!(ytdlp_speed_limit_kbps(0, 4, 0), 0);
+        assert_eq!(ytdlp_speed_limit_kbps(1000, 1, 0), 1000);
+        assert_eq!(ytdlp_speed_limit_kbps(1000, 4, 0), 250);
+        assert_eq!(
+            ytdlp_speed_limit_kbps(3, 4, 0),
+            1,
+            "a configured limit must remain enforceable"
+        );
+        assert_eq!(ytdlp_speed_limit_kbps(0, 4, 512), 512);
+        assert_eq!(ytdlp_speed_limit_kbps(1000, 4, 100), 100, "the stricter cap wins");
+        assert_eq!(ytdlp_speed_limit_kbps(1000, 4, 500), 250, "the global share still applies");
     }
 
     #[test]

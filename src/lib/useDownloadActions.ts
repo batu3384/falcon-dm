@@ -75,6 +75,8 @@ export function useDownloadActions() {
       archive: (row: DownloadModel, archived: boolean) =>
         api.archiveDownload(row.id, archived).catch(fail),
       priority: (row: DownloadModel, up: boolean) => api.changePriority(row.id, up).catch(fail),
+      speedLimit: (row: DownloadModel, kbps: number) =>
+        api.setDownloadSpeedLimit(row.id, kbps).catch(fail),
       moveRename: (row: DownloadModel) => setMoveTarget(row),
       refresh: (row: DownloadModel) => setRefreshTarget(row),
       redownload: async (row: DownloadModel) => {

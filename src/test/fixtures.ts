@@ -26,6 +26,7 @@ export function makeRow(overrides: Partial<DownloadModel> = {}): DownloadModel {
     attempts: 0,
     retry_at: null,
     expected_hash: null,
+    speed_limit_kbps: null,
     ...overrides,
   };
 }

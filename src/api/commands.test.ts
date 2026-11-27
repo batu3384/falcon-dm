@@ -1,8 +1,25 @@
-import { describe, expect, it } from 'vitest';
-import { extractTauriError, localizeDownloadError } from './commands';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
+import { extractTauriError, localizeDownloadError, setDownloadSpeedLimit } from './commands';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 const t = (key: string, options?: Record<string, unknown>) =>
   options?.code ? `${key}:${options.code}` : key;
+
+describe('setDownloadSpeedLimit', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset().mockResolvedValue(undefined);
+  });
+
+  it('invokes the backend row mutation with a camelCase IPC payload', async () => {
+    await setDownloadSpeedLimit(7, 512);
+    expect(invoke).toHaveBeenCalledWith('set_download_speed_limit', {
+      id: 7,
+      speedLimitKbps: 512,
+    });
+  });
+});
 
 describe('extractTauriError', () => {
   it('maps missing invoke to a human message', () => {

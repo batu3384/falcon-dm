@@ -1326,6 +1326,7 @@ mod tests {
             attempts: 1,
             retry_at: None,
             expected_hash: None,
+            speed_limit_kbps: None,
         })
         .unwrap()
     }
@@ -1337,7 +1338,9 @@ mod tests {
             None,
             Some(db.clone()),
             rx,
-            Arc::new(crate::download::limiter::RateLimiter::new(0)),
+            crate::download::limiter::CompositeRateLimiter::global_only(Arc::new(
+                crate::download::limiter::RateLimiter::new(0),
+            )),
         )
     }
 
@@ -2369,6 +2372,7 @@ mod tests {
             attempts: 0,
             retry_at: None,
             expected_hash: Some(expected_hash.into()),
+            speed_limit_kbps: None,
         })
         .unwrap()
     }

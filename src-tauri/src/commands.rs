@@ -261,6 +261,44 @@ pub async fn change_priority(
     }
 }
 
+const MAX_PER_DOWNLOAD_SPEED_LIMIT_KBPS: u32 = 1_048_576;
+
+/// Persist a row cap, then adjust the live worker when one exists. The order
+/// closes the startup race: a job begun before the DB write is already in the
+/// active map, and a job begun after it reads the new value from its row.
+pub(crate) fn update_download_speed_limit(
+    db: &crate::storage::Database,
+    queue: &crate::download::queue::QueueManager,
+    id: i64,
+    speed_limit_kbps: u32,
+) -> Result<bool, String> {
+    let kbps = speed_limit_kbps.min(MAX_PER_DOWNLOAD_SPEED_LIMIT_KBPS);
+    let updated = db.set_speed_limit(id, kbps).map_err(|e| e.to_string())?;
+    if updated {
+        queue.set_download_speed_limit(id, kbps);
+    }
+    Ok(updated)
+}
+
+/// Set one download's cap in decimal KB/s; zero means the global cap. Native
+/// HTTP/HLS workers pick this up live through their shared row bucket. yt-dlp's
+/// `--limit-rate` is fixed when its child process starts, so there it applies
+/// to the next start or retry.
+#[tauri::command]
+pub async fn set_download_speed_limit(
+    app: AppHandle,
+    id: i64,
+    speed_limit_kbps: u32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if update_download_speed_limit(&state.db, &state.queue, id, speed_limit_kbps)? {
+        emit_row(&app, &state.db, id);
+        Ok(())
+    } else {
+        Err("Download not found".into())
+    }
+}
+
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     let mut settings = current_settings(&state);
@@ -807,6 +845,72 @@ fn read_clipboard_blocking() -> Result<String, String> {
     #[cfg(not(target_os = "macos"))]
     {
         Err("clipboard read is only available on macOS".into())
+    }
+}
+
+#[cfg(test)]
+mod speed_limit_tests {
+    use super::update_download_speed_limit;
+    use crate::download::queue::QueueManager;
+    use crate::storage::models::{Download, DownloadCategory, DownloadStatus};
+    use crate::storage::Database;
+
+    fn insert_row(db: &Database, status: DownloadStatus) -> i64 {
+        db.insert_download(&Download {
+            id: None,
+            url: format!("https://example.com/{status}.bin"),
+            filename: format!("{status}.bin"),
+            save_path: "/tmp".into(),
+            total_size: 0,
+            downloaded_size: 0,
+            status,
+            category: DownloadCategory::Other,
+            speed: 0.0,
+            segments: 1,
+            priority: 1,
+            created_at: "t".into(),
+            completed_at: None,
+            error_message: None,
+            referrer: None,
+            user_agent: None,
+            cookies: None,
+            archived: false,
+            attempts: 0,
+            retry_at: None,
+            expected_hash: None,
+            speed_limit_kbps: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn speed_limit_command_roundtrip_accepts_every_status_and_zero_means_global() {
+        let db = Database::in_memory().unwrap();
+        let queue = QueueManager::new();
+        for status in [
+            DownloadStatus::Queued,
+            DownloadStatus::Downloading,
+            DownloadStatus::Paused,
+            DownloadStatus::Completed,
+            DownloadStatus::Failed,
+            DownloadStatus::Merging,
+        ] {
+            let id = insert_row(&db, status);
+            assert!(update_download_speed_limit(&db, &queue, id, 512).unwrap());
+            assert_eq!(db.get_download(id).unwrap().speed_limit_kbps, Some(512));
+            assert!(update_download_speed_limit(&db, &queue, id, 0).unwrap());
+            assert_eq!(db.get_download(id).unwrap().speed_limit_kbps, None);
+        }
+        assert!(!update_download_speed_limit(&db, &queue, 999_999, 512).unwrap());
+    }
+
+    #[test]
+    fn speed_limit_command_clamps_like_the_global_limit() {
+        let db = Database::in_memory().unwrap();
+        let queue = QueueManager::new();
+        let id = insert_row(&db, DownloadStatus::Queued);
+        assert!(update_download_speed_limit(&db, &queue, id, u32::MAX).unwrap());
+        assert_eq!(db.get_download(id).unwrap().speed_limit_kbps, Some(1_048_576));
     }
 }
 

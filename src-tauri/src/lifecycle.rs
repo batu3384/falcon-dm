@@ -673,6 +673,7 @@ pub fn run() {
             crate::commands::set_schedule,
             crate::commands::get_schedule,
             crate::commands::change_priority,
+            crate::commands::set_download_speed_limit,
             crate::commands::get_settings,
             crate::commands::save_settings,
             crate::commands::get_extension_status,

@@ -153,6 +153,11 @@ export async function changePriority(id: number, increase: boolean): Promise<voi
   await invoke('change_priority', { id, increase });
 }
 
+/** Set one download's KB/s cap; 0 means it follows the global limit. */
+export async function setDownloadSpeedLimit(id: number, speedLimitKbps: number): Promise<void> {
+  await invoke('set_download_speed_limit', { id, speedLimitKbps });
+}
+
 export async function openFolder(path: string): Promise<void> {
   await invoke('open_folder', { path });
 }

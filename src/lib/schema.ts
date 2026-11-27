@@ -45,6 +45,8 @@ export const DownloadSchema = z.object({
   retry_at: z.number().nullable().optional().default(null),
   /** Canonical `algo:hex` the finished file was verified against (sha256/md5). */
   expected_hash: z.string().nullable().optional().default(null),
+  /** Per-download KB/s cap; null means the global limit. */
+  speed_limit_kbps: z.number().int().nonnegative().nullable().optional().default(null),
 });
 
 export const DownloadArraySchema = z.array(DownloadSchema).max(500);

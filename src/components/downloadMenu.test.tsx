@@ -14,6 +14,7 @@ function stubActions(): DownloadActions {
     copyUrl: vi.fn(),
     archive: vi.fn(),
     priority: vi.fn(),
+    speedLimit: vi.fn(),
     moveRename: vi.fn(),
     redownload: vi.fn(),
     refresh: vi.fn(),
