@@ -4,24 +4,29 @@
 
 | Boundary | Control |
 |----------|---------|
-| Download URLs | SSRF block: no loopback, private IP, or non-http(s) schemes |
-| DNS | Public addresses resolved and pinned per request hop |
-| Local API | `127.0.0.1` only; UUID API token; extension Origin allowlist |
-| Extension pairing | User compares a 6-digit code and approves it in the app; declined codes stay declined |
-| External tools | `ffmpeg` (bundled) and `yt-dlp` started by Rust with fixed arguments; webview has no shell access |
-| Capture fallback | Fail-closed by default (a capture the app cannot take is cancelled); opt-in browser fallback in the extension options |
+| Download URLs | Only HTTP(S); loopback, private, link-local, multicast, CGNAT and other non-public IP targets are blocked. Enqueue checks literal hosts without DNS so offline links can queue. Falcon's own HTTP/HLS clients revalidate every redirect hop and pin public DNS results; yt-dlp's initial URL is validated before launch, while redirects and fetches inside yt-dlp are performed by that tool. |
+| Local API | `127.0.0.1` only; per-install UUID token compared in constant time; paired extension Origin allowlist. Non-health requests are rate-limited, with a stricter separate bucket for uploads. |
+| Extension pairing | User compares a 6-digit code and approves it in the app. Approval hands the token to that exact extension/code pair once only; token loss or rotation requires a fresh approval, never silent reissue. Declined codes stay declined for ten minutes. |
+| Extension data | Popup rows omit URLs, paths and headers. Session cookies are not exposed to the frontend and are cleared on terminal download states. Cookies stored in profiles/rows are encrypted at rest. |
+| yt-dlp | Input URLs are validated against private and loopback targets before launch. Known releases older than 2023.07.06 are refused. Per-download cookies are passed through an exact-host Netscape cookie file with owner-only permissions, not a forwarded raw header. The URL follows `--`; unsafe format selectors fall back to the default. Cancellation kills the process group, including ffmpeg postprocessors. |
+| External tools | `ffmpeg` (bundled or system) and `yt-dlp` are started by Rust with fixed argument lists; the webview has no shell access. |
+| Completion scripts | Run directly, never through a shell; must be executable files in the user's home folder, `/opt/homebrew/bin` or `/usr/local/bin`. |
+| File opening | **Open** and **Show in Finder** are restricted to the download roots/app data or the exact path recorded in a download row, preventing a compromised webview from launching arbitrary `.command` or `.app` files. |
+| Capture fallback | Fail-closed by default (a capture the app cannot take is cancelled); the browser fallback is opt-in in the extension options. |
+
+The loopback API is not a boundary against malware already running as the same local user: such a process can attempt to forge an extension Origin. The token, Origin allowlist and approval flow primarily stop web pages and unpaired extensions.
 
 ## Extension cookies
 
-Cookies accepted only when enqueue needs them. Not exposed in frontend download payloads; cleared on terminal download states. yt-dlp receives browser cookies only when the user enables **Use browser cookies for yt-dlp** in Settings.
+Cookies are accepted only when their source origin is allowed for the download. They are not exposed in frontend download payloads and are cleared on terminal download states. A **Refresh Link…** keeps them only for the same HTTPS origin or the allowed YouTube→googlevideo case and drops them otherwise. yt-dlp reads Chrome cookies only when the user enables **Let yt-dlp use your Chrome sign-in** in Settings.
 
 ## Deep links
 
-Only `falcondm://wake` is registered. No download parameters in deep links.
+Only `falcondm://wake` is registered. No download parameters are accepted in deep links; enqueue happens over the authenticated loopback API.
 
 ## Updates
 
-**Check for updates** fetches public GitHub Release metadata when the user clicks the button. No background auto-update or unsigned install.
+**Check for Updates** fetches public GitHub Release metadata when the user clicks the button. No background auto-update or unsigned install.
 
 ## Reporting vulnerabilities
 

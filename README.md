@@ -28,8 +28,8 @@
       <p>The mascot reflects what the stack actually does:</p>
       <ul>
         <li><strong>Speed:</strong> DNS-pinned HTTP streaming with bounded redirects.</li>
-        <li><strong>Precision:</strong> HLS segment assembly + <code>ffmpeg</code> merge.</li>
-        <li><strong>Capture:</strong> Chrome MV3 extension → authenticated localhost API.</li>
+        <li><strong>Precision:</strong> validated resume, HLS segment assembly, <code>ffmpeg</code> merge.</li>
+        <li><strong>Capture:</strong> Chrome/Edge MV3 extension → authenticated localhost API.</li>
       </ul>
     </td>
   </tr>
@@ -41,27 +41,32 @@
 
 | Area | What you get |
 |------|----------------|
-| **HTTP(S)** | Multi-connection range downloads, byte-exact resume after pause/crash/restart, DNS-pinned streaming, speed limit, proxy, scheduler windows |
-| **HLS (m3u8)** | Parallel segment fetch with resume, speed limit, proxy, ffmpeg mux; complex playlists handed to yt-dlp |
-| **YouTube** | Watch URL + `yt-dlp` (optional browser cookies, global proxy/speed limit, custom binary path) |
-| **Browser extension** | Download capture, offline fallback control, video quality picker, link grabber (batch ≤100) |
-| **Desktop UI** | macOS-native shell, inspector panel, speed graph, EN/TR i18n, category paths, release update check |
-| **Security** | 6-digit code pairing, SSRF URL block, token + Origin allowlist |
+| **HTTP(S)** | Multi-connection range downloads, byte-exact resume after pause/crash/restart, validator-checked remote changes, DNS-pinned streaming, global speed limit, proxy |
+| **HLS (m3u8)** | Parallel MPEG-TS segments with safe resume, playlist fingerprinting, proxy/speed limit, ffmpeg mux; complex playlists use yt-dlp; live streams are rejected |
+| **YouTube / DASH** | Watch URLs and quality selection (including audio-only M4A) through `yt-dlp`, real progress, resumable work directories, optional browser cookies, custom binary path |
+| **Browser extension** | Automatic capture by file type, per-site never-capture rules, video picker, link grabber (batch ≤100), controllable offline fallback |
+| **Queue** | Concurrent queue with priorities and position badges, weekly schedule windows, completion actions (sleep or script), automatic retries, keep-awake while active |
+| **Desktop UI** | macOS-native shell, batch paste/import, expired-link refresh, optional SHA-256/MD5 verification, inspector, keyboard shortcuts, EN/TR i18n, decimal Finder-style units, release update check |
+| **Security** | One-shot 6-digit pairing, token + Origin allowlist, SSRF/DNS-pinning guards, restricted file opening, hardened yt-dlp invocation |
 
-## Core Architecture
+## Core architecture
 
 ### Download engine
 
-HTTP(S) downloads run in the Rust engine over DNS-pinned connections. The file is preallocated as one hidden `.falcon.part` file and split into one byte range per connection; every connection writes at its own offset, an idle connection takes over half of the largest remaining range, and per-range progress is saved next to the file (`.falcon.state`). Pause, crash, automatic retry and app restart all continue exactly where each connection stopped; a changed remote file (ETag / Last-Modified via `If-Range`) restarts cleanly instead of mixing versions. Transient failures (timeouts, 5xx, 429) are retried with backoff up to five times; a run that moves data resets the budget. One global token bucket enforces the speed limit across all downloads and applies to running ones immediately. Finished files are moved into place without overwriting (`name (1).ext` on a clash). Private targets, unsafe redirects, and magnet URLs are rejected.
+HTTP(S) downloads run in the Rust engine over DNS-pinned connections. The file is preallocated as one hidden `.falcon.part` file and split into large byte ranges; every connection writes at its own offset, idle connections can take over part of the largest remaining range, and per-range progress is saved next to the file (`.falcon.state`). Pause, crash, automatic retry and app restart continue exactly where each connection stopped.
+
+Resume is deliberately conservative. The state stores a strong ETag or Last-Modified validator and uses `If-Range`; without such a validator, or when the remote entity changes, partial bytes are discarded and the transfer restarts rather than mixing versions. Servers that do not support ranges use a single stream and cannot resume. Malformed `206` responses and compressed response bodies are rejected because they make byte-range integrity impossible. Transient failures are retried with backoff up to five times; a run that moves data resets the budget. Finished files move into place without overwriting (`name (1).ext` on a clash). For a single manually added link, **Request options → Checksum** can require SHA-256 or MD5 verification; all engines verify before the move, and a mismatch deletes the unverified temp file.
 
 ### Stream pipeline (HLS + YouTube)
 
-- **HLS:** Rust downloads MPEG-TS segments concurrently (proxy + speed limit from Settings); each segment is written to `*.tmp` and renamed when complete, so resume never trusts half a segment; `ffmpeg` remuxes to MP4. Encrypted, fMP4, byte-range and split-audio playlists are handed to yt-dlp; live playlists are refused instead of saving a few seconds.
-- **YouTube:** CDN (<code>googlevideo</code>) URLs are rewritten to watch URLs; <code>yt-dlp</code> runs as an external tool (PATH or **Settings → yt-dlp path**). Global **proxy** and **speed limit** apply; browser cookies are **opt-in** (**Settings → Use browser cookies for yt-dlp**). Not bundled.
+- **HLS:** Rust downloads plain MPEG-TS segments concurrently (proxy + speed limit from Settings). Each segment is written to `*.tmp`, renamed only when complete, and trusted across restarts only with a matching byte-length sidecar. A playlist fingerprint invalidates stale cache when the cut changes while allowing signed-query rotation. `ffmpeg` remuxes to MP4. Encrypted, fMP4, byte-range, discontinuity and split-audio playlists are handed to yt-dlp; live playlists fail with `ERR_HLS_LIVE` instead of producing a short partial file.
+- **YouTube / DASH / complex HLS:** CDN (<code>googlevideo</code>) URLs are rewritten to watch URLs where possible; <code>yt-dlp</code> runs as an external tool (PATH or **Settings → Network → yt-dlp location**). Global **proxy** and **speed limit** apply. Browser cookies are **opt-in** (**Settings → Network → Let yt-dlp use your Chrome sign-in**); cookies captured for one download are written to an exact-host Netscape cookie file instead of forwarded as a raw header. yt-dlp older than 2023.07.06 is refused. Not bundled.
 
-### Queue & persistence
+### Queue, schedule and completion
 
-`QueueManager` ticks every 500ms, bounds concurrency with atomics, and cancels in-flight stream jobs via `tokio::sync::watch`. State lives in SQLite (`rusqlite`) with crash-safe recovery.
+`QueueManager` ticks every 500ms, bounds concurrency with atomics, and cancels in-flight jobs via `tokio::sync::watch`. State lives in SQLite (`rusqlite`, WAL mode) with crash-safe recovery. The scheduler supports a start/stop window and Monday–Sunday toggles; overnight windows belong to their start day. Outside the window workers flush resume state and return to the queue.
+
+When active work drains and no queued or paused rows remain, Falcon DM can do nothing, put the Mac to sleep, or run an executable script once. Failed downloads count as finished for this action. Scripts run directly, not through a shell, and must live in the user's home folder, `/opt/homebrew/bin` or `/usr/local/bin`. On macOS the app holds a `caffeinate` idle-sleep assertion only while workers are active.
 
 ### Local API (browser extension)
 
@@ -74,15 +79,15 @@ Axum serves `http://127.0.0.1:14201`:
 | `POST /api/ping` | Authenticated liveness for a paired extension |
 | `GET /api/downloads` | Live download rows for the popup |
 | `POST /api/intercept` | Media / captured browser download |
-| `POST /api/add` | Direct URL (e.g. grabber batch) |
-| `POST /api/upload` | Blob media (32 MB cap) |
+| `POST /api/add` | Direct URL (for example grabber batch or context menu) |
+| `POST /api/upload` | Blob media (32 MiB binary cap) |
 
-Mutating requests require `X-Falcon-Token` and a `chrome-extension://` or Edge `Origin` on the allowlist. `GET /api/health` is unauthenticated on loopback. See [extension/README.md](extension/README.md).
+Authenticated requests require `X-Falcon-Token` and a paired `chrome-extension://` or `edge-extension://` Origin. Non-health API calls are rate-limited; uploads have an additional stricter bucket. Pairing approval is consumed after one token handoff, so re-pairing requires user approval again. See [extension/README.md](extension/README.md).
 
 ## Build requirements
 
 - macOS 13.0+ (Ventura or later)
-- **Node.js 22+** (matches CI; Node 24 breaks Vitest/jsdom on GitHub Actions)
+- **Node.js 22+** (matches CI; Node 24 can break Vitest/jsdom on GitHub Actions)
 - **Rust** stable (`rustup`)
 - **Tauri CLI:** `npm install` (devDependency) or `cargo install tauri-cli`
 - **Homebrew:** `brew install ffmpeg yt-dlp`
@@ -129,7 +134,7 @@ npm run tauri build    # .app / .dmg (see release.yml for signed builds)
 1. Chrome/Edge → `chrome://extensions` → enable **Developer mode** → **Load unpacked** → `extension/`
 2. Click the extension icon. It shows a 6-digit code and Falcon DM asks to connect.
 3. Check that Falcon DM shows the same code and click **Approve**. Connected extensions are listed (and can be disconnected) in **Settings → Extension**.
-4. Extension popup: the **Send browser downloads to Falcon DM** switch controls capture. Options → **Let Chrome download when Falcon DM is closed** restores the browser fallback; by default a captured download is blocked when the app cannot take it.
+4. Extension popup: the **Send browser downloads to Falcon DM** switch controls capture. Options control captured file types, never-captured sites, success notifications, and **Let Chrome download when Falcon DM is closed**. By default a captured download is blocked when the app cannot take it.
 5. YouTube: install `yt-dlp`; optional custom binary path and cookie opt-in in Settings
 6. **Updates:** Settings → **Check for Updates** compares against GitHub Releases (opens release page when newer)
 7. **Wake deep link:** `falcondm://wake` only (no download params — avoids token-in-url leaks). Extension wakes app then uses HTTP API. `tauri dev` may not register the URL scheme.
@@ -153,13 +158,12 @@ CI on `main` (protected branch) runs: Frontend lint/test/build, Rust fmt/clippy/
 
 ## Security posture
 
-- **Extension trust:** No silent auto-pair; the user compares a 6-digit code shown in the extension and in the app and approves it. Declined codes stay declined for ten minutes; disconnecting an extension rotates the token. API token is a per-install UUID. Captured downloads are **blocked by default** when Falcon cannot take them; the browser fallback is opt-in in the extension options.
-- **Network boundary:** Download URLs validated (no `file://`, loopback, or private IP SSRF). Local API binds `127.0.0.1` only.
+- **Extension trust:** the user compares a 6-digit code shown in the extension and in the app and approves it. Approval permits one token handoff; a later token loss, rotation or re-pairing requires approval again. Declined codes stay declined for ten minutes; disconnecting an extension rotates the token. Captured downloads are **blocked by default** when Falcon cannot take them; the browser fallback is opt-in in the extension options.
+- **Network boundary:** download URLs are restricted to HTTP(S) and non-public IP/loopback targets are blocked. Falcon's own HTTP/HLS redirect hops are revalidated and pinned to public DNS results; yt-dlp's initial URL is validated before launch, while subsequent fetching is performed by yt-dlp. The local API binds `127.0.0.1` only.
+- **External tools:** `ffmpeg` and `yt-dlp` are started by Rust with fixed argument lists; the URL follows `--`. yt-dlp input is validated before launch, known-vulnerable old releases are refused, and cancellation kills its process group including postprocessors.
+- **Local file access:** **Open** and **Show in Finder** are limited to download roots/app data or exact paths recorded in download rows. Completion scripts are validated executables and run without shell interpolation.
+- **Data:** no telemetry. Session cookies stay in backend storage, are encrypted at rest where persisted, are never serialized into frontend download payloads, and are cleared on terminal download states. yt-dlp uses browser cookies only when explicitly enabled in Settings.
 - **Deep links:** `falcondm://wake` only — enqueue happens over authenticated HTTP, not query strings.
-- **Process isolation:** The only external programs are the bundled `ffmpeg` and the user's `yt-dlp`, started with fixed argument lists (the URL always follows `--`).
-- **Data:** No telemetry. Session cookies stay in backend storage, are never
-  serialized into frontend download payloads, and are cleared on terminal
-  download states. yt-dlp uses browser cookies only when explicitly enabled in Settings.
 
 ## License
 

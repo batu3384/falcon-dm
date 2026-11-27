@@ -1,63 +1,46 @@
 # Security Policy
 
-## Supported Versions
+## Reporting a vulnerability
 
-Falcon DM is pre-1.0 software. Security fixes are applied only to the latest
-release on the `main` branch.
+Email **support@batuhan.tech** with `Falcon DM security` in the subject. Include affected version/commit, reproduction steps, impact, and proof of concept if available.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| latest  | :white_check_mark: |
-| < latest| :x:                |
+Do **not** file public GitHub issues or pull requests for vulnerabilities. We aim to acknowledge reports within 72 hours and coordinate disclosure after a fix is available.
 
-## Reporting a Vulnerability
+## Supported scope
 
-**Please do NOT open a public GitHub issue for security vulnerabilities.**
+Security fixes target the latest commit on `main` and the newest signed macOS release. Falcon DM currently supports macOS 13+ on Intel and Apple Silicon. Linux and Windows builds are not shipped yet.
 
-Instead, report them privately:
+## Important local boundary
 
-1. Open a **private security advisory** via GitHub's
-   ["Report a vulnerability"](https://github.com/batu3384/falcon-dm/security/advisories/new)
-   tab, OR
-2. Email the maintainer directly.
+The app intentionally runs an HTTP API on `127.0.0.1:14201` for the browser extension. Authenticated requests must carry the per-install token and a paired `chrome-extension://` or `edge-extension://` Origin. Pairing uses a 6-digit code shown in both places and requires a click in Falcon DM. Approval permits **one** token handoff; token loss, rotation or re-pairing requires approval again. Disconnecting rotates the token. Non-health API calls are rate-limited, with stricter upload limits.
 
-Please include:
-- A description of the issue and its potential impact.
-- Steps to reproduce, including any proof-of-concept.
-- Affected versions/commits.
+Known residual risk: another process already running on the same user account can attempt loopback requests. Origin checks block ordinary web pages, but local malware is outside this defense in depth boundary.
 
-### Response Timeline
+## Download/network hardening
 
-- **Acknowledgement:** within 48 hours.
-- **Initial assessment:** within 5 business days.
-- **Fix or mitigation:** targeted for the next release; you'll be kept informed
-  of progress and credited in the advisory unless you prefer otherwise.
+- URLs are limited to HTTP(S); private, loopback, link-local, multicast, CGNAT and other non-public targets are rejected.
+- Falcon's own HTTP/HLS clients revalidate redirect hops and pin public DNS results to reduce rebinding risk. yt-dlp's initial URL is validated before launch; redirects and media fetches inside yt-dlp are performed by that external tool.
+- Resume uses strong entity validators; validator-less or changed remote content restarts rather than mixing partial bytes.
+- Cookies are stored only in backend-controlled storage, encrypted at rest where persisted, withheld from frontend payloads, and cleared on terminal states. Link refresh keeps them only for the same HTTPS origin or the allowed YouTube→googlevideo case.
+- `yt-dlp` input is validated before launch, known releases older than 2023.07.06 are refused, capture cookies are host-scoped in a temporary Netscape file, and cancellation kills the process group. Browser cookies are an opt-in setting.
 
-## Threat Model (summary)
+## Local file/process hardening
 
-Falcon DM runs a **localhost-only** HTTP API (`127.0.0.1:14201`) for the
-companion browser extension. It is **not** designed to be exposed to a network.
-The API is protected by:
+- **Open** and **Show in Finder** accept only download roots/app data or exact paths recorded for downloads.
+- Completion scripts execute directly, never through a shell, and must be executable files inside the user's home folder, `/opt/homebrew/bin` or `/usr/local/bin`.
+- Browser capture is fail-closed by default; the browser fallback is opt-in in extension options.
 
-- Extension pairing by a 6-digit code the user compares in both windows;
-  the API token leaves the app only after that approval. There is no silent
-  or first-wins auto-approval, and declined codes stay declined for ten minutes.
-- A per-install random token (UUID v4), issued only after pairing approval
-  and compared in constant time.
-- Origin allow-listing (only paired `*-extension://` origins).
-- SSRF / DNS-rebinding guards on download URLs.
-- Path-traversal protection on save paths and filename sanitization.
-- The webview has no shell or process permissions. `ffmpeg` and `yt-dlp` are
-  started by the Rust engine with fixed argument lists; the URL always follows
-  `--`, so it can never become an option.
+## In scope
 
-Known accepted risks (e.g. the TOCTOU window between URL validation and the
-fetch) are documented inline in the Rust source. Direct HTTP pause/resume uses
-byte-range requests against `.falcon.part` files; large remaining parts may
-resume with parallel range segments.
+- Remote exploitation or command injection through downloads, playlists, filenames or extension input
+- SSRF/private-network access through URLs, redirects or yt-dlp invocation
+- Local API authentication, pairing, rate-limit or Origin validation bypass
+- Cookie/token disclosure or persistence failures
+- Arbitrary local file overwrite, execution through Open/Reveal, or shell injection through completion actions
 
-Captured browser downloads are **fail-closed by default**: when Falcon DM
-cannot take a hijacked download, the browser copy is cancelled rather than
-silently kept. The extension option **Let Chrome download when Falcon DM is
-closed** restores the fail-open fallback — a trade-off between data-loss risk
-(cancelled save) and unintended fail-open downloads.
+## Out of scope
+
+- Malware already running with the user's full privileges
+- Attacks requiring physical access
+- Content downloaded intentionally by the user
+- Issues in third-party tools (`yt-dlp`, `ffmpeg`) unless Falcon DM invokes them unsafely

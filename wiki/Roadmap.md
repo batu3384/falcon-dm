@@ -16,19 +16,30 @@ Product direction for **Falcon DM**. This page tracks milestones — not a relea
 | Item | Notes |
 |------|-------|
 | Parallel HTTP (range, speed limit, byte verify) | CA-001 closed |
-| HTTP parallel **resume** after `.part` | Remaining bytes use range segments when possible |
-| HLS proxy, speed limit, segment resume | Temp dir `hls-{download_id}`; skips existing segments |
-| yt-dlp proxy, speed limit, cookie opt-in | Settings toggle; cookies off by default |
+| Byte-exact HTTP resume | Offset writes + `.falcon.state` segment bitmap; crash/restart continue every connection in parallel |
+| Resume validator enforcement | Strong ETag/Last-Modified required; validator-less or changed content restarts from zero |
+| HTTP response hardening | Malformed `206` responses and compressed byte streams rejected; canonical URL dedupe |
+| Optional checksum verification | SHA-256/MD5 expectations on single manual downloads; verified before the final move and mismatches delete temp data |
+| HLS proxy, speed limit, segment resume | Temp dir `hls-{download_id}.falcondm-temp`; length sidecars and playlist fingerprints validate cached segments |
+| HLS live-stream rejection | Live/upcoming playlists fail with `ERR_HLS_LIVE` instead of saving a partial replay |
+| yt-dlp proxy, speed limit, real progress | Output-template parsing, stable work dir per download, pause resumes from yt-dlp `.part` files |
+| yt-dlp hardening | Private/loopback input validation, exact-host cookie file, 2023.07.06 version floor, process-group cancellation |
 | Fail-closed capture by default | Browser fallback is opt-in in extension options |
+| Extension capture rules | File-type list plus per-site never-capture rules with wildcard host support |
 | Link grabber batch limit | 100 URLs per batch |
-| Scheduler scope hint | Time window only; no shutdown/dial-up |
+| Batch URL import | Multi-line paste, `.txt`/`.csv` import and drop in New Download; skipped lines counted |
+| Refresh Link | Failed/paused rows can replace expired URLs; HTTP state rewriting preserves byte-exact resume |
+| Weekly scheduler | Start/stop window plus Monday–Sunday toggles; overnight windows belong to their start day |
+| Queue completion actions | Do nothing, put Mac to sleep, or run a validated executable script when the queue drains |
+| Keep-awake assertion | `caffeinate` only while downloads are active |
+| Decimal units | 1000-based KB/MB/GB across app and extension, matching Finder |
+| Queue/UI polish | Queue position badges, row keyboard shortcuts, remembered speed limits in the UI and tray |
+| Window and tray behavior | Close hides to tray, Dock click reopens, tray offers New Download/pause/resume/speed-limit/quit, window state persists, native appearance follows theme override |
 | Release update check | Settings → GitHub Releases compare + open release |
 | Duplicate URL guard (DB + transaction) | CA-002 closed |
-| Code pairing | 6-digit code approved in the app; native messaging host removed |
+| One-shot code pairing | 6-digit approval hands the token over once; re-pairing requires approval again |
 | aria2 retirement | Rust HTTP engine with per-range resume replaced it; sidecar, scripts and CI provisioning deleted |
-| Byte-exact HTTP resume | Offset writes + `.falcon.state` segment bitmap; crash/restart continue every connection in parallel |
 | Parallel HTTP integration tests | Loopback TCP fixtures serve ranged 206 responses — CA-008 closed |
-| yt-dlp real progress | Output-template parsing, stable work dir per download, pause resumes from yt-dlp `.part` files |
 | Desktop UI redesign | macOS-native shell: sheets, inspector, context menus, settings panes |
 | Extension UI redesign | Popup states (connected/pending/blocked/offline), live progress, shadow-DOM overlay |
 | Wiki + onboarding docs | Source in `wiki/`, sync via `./scripts/sync-wiki.sh` |
@@ -36,7 +47,7 @@ Product direction for **Falcon DM**. This page tracks milestones — not a relea
 | Hijack API auth contract | Token + Origin unit tests; flow-test 401 when API up |
 | Cookie at-rest encryption | ChaCha20-Poly1305 in SQLite + settings profiles |
 | WCAG 2.5.5 44px targets | `--target` token on pointer controls |
-| Schedule cancel-timeout | No Queued demote while worker still writing |
+| Non-blocking scheduler stop | Outside-window workers flush resume state and requeue; the queue tick never waits |
 
 ## Now
 
@@ -58,7 +69,7 @@ Product direction for **Falcon DM**. This page tracks milestones — not a relea
 | BitTorrent / magnet support | **Later** | Out of scope today; SSRF policy must extend first |
 | Cloud sync / remote queue | **Later** | Conflicts with local-only product goal |
 | Signed in-app auto-update | **Later** | `tauri-plugin-updater` + CI manifest + pubkey (release check exists today) |
-| Scheduler shutdown-after-complete | **Later** | IDM-style post-queue shutdown |
+| Shutdown after completion | **Later** | Sleep and run-script exist today; full power-off is not implemented |
 | Scheduler dial-up mode | **Later** | Connect-on-demand scheduling |
 
 ## How to influence the roadmap

@@ -4,15 +4,21 @@
 
 | Route | Handler | Notes |
 |-------|---------|-------|
-| HTTP(S) | Rust engine | Multi-connection range downloads when the server supports `Accept-Ranges`; every connection writes at its own offset in one hidden `.falcon.part` file and per-range progress persists in a `.falcon.state` sidecar, so pause, crash, retry and restart all resume byte-exactly in parallel. DNS-pinned clients; single-connection fallback (no resume) when ranges are unsupported |
-| HLS (`.m3u8`) | Rust segments + ffmpeg mux | Parallel MPEG-TS segment fetch; proxy + speed limit; deterministic temp dir `hls-{id}` with segment resume. Encrypted, fMP4, byte-range and split-audio playlists are handed to yt-dlp; live playlists are refused |
-| YouTube | yt-dlp | Watch URL + optional `format` field; global proxy/speed limit; real progress from output templates; browser cookies opt-in only |
+| HTTP(S) | Rust engine | Multi-connection range downloads when the server proves range support with a valid `206 Content-Range`; every connection writes at its own offset in one hidden `.falcon.part` file and per-range progress persists in a `.falcon.state` sidecar. Pause, crash, retry and restart resume byte-exactly when the saved strong ETag or Last-Modified validator still matches. A server without such a validator, or a changed entity, restarts from zero rather than mixing versions. Malformed partial responses and compressed (`Content-Encoding` other than `identity`) responses are rejected. Servers without range support use one connection and cannot resume. |
+| HLS (`.m3u8`) | Rust segments + ffmpeg mux | Parallel MPEG-TS segment fetch with proxy and speed limit. The per-download cache `hls-{id}.falcondm-temp` reuses only complete segments with matching length sidecars; a playlist fingerprint detects a re-cut playlist and drops stale cache while ignoring signed-query rotation. Expired segment credentials (`401`, `403`, `410`) cause one playlist re-resolution per run. Encrypted, fMP4, byte-range, discontinuity and split-audio playlists go to yt-dlp. Live playlists are refused with `ERR_HLS_LIVE`. |
+| YouTube / DASH / complex HLS | yt-dlp | Watch URL + optional `format` field; global proxy and speed limit; real progress from output templates; stable `.falcon-dm-ytdlp-{id}` work dir for pause/resume. Input URLs are validated against private and loopback targets, yt-dlp older than 2023.07.06 is refused, browser cookies are opt-in, and cancellation kills the yt-dlp process group (including ffmpeg postprocessors). |
+
+Before any engine moves a finished file into place, the shared finalizer validates its content and can enforce an optional SHA-256 or MD5 checksum. The New Download sheet accepts bare hex or `sha256:`/`sha-256:`/`md5:` input for a single link, stores canonical lowercase `algo:hex`, verifies the finished temp file in streaming reads, and deletes that temp file on mismatch so the retry starts cleanly.
 
 ## Queue
 
-`QueueManager` polls every 500ms, limits concurrency with atomics, and cancels in-flight jobs via `tokio::sync::watch`. State persists in SQLite (WAL mode).
+`QueueManager` polls every 500ms, limits concurrency with atomics, and cancels in-flight jobs via `tokio::sync::watch`. State persists in SQLite (WAL mode). Transient failures are retried with backoff up to five times; progress made during a run resets the retry budget.
 
-**Scheduler:** optional start/stop time window (overnight ranges work). Outside the window running workers are asked to stop, flush their resume state and go back to **Queued**; they continue from the same byte when the window opens. The queue tick never waits on a worker, and a stop is given up after a 15 s grace so a stuck worker cannot block the row forever. Shutdown-after-complete and dial-up modes are **not** implemented.
+**Scheduler:** an optional start/stop time window plus a Monday–Sunday mask (all seven days enabled by default and for legacy settings). Overnight windows belong to the day on which they start: Tuesday 03:00 can be inside Monday 23:00–07:00 even when Tuesday is off. Outside the window running workers are asked to stop, flush their resume state and return to **Queued**; the queue tick itself never waits on a worker.
+
+**Completion action:** after worker activity has been observed, the action fires once when no active, queued or paused downloads remain. Completed and failed rows count as done. Queued or paused rows suppress the action and consume that drain; deleting them later does not fire it until new worker activity re-arms the detector. Choices are **Do nothing**, **Put Mac to sleep**, or **Run a script**. Scripts run directly (not through a shell) and must be executable files inside the user's home folder, `/opt/homebrew/bin` or `/usr/local/bin`.
+
+While any worker is active on macOS, Falcon DM holds a `caffeinate` idle-sleep assertion tied to its own process; the assertion is released when the queue becomes idle.
 
 ## Local API
 
@@ -26,26 +32,37 @@ Axum on `http://127.0.0.1:14201`:
 | `GET /api/downloads` | Live download rows for the popup |
 | `POST /api/intercept` | Captured / media download |
 | `POST /api/add` | Direct URL enqueue (grabber batch, context menu) |
-| `POST /api/upload` | Blob media (32 MB cap, token + Origin) |
+| `POST /api/upload` | Blob media (32 MiB binary cap, token + Origin) |
 
-All mutating requests require `X-Falcon-Token` and an allowed extension `Origin`.
+Authenticated requests require `X-Falcon-Token` and an allowlisted extension `Origin`. Pairing requires a browser-supplied extension origin but no token. Non-health API calls share a 600 requests/minute bucket; uploads additionally have their own 10 requests/minute bucket and a 48 MiB encoded request-body cap.
 
-## Duplicate protection
+## Pairing and duplicate protection
 
-Enqueue uses an immediate SQLite transaction: if the same URL is already active (`Queued`, `Downloading`, `Paused`, `Merging`), the existing download ID is returned instead of creating a duplicate row.
+The pairing token handoff is one-shot: approval applies to one exact extension/code pair and is consumed when the token is returned. If the token is lost or rotated, the extension must be approved again; there is no silent reissue. Disconnecting an extension rotates the token.
+
+Enqueue uses an immediate SQLite transaction. If the same canonical URL is already active (`Queued`, `Downloading`, `Paused`, `Merging`) and not archived, the existing download ID is returned instead of creating a duplicate row. Canonicalization collapses case and default-port spellings without re-encoding signed query bytes; YouTube watch URLs and format variants dedupe to the same base video.
+
+## Refresh link
+
+**Refresh Link…** is available on failed and paused rows. The replacement URL goes through the same public-URL validation and canonicalization as a new enqueue. For HTTP rows, the `.falcon.state` file's URL is rewritten without touching progress or the validator, so an expired signed URL can continue byte-exactly; if the new URL serves a different entity, the resume validator discards the partial data and starts over. HLS reuse is governed by the playlist fingerprint, and yt-dlp reuse by the partial files in its stable work directory, so the intended use is a fresh URL for the same content. Cookies are kept only when the refreshed target is the same HTTPS origin or the allowed YouTube→googlevideo case; other cross-host refreshes drop them. A failed row requeues after refresh; a paused row stays paused.
 
 ## Settings that affect downloads
 
 | Setting | Effect |
 |---------|--------|
-| **Max concurrent downloads** | Queue slot count |
-| **Connections per file** | HTTP range segments and HLS segment concurrency (1–16, default 8) |
-| **Speed limit (KB/s)** | HTTP (single + parallel + resume), HLS segments, yt-dlp (`--limit-rate`) |
+| **Max concurrent downloads** | Queue slot count (1–32) |
+| **Connections per file** | HTTP range segments and HLS segment concurrency (1–16, default 8; yt-dlp receives at most 8) |
+| **Speed limit (KB/s)** | Decimal units (1 KB/s = 1000 B/s). One global token bucket covers HTTP and HLS and applies to running jobs; yt-dlp receives a divided `--limit-rate`. Toolbar/Settings remember the last non-zero value in webview storage, while the tray keeps a backend `speed_limit_last_kbps` mirror updated by Settings saves |
 | **Proxy** | HTTP, HLS, yt-dlp |
-| **yt-dlp path** | Custom binary; empty = PATH + common locations |
-| **Use browser cookies for yt-dlp** | Off by default; passes `Cookie` header to yt-dlp when enabled |
+| **Scheduler days and times** | Weekly active window for new work |
+| **Completion action/script** | One-shot action when the queue drains |
+| **yt-dlp path** | Custom binary; empty = PATH + common install locations |
+| **Let yt-dlp use your Chrome sign-in** | Off by default; uses `--cookies-from-browser chrome` only when no exact-host download cookies apply |
 | **Download profiles** | Per-site UA, referrer, cookies (HTTPS only, encrypted at rest), save subdir |
-| **Scheduler** | Active window for new work; in-flight stop grace 15 s before the row is demoted |
+
+## Browser capture rules
+
+Automatic capture is limited to the extension list configured in the extension options. The default list covers common media, archive, document, image and installer types; separators can be commas, spaces or newlines, and an empty list captures nothing. The per-site **Never capture on these sites** list accepts one host per line; `*.example.com` or `.example.com` covers the base host and subdomains. These rules apply only to automatic browser capture — explicit context-menu sends still work.
 
 ## Extension integration
 
@@ -54,11 +71,11 @@ YouTube watch/Shorts pages load a static MV3 `content_scripts` entry. Other site
 | Control | Behavior |
 |---------|----------|
 | **Send browser downloads to Falcon DM** (popup/options) | Off disables automatic capture; the browser saves natively |
-| **Let Chrome download when Falcon DM is closed** (options) | Off by default: a capture that cannot reach the app is cancelled. On: the browser re-downloads it instead |
+| **Let Chrome download when Falcon DM is closed** (options) | Off by default: a capture that cannot reach the app is cancelled. On: the browser starts a replacement download instead |
 | **Link grabber batch** | Up to 100 URLs per send; partial per-item results |
 
-Manual actions (context menu, media overlay, paste URL) always show an error notification on failure; they do not use the hijack fail-closed path.
+Manual actions (context menu, media overlay, paste URL) always show an error notification on failure; they do not use the automatic-capture fail-closed path.
 
 ## Updates
 
-**Settings → Check for updates** calls GitHub Releases API, compares semver to the running app, and opens the release page when newer. In-app signed auto-install (`tauri-plugin-updater`) is not shipped yet.
+**Settings → Check for Updates** calls the GitHub Releases API, compares semver to the running app, and opens the release page when newer. In-app signed auto-install (`tauri-plugin-updater`) is not shipped yet.
