@@ -49,17 +49,38 @@ pub async fn add_download(
     state.db.get_download(id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub async fn pause_download(
-    app: AppHandle,
+/// Shared pause implementation for IPC and the local API. The emit callback
+/// keeps the core testable while mirroring `QueueManager::pause`'s
+/// stop/update/flush order exactly.
+pub(crate) async fn pause_download_core<F>(
+    state: &AppState,
     id: i64,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+    mut emit: F,
+) -> Result<(), String>
+where
+    F: FnMut(i64),
+{
     let row = state.db.get_download(id).map_err(|e| e.to_string())?;
     if row.status == DownloadStatus::Paused {
         return Ok(());
     }
-    if state.queue.pause(&state.db, &app, id).await {
+    state.queue.request_stop(id, StopReason::Pause);
+    let paused = state
+        .db
+        .set_status_error_if_current(
+            id,
+            &[DownloadStatus::Queued, DownloadStatus::Downloading, DownloadStatus::Merging],
+            &DownloadStatus::Paused,
+            None,
+            Some(0.0),
+        )
+        .unwrap_or(false);
+    if paused {
+        emit(id);
+    }
+    // Let the worker flush its resume state before the caller reports success.
+    state.queue.stop_and_wait(id, StopReason::Pause).await;
+    if paused {
         Ok(())
     } else {
         Err("Download state changed before pause".into())
@@ -67,11 +88,18 @@ pub async fn pause_download(
 }
 
 #[tauri::command]
-pub async fn resume_download(
+pub async fn pause_download(
     app: AppHandle,
     id: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    pause_download_core(&state, id, |id| emit_row(&app, &state.db, id)).await
+}
+
+pub(crate) fn resume_download_core<F>(state: &AppState, id: i64, mut emit: F) -> Result<(), String>
+where
+    F: FnMut(i64),
+{
     let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
     match dl.status {
         DownloadStatus::Completed => return Err("Download is already completed".into()),
@@ -79,7 +107,7 @@ pub async fn resume_download(
         DownloadStatus::Downloading | DownloadStatus::Merging => return Ok(()),
         DownloadStatus::Queued => {
             let _ = state.db.clear_retry_backoff(id);
-            emit_row(&app, &state.db, id);
+            emit(id);
             return Ok(());
         }
         DownloadStatus::Paused | DownloadStatus::Failed => {}
@@ -92,8 +120,17 @@ pub async fn resume_download(
     {
         return Err("Download state changed before resume".into());
     }
-    emit_row(&app, &state.db, id);
+    emit(id);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn resume_download(
+    app: AppHandle,
+    id: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    resume_download_core(&state, id, |id| emit_row(&app, &state.db, id))
 }
 
 #[tauri::command]
@@ -106,13 +143,15 @@ pub async fn resume_all_downloads(app: AppHandle) -> Result<usize, String> {
     Ok(crate::resume_all(&app))
 }
 
-#[tauri::command]
-pub async fn remove_download(
-    app: AppHandle,
+pub(crate) async fn remove_download_core<F>(
+    state: &AppState,
     id: i64,
-    delete_file: Option<bool>,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+    delete_file: bool,
+    mut emit_removed: F,
+) -> Result<(), String>
+where
+    F: FnMut(i64),
+{
     state.db.get_download(id).map_err(|e| e.to_string())?;
     // Keep the row out of queue claims until the row delete has fully finished.
     state.queue.begin_remove(id);
@@ -122,7 +161,7 @@ pub async fn remove_download(
         }
         // Read again: the worker may have renamed the file while finishing.
         let dl = state.db.get_download(id).map_err(|e| e.to_string())?;
-        if delete_file.unwrap_or(false) && dl.status == DownloadStatus::Completed {
+        if delete_file && dl.status == DownloadStatus::Completed {
             let file_path = resolve_download_target(&dl.save_path, &dl.filename)?;
             if file_path.exists() {
                 std::fs::remove_file(&file_path)
@@ -131,7 +170,7 @@ pub async fn remove_download(
         }
         remove_download_artifacts(&dl.save_path, &dl.filename, id);
         state.db.delete_download(id).map_err(|e| e.to_string())?;
-        let _ = app.emit("download-removed", id);
+        emit_removed(id);
         Ok(())
     }
     .await;
@@ -140,13 +179,25 @@ pub async fn remove_download(
 }
 
 #[tauri::command]
-pub async fn get_downloads(
+pub async fn remove_download(
+    app: AppHandle,
+    id: i64,
+    delete_file: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    remove_download_core(&state, id, delete_file.unwrap_or(false), |id| {
+        let _ = app.emit("download-removed", id);
+    })
+    .await
+}
+
+/// Shared list boundary: callers may request at most one bounded page, and
+/// expensive open-ended search/status input is clipped before reaching SQL.
+pub(crate) fn bounded_download_filter(
     mut filter: DownloadFilter,
     limit: Option<i64>,
     offset: Option<i64>,
-    state: State<'_, AppState>,
-) -> Result<Vec<Download>, String> {
-    // Explicit pagination boundary: callers may request at most one page.
+) -> DownloadFilter {
     filter.limit = Some(limit.or(filter.limit).unwrap_or(200).clamp(1, 200));
     filter.offset = Some(offset.or(filter.offset).unwrap_or(0).max(0));
     if let Some(search) = filter.search.take() {
@@ -156,6 +207,17 @@ pub async fn get_downloads(
     if let Some(ref mut statuses) = filter.statuses {
         statuses.truncate(8);
     }
+    filter
+}
+
+#[tauri::command]
+pub async fn get_downloads(
+    filter: DownloadFilter,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<Download>, String> {
+    let filter = bounded_download_filter(filter, limit, offset);
     state.db.get_downloads(&filter).map_err(|e| e.to_string())
 }
 
@@ -469,8 +531,7 @@ pub(crate) struct DownloadStats {
     speed_limit_kbps: u32,
 }
 
-#[tauri::command]
-pub async fn get_stats(state: State<'_, AppState>) -> Result<DownloadStats, String> {
+pub(crate) fn download_stats_for_state(state: &AppState) -> Result<DownloadStats, String> {
     let stats = state.db.download_stats().map_err(|e| e.to_string())?;
     let root = {
         let settings = lock_or_recover(&state.settings);
@@ -498,6 +559,11 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<DownloadStats, Stri
         free_disk_bytes: free_disk_space(&root),
         speed_limit_kbps: state.queue.speed_limit_kbps(),
     })
+}
+
+#[tauri::command]
+pub async fn get_stats(state: State<'_, AppState>) -> Result<DownloadStats, String> {
+    download_stats_for_state(&state)
 }
 
 /// Rename and/or move a finished download. The DB row changes only after the
@@ -694,9 +760,12 @@ pub async fn refresh_download_url(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Result<(), String> {
-    let current = current_settings(&state);
+fn persist_settings_in_dir(
+    state: &AppState,
+    settings: Settings,
+    app_dir: &std::path::Path,
+) -> Result<(), String> {
+    let current = current_settings(state);
     if current.load_corrupt {
         return Err("settings.json is corrupt; rename or delete it before saving".into());
     }
@@ -711,12 +780,37 @@ pub async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Re
     let live = state.queue.get_schedule();
     settings.apply_live_schedule(live.active, live.start_time.clone(), live.stop_time.clone());
     settings.clamp_runtime_bounds();
-    settings.save(&app_data_dir())?;
+    settings.save(app_dir)?;
 
     state.queue.apply_settings(&settings);
     *lock_or_recover(&state.api_token) = settings.api_token.clone();
     *lock_or_recover(&state.settings) = settings;
     Ok(())
+}
+
+fn update_global_speed_limit_in_dir(
+    state: &AppState,
+    speed_limit_kbps: u32,
+    app_dir: &std::path::Path,
+) -> Result<u32, String> {
+    let mut settings = current_settings(state);
+    settings.speed_limit_kbps = speed_limit_kbps;
+    persist_settings_in_dir(state, settings, app_dir)?;
+    Ok(state.queue.speed_limit_kbps())
+}
+
+/// Change the global cap through the same preservation/clamping/save pipeline
+/// as a Settings-page write, then apply it to the live token bucket.
+pub(crate) fn update_global_speed_limit(
+    state: &AppState,
+    speed_limit_kbps: u32,
+) -> Result<u32, String> {
+    update_global_speed_limit_in_dir(state, speed_limit_kbps, &app_data_dir())
+}
+
+#[tauri::command]
+pub async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Result<(), String> {
+    persist_settings_in_dir(&state, settings, &app_data_dir())
 }
 
 #[derive(serde::Serialize)]
@@ -911,6 +1005,163 @@ mod speed_limit_tests {
         let id = insert_row(&db, DownloadStatus::Queued);
         assert!(update_download_speed_limit(&db, &queue, id, u32::MAX).unwrap());
         assert_eq!(db.get_download(id).unwrap().speed_limit_kbps, Some(1_048_576));
+    }
+}
+
+#[cfg(test)]
+mod control_core_tests {
+    use super::{
+        download_stats_for_state, pause_download_core, remove_download_core, resume_download_core,
+        update_global_speed_limit_in_dir,
+    };
+    use crate::storage::models::{Download, DownloadCategory, DownloadStatus};
+    use crate::util::lock_or_recover;
+    use crate::AppState;
+
+    fn insert_row(
+        state: &AppState,
+        filename: &str,
+        status: DownloadStatus,
+        save_path: &str,
+    ) -> i64 {
+        state
+            .db
+            .insert_download(&Download {
+                id: None,
+                url: format!("https://example.com/{filename}"),
+                filename: filename.into(),
+                save_path: save_path.into(),
+                total_size: 100,
+                downloaded_size: 25,
+                status: status.clone(),
+                category: DownloadCategory::Other,
+                speed: 10.0,
+                segments: 1,
+                priority: 1,
+                created_at: "t".into(),
+                completed_at: None,
+                error_message: (status == DownloadStatus::Failed).then(|| "HTTP 503".into()),
+                referrer: None,
+                user_agent: None,
+                cookies: None,
+                archived: false,
+                attempts: 2,
+                retry_at: Some(123),
+                expected_hash: None,
+                speed_limit_kbps: None,
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pause_core_pauses_queued_row_and_emits_once() {
+        let state = crate::test_app_state("token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let id = insert_row(&state, "pause.bin", DownloadStatus::Queued, "/tmp");
+        let mut emitted = Vec::new();
+        pause_download_core(&state, id, |id| emitted.push(id)).await.unwrap();
+        assert_eq!(emitted, vec![id]);
+        let row = state.db.get_download(id).unwrap();
+        assert_eq!(row.status, DownloadStatus::Paused);
+        assert_eq!(row.speed, 0.0);
+    }
+
+    #[test]
+    fn resume_core_requeues_failed_row_and_clears_retry_state() {
+        let state = crate::test_app_state("token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let id = insert_row(&state, "resume.bin", DownloadStatus::Failed, "/tmp");
+        let mut emitted = Vec::new();
+        resume_download_core(&state, id, |id| emitted.push(id)).unwrap();
+        assert_eq!(emitted, vec![id]);
+        let row = state.db.get_download(id).unwrap();
+        assert_eq!(row.status, DownloadStatus::Queued);
+        assert_eq!(row.downloaded_size, 25, "partial progress is preserved");
+        assert_eq!(row.attempts, 0);
+        assert_eq!(row.retry_at, None);
+        assert_eq!(row.error_message, None);
+    }
+
+    #[test]
+    fn resume_core_rejects_completed_row() {
+        let state = crate::test_app_state("token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let id = insert_row(&state, "done.bin", DownloadStatus::Completed, "/tmp");
+        let err = resume_download_core(&state, id, |_| {}).unwrap_err();
+        assert!(err.contains("already completed"));
+    }
+
+    #[tokio::test]
+    async fn remove_core_deletes_completed_file_row_and_emits_once() {
+        let dir = std::env::temp_dir().join(format!("falcon-remove-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save_path = dir.to_string_lossy().to_string();
+        std::fs::write(dir.join("done.bin"), b"finished").unwrap();
+        let state = crate::test_app_state("token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let id = insert_row(&state, "done.bin", DownloadStatus::Completed, &save_path);
+        let mut emitted = Vec::new();
+
+        remove_download_core(&state, id, true, |id| emitted.push(id)).await.unwrap();
+
+        assert_eq!(emitted, vec![id]);
+        assert!(!dir.join("done.bin").exists());
+        assert!(state.db.get_download(id).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn global_speed_limit_uses_settings_save_pipeline_and_keeps_memory() {
+        let dir =
+            std::env::temp_dir().join(format!("falcon-settings-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = crate::test_app_state("token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut settings = lock_or_recover(&state.settings).clone();
+        settings.api_token = "token".into();
+        settings.allowed_extension_ids.push("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into());
+        settings.schedule_active = true;
+        settings.schedule_start = Some("23:00".into());
+        settings.schedule_stop = Some("07:00".into());
+        *lock_or_recover(&state.settings) = settings.clone();
+        state.queue.set_schedule(crate::download::queue::ScheduleOptions {
+            start_time: settings.schedule_start.clone(),
+            stop_time: settings.schedule_stop.clone(),
+            active: settings.schedule_active,
+        });
+
+        let applied = update_global_speed_limit_in_dir(&state, 512, &dir).unwrap();
+        assert_eq!(applied, 512);
+        assert_eq!(state.queue.speed_limit_kbps(), 512);
+        assert_eq!(lock_or_recover(&state.settings).speed_limit_kbps, 512);
+        assert_eq!(lock_or_recover(&state.settings).speed_limit_last_kbps, 512);
+        assert_eq!(lock_or_recover(&state.api_token).as_str(), "token");
+        assert_eq!(lock_or_recover(&state.settings).allowed_extension_ids.len(), 2);
+        assert!(lock_or_recover(&state.settings).schedule_active);
+        assert_eq!(lock_or_recover(&state.settings).schedule_start.as_deref(), Some("23:00"));
+        assert_eq!(lock_or_recover(&state.settings).schedule_stop.as_deref(), Some("07:00"));
+        assert!(dir.join("settings.json").is_file());
+
+        let off = update_global_speed_limit_in_dir(&state, 0, &dir).unwrap();
+        assert_eq!(off, 0);
+        assert_eq!(state.queue.speed_limit_kbps(), 0);
+        assert_eq!(lock_or_recover(&state.settings).speed_limit_last_kbps, 512);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stats_core_counts_statuses_speed_bytes_and_live_limit() {
+        let state = crate::test_app_state("token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        insert_row(&state, "active.bin", DownloadStatus::Downloading, "/tmp");
+        insert_row(&state, "queued.bin", DownloadStatus::Queued, "/tmp");
+        insert_row(&state, "done.bin", DownloadStatus::Completed, "/tmp");
+        let mut settings = lock_or_recover(&state.settings).clone();
+        settings.speed_limit_kbps = 128;
+        state.queue.apply_settings(&settings);
+
+        let stats = download_stats_for_state(&state).unwrap();
+        assert_eq!(stats.active, 1);
+        assert_eq!(stats.queued, 1);
+        assert_eq!(stats.completed, 1);
+        assert_eq!(stats.all, 3);
+        assert_eq!(stats.total_downloaded_bytes, 75);
+        assert_eq!(stats.current_speed, 10.0);
+        assert_eq!(stats.speed_limit_kbps, 128);
     }
 }
 

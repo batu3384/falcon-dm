@@ -415,6 +415,8 @@
     "ytdlp_missing": "Bu site için yt-dlp gerekir. “brew install yt-dlp” ile kurun.",
     "ytdlp_path_invalid": "Ayarlar'daki yt-dlp konumu geçerli değil.",
     "hls_live": "Canlı yayınlar indirilemez.",
+    "dash_live": "Canlı DASH yayınları indirilemez.",
+    "dash_drm": "Bu DASH yayını DRM ile korunuyor ve indirilemez.",
     "video_unavailable": "Bu video kullanılamıyor.",
     "video_private": "Bu video gizli.",
     "login_required": "Site oturum açmanızı istiyor. Ayarlar'dan Chrome oturumunu etkinleştirin veya bağlantıyı denetleyin.",

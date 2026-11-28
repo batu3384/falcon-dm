@@ -26,15 +26,23 @@ Axum on `http://127.0.0.1:14201`:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/health` | Liveness (unauthenticated, loopback only, `protocol: 2`) |
+| `GET /api/health` | Liveness (unauthenticated, loopback only, `protocol: 3`) |
 | `POST /api/pair` | Extension pairing by 6-digit code |
 | `POST /api/ping` | Authenticated liveness for a paired extension |
-| `GET /api/downloads` | Live download rows for the popup |
+| `GET /api/downloads` | Last 8 live/recent rows for the popup; URLs and paths are omitted |
+| `GET /api/downloads/all` | Filtered, paginated rows (`status`, `category`, `search`, one-based `page`, `page_size` ≤ 200); metadata-only unless `include=url` is passed |
+| `GET /api/stats` | Queue totals, current speed, free disk space and active global speed limit |
 | `POST /api/intercept` | Captured / media download |
-| `POST /api/add` | Direct URL enqueue (grabber batch, context menu) |
-| `POST /api/upload` | Blob media (32 MiB binary cap, token + Origin) |
+| `POST /api/add` | Direct URL enqueue (grabber batch, context menu, CLI) |
+| `POST /api/upload` | Blob media (32 MiB binary cap) |
+| `POST /api/pause` / `POST /api/resume` | Pause or resume one download by `{id}` |
+| `POST /api/remove` | Remove one download by `{id}`; optional `delete_file` deletes a completed output file |
+| `POST /api/pause_all` / `POST /api/resume_all` | Pause active work or resume paused/failed rows |
+| `POST /api/speed_limit` | `{kbps}` sets the global cap; `{id,kbps}` sets a per-download cap; zero disables the global cap or clears the per-download override |
 
-Authenticated requests require `X-Falcon-Token` and an allowlisted extension `Origin`. Pairing requires a browser-supplied extension origin but no token. Non-health API calls share a 600 requests/minute bucket; uploads additionally have their own 10 requests/minute bucket and a 48 MiB encoded request-body cap.
+Authenticated requests require `X-Falcon-Token` plus one of two client shapes. Extension requests keep the original shape: an allowlisted `chrome-extension://` or `edge-extension://` `Origin` (or another explicitly supported extension origin). CLI/script requests use `X-Falcon-Client: cli` and must carry no `Origin` header at all. This does not replace the token: it is read from the same-user, 0600 `settings.json`. A cross-origin browser page cannot use the CLI shape because browser POSTs carry `Origin`, and `X-Falcon-Client` is a custom header that is not in the API's CORS allowlist, so the preflight fails. Any `Origin` — even an empty, invalid or undecodable one — is evaluated under the extension path instead.
+
+Pairing requires a browser-supplied extension origin but no token. Non-health API calls share a 600 requests/minute bucket; uploads additionally have their own 10 requests/minute bucket and a 48 MiB encoded request-body cap.
 
 ## Pairing and duplicate protection
 

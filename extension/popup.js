@@ -169,7 +169,7 @@ function startPolling() {
 
 async function initTab() {
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
     currentTab = { id: (tab && tab.id) || 0, url: (tab && tab.url) || '' };
   } catch (_) {
     currentTab = { id: 0, url: '' };
@@ -232,7 +232,7 @@ function applyStaticText() {
   $('capture-label').textContent = t('popupCapture', 'Send browser downloads to Falcon DM');
   $('capture-hint').textContent = t(
     'popupCaptureHint',
-    'When off, Chrome downloads files itself.',
+    'When off, the browser downloads files itself.',
   );
   $('grab-links').textContent = t('popupGrabLinks', 'Grab Links on This Page…');
   $('settings').textContent = t('popupSettings', 'Settings');
@@ -270,7 +270,7 @@ $('capture').addEventListener('change', async (e) => {
   }
 });
 
-$('settings').addEventListener('click', () => chrome.runtime.openOptionsPage());
+$('settings').addEventListener('click', () => ext.runtime.openOptionsPage());
 
 applyStaticText();
 void initTab();

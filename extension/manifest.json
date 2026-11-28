@@ -11,6 +11,7 @@
   },
   "permissions": [
     "webRequest",
+    "webRequestBlocking",
     "notifications",
     "downloads",
     "cookies",
@@ -37,8 +38,31 @@
     "http://127.0.0.1:14201/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background-worker.js",
+    "scripts": [
+      "media-utils.js",
+      "shared.js",
+      "pairing.js",
+      "api.js",
+      "background.js"
+    ],
+    "preferred_environment": [
+      "document",
+      "service_worker"
+    ]
   },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "falcon@falcondm.app",
+      "strict_min_version": "136",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  },
+  "minimum_chrome_version": "121",
   "action": {
     "default_title": "__MSG_appName__",
     "default_popup": "popup.html",

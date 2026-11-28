@@ -105,6 +105,7 @@ pub(crate) fn outside_schedule(
 pub(crate) enum DownloadRoute {
     YtDlp,
     Hls,
+    Dash,
     Http,
 }
 
@@ -118,7 +119,7 @@ pub(crate) fn route_queued_download(url: &str, referrer: Option<&str>) -> Downlo
         return DownloadRoute::YtDlp;
     }
     if is_dash_url(url) {
-        return DownloadRoute::YtDlp;
+        return DownloadRoute::Dash;
     }
     if is_hls_url(url) {
         DownloadRoute::Hls
@@ -516,6 +517,10 @@ impl QueueManager {
             DownloadRoute::Hls => {
                 JobKind::Hls { url: row.url.clone(), headers, fallback: ytdlp(None) }
             }
+            DownloadRoute::Dash => {
+                let (url, _) = split_falcon_format(&row.url);
+                JobKind::Dash { url, headers }
+            }
             DownloadRoute::Http => JobKind::Http { url: row.url.clone(), headers },
         };
 
@@ -551,6 +556,7 @@ impl QueueManager {
 enum JobKind {
     YtDlp { url: String, options: YtDlpOptions },
     Hls { url: String, headers: HttpHeaders, fallback: YtDlpOptions },
+    Dash { url: String, headers: HttpHeaders },
     Http { url: String, headers: HttpHeaders },
 }
 
@@ -638,6 +644,9 @@ async fn run_job(
         }
         JobKind::YtDlp { url, options } => {
             crate::download::ytdlp::process_ytdlp(&ctx, &url, &out, options).await
+        }
+        JobKind::Dash { url, headers } => {
+            crate::download::dash::process_dash_stream(&ctx, &url, &out, headers).await
         }
         JobKind::Hls { url, headers, fallback } => {
             match crate::download::hls::process_hls_stream(&ctx, &url, &out, headers).await {
@@ -1122,7 +1131,7 @@ mod tests {
         );
         assert_eq!(
             route_queued_download("https://cdn.example.com/stream.mpd", None),
-            DownloadRoute::YtDlp
+            DownloadRoute::Dash
         );
         assert_eq!(
             route_queued_download("https://www.youtube.com/watch?v=abc", None),

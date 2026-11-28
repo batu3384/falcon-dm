@@ -6,6 +6,7 @@ import { readFileSync } from 'fs';
 import path from 'path';
 import vm from 'vm';
 import { fileURLToPath } from 'url';
+import { BACKGROUND_FILES, buildBackgroundWorker } from './build-worker.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const read = (name) => readFileSync(path.join(dir, name), 'utf8');
@@ -29,20 +30,37 @@ const tr = JSON.parse(read('_locales/tr/messages.json'));
 
 // Manifest: only what the features use.
 assert(manifest.manifest_version === 3, 'MV3');
-assert(manifest.background?.service_worker === 'background.js', 'service worker');
+assert(manifest.background?.service_worker === 'background-worker.js', 'Chromium service worker bundle');
+assert(
+  JSON.stringify(manifest.background?.scripts) === JSON.stringify(BACKGROUND_FILES),
+  'Firefox event-page script order',
+);
+assert(
+  JSON.stringify(manifest.background?.preferred_environment) === JSON.stringify(['document', 'service_worker']),
+  'Firefox prefers the event-page document environment',
+);
+assert(manifest.minimum_chrome_version === '121', 'Chrome 121 ignores background.scripts in MV3');
+assert(manifest.browser_specific_settings?.gecko?.id === 'falcon@falcondm.app', 'Gecko id');
+assert(manifest.browser_specific_settings?.gecko?.strict_min_version === '136', 'Gecko minimum version');
+assert(
+  JSON.stringify(manifest.browser_specific_settings?.gecko?.data_collection_permissions) ===
+    JSON.stringify({ required: ['none'] }),
+  'Gecko no-data-collection declaration',
+);
 for (const removed of ['nativeMessaging', 'clipboardRead', 'alarms']) {
   assert(!manifest.permissions.includes(removed), `${removed} permission is not requested`);
 }
-for (const needed of ['downloads', 'webRequest', 'cookies', 'storage', 'scripting', 'contextMenus']) {
+for (const needed of ['downloads', 'webRequest', 'webRequestBlocking', 'cookies', 'storage', 'scripting', 'contextMenus']) {
   assert(manifest.permissions.includes(needed), `${needed} permission`);
 }
 assert(manifest.host_permissions.includes('http://127.0.0.1:14201/*'), 'local API host permission');
-assert(background.startsWith("importScripts('media-utils.js', 'shared.js', 'pairing.js', 'api.js');"), 'worker script order');
+assert(!background.includes('importScripts'), 'background scripts are manifest/bundle loaded');
+assert(read('background-worker.js') === buildBackgroundWorker(), 'Chromium worker bundle is fresh');
 
 // Pairing: code shown to the user, no native host, token only after approval.
 assert(!pairing.includes('sendNativeMessage') && !background.includes('sendNativeMessage'), 'no native messaging');
 assert(pairing.includes('crypto.getRandomValues'), 'pair code comes from the CSPRNG');
-assert(pairing.includes("JSON.stringify({ extension_id: chrome.runtime.id, code })"), 'pair request carries id + code');
+assert(pairing.includes("JSON.stringify({ extension_id: extensionOriginId(), code })"), 'pair request carries the Origin id + code');
 assert(pairing.includes('resp.status === 403') && pairing.includes('forgetPairCode'), 'declined code is discarded');
 assert(!background.includes("action === 'save_token'"), 'no manual token pasting');
 assert(background.includes('pairCode: formatPairCode(visiblePairCode())'), 'popup receives the visible code');
@@ -106,7 +124,7 @@ for (const [key, value] of Object.entries({ ...en, ...tr })) {
 assert(/[ğışçöü]/i.test(tr.popupPendingTitle.message + tr.popupCapture.message), 'Turkish text uses Turkish letters');
 
 // Shared code still parses as scripts (the worker would fail to start otherwise).
-for (const file of ['media-utils.js', 'shared.js', 'pairing.js', 'api.js', 'background.js', 'content.js', 'popup.js', 'options.js']) {
+for (const file of ['media-utils.js', 'shared.js', 'pairing.js', 'api.js', 'background.js', 'background-worker.js', 'content.js', 'popup.js', 'options.js']) {
   new vm.Script(read(file), { filename: file });
 }
 

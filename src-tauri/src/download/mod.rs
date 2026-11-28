@@ -1,13 +1,16 @@
 pub mod checksum;
+pub mod dash;
 pub mod egress_proxy;
 pub mod hls;
 pub mod http;
 pub mod http_client;
 pub mod job;
 pub mod limiter;
+pub mod mux;
 pub mod progress;
 pub mod queue;
 pub mod tools;
+pub mod youtube;
 pub mod ytdlp;
 
 /// Why a worker stopped. The queue decides between pause, retry and failure from this.

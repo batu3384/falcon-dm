@@ -2,7 +2,7 @@
 //
 // The extension shows a 6-digit code and asks Falcon DM to pair. The app shows
 // the same code and the user approves it there. The API token only reaches the
-// extension after that approval. Web pages cannot forge the chrome-extension://
+// extension after that approval. Web pages cannot forge the browser-extension
 // Origin the request carries.
 
 const PAIR_CODE_KEY = 'falconPairCode';
@@ -18,20 +18,20 @@ function newPairCode() {
 async function currentPairCode(fresh = false) {
   if (!fresh && pairCode) return pairCode;
   if (!fresh) {
-    const stored = await chrome.storage.local.get(PAIR_CODE_KEY).catch(() => ({}));
+    const stored = await ext.storage.local.get(PAIR_CODE_KEY).catch(() => ({}));
     if (/^\d{6}$/.test(stored[PAIR_CODE_KEY] || '')) {
       pairCode = stored[PAIR_CODE_KEY];
       return pairCode;
     }
   }
   pairCode = newPairCode();
-  await chrome.storage.local.set({ [PAIR_CODE_KEY]: pairCode }).catch(() => {});
+  await ext.storage.local.set({ [PAIR_CODE_KEY]: pairCode }).catch(() => {});
   return pairCode;
 }
 
 async function forgetPairCode() {
   pairCode = '';
-  await chrome.storage.local.remove(PAIR_CODE_KEY).catch(() => {});
+  await ext.storage.local.remove(PAIR_CODE_KEY).catch(() => {});
 }
 
 /** Code to show in the popup while the app waits for approval. */
@@ -46,7 +46,7 @@ async function requestPair() {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ extension_id: chrome.runtime.id, code }),
+      body: JSON.stringify({ extension_id: extensionOriginId(), code }),
     },
     REQUEST_TIMEOUT_MS,
     'Pair request',
@@ -61,7 +61,7 @@ async function readPairResponse(resp) {
   if (!resp.ok) return { error: true };
   const data = await resp.json().catch(() => null);
   if (data && data.ok && data.token) {
-    await chrome.storage.local.set({ apiToken: data.token });
+    await ext.storage.local.set({ apiToken: data.token });
     await forgetPairCode();
     return { token: data.token };
   }
@@ -115,7 +115,7 @@ async function ensurePaired(force = false) {
         }
         // 401: token rotated (another extension was disconnected) — pair again.
         // 403: this extension was disconnected — needs a new approval.
-        await chrome.storage.local.remove('apiToken');
+        await ext.storage.local.remove('apiToken');
       }
 
       let result = { retry: true };

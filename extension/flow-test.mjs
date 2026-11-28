@@ -8,6 +8,7 @@ import vm from 'vm';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { JSDOM } from 'jsdom';
+import { BACKGROUND_FILES } from './build-worker.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -542,7 +543,7 @@ async function runPopupGrab(state) {
   });
   const win = dom.window;
   await withDomGlobals(win, async () => {
-    loadScripts(win, ['popup.js']);
+    loadScripts(win, ['media-utils.js', 'popup.js']);
     await tick(60);
     const grab = win.document.getElementById('grab');
     assert(grab, 'popup grab CTA exists');
@@ -689,7 +690,8 @@ async function runPopupGrab(state) {
   win.close();
 }
 
-function makeBackgroundHarness(initialLocal = {}) {
+function makeBackgroundHarness(initialLocal = {}, env = {}) {
+  const firefox = !!env.firefox;
   const localStore = { apiToken: 'flow-token', ...initialLocal };
   const sessionStore = {};
   const storageListeners = [];
@@ -698,6 +700,7 @@ function makeBackgroundHarness(initialLocal = {}) {
   const cancels = [];
   const erased = [];
   const rows = new Map();
+  const webRequestListeners = [];
 
   const storageGet = (store, query) => {
     if (typeof query === 'string') {
@@ -809,7 +812,14 @@ function makeBackgroundHarness(initialLocal = {}) {
       getLastFocused: async () => ({ id: 1, type: 'normal', focused: true }),
     },
     webRequest: {
-      onHeadersReceived: { addListener() {} },
+      onHeadersReceived: {
+        addListener(fn, filter, extraInfoSpec) {
+          const registration = { fn, filter, extraInfoSpec: extraInfoSpec || [] };
+          webRequestListeners.push(registration);
+          if ((extraInfoSpec || []).includes('blocking')) listeners.firefoxBlockingCapture = fn;
+          else listeners.mediaSniff = fn;
+        },
+      },
     },
     contextMenus: {
       removeAll(cb) {
@@ -845,6 +855,23 @@ function makeBackgroundHarness(initialLocal = {}) {
     i18n: { getMessage: () => '' },
   };
 
+  const firefoxInternalId = 'e3225586-81a0-47c3-8612-d95fb0c2a609';
+  if (firefox) {
+    chromeMock.runtime.id = 'falcon@falcondm.app';
+    delete chromeMock.downloads.onDeterminingFilename;
+  }
+  chromeMock.i18n.getMessage = (key) =>
+    key === '@@extension_id' ? (firefox ? firefoxInternalId : chromeMock.runtime.id) : '';
+  const browserMock = firefox
+    ? {
+        ...chromeMock,
+        runtime: {
+          ...chromeMock.runtime,
+          getBrowserInfo: async () => ({ name: 'Firefox', version: '136.0' }),
+        },
+      }
+    : null;
+
   const jsonResponse = (status, body) => ({
     ok: status >= 200 && status < 300,
     status,
@@ -865,6 +892,7 @@ function makeBackgroundHarness(initialLocal = {}) {
 
   const sandbox2 = {
     chrome: chromeMock,
+    ...(browserMock ? { browser: browserMock } : {}),
     console,
     URL,
     setTimeout,
@@ -879,18 +907,23 @@ function makeBackgroundHarness(initialLocal = {}) {
   };
   sandbox2.globalThis = sandbox2;
   sandbox2.self = sandbox2;
-  sandbox2.importScripts = (...files) => {
-    for (const file of files) {
-      vm.runInContext(readFileSync(path.join(__dirname, file), 'utf8'), sandbox2, {
-        filename: file,
-      });
-    }
-  };
   vm.createContext(sandbox2);
-  vm.runInContext(readFileSync(path.join(__dirname, 'background.js'), 'utf8'), sandbox2, {
-    filename: 'background.js',
-  });
-  return { sandbox: sandbox2, chrome: chromeMock, listeners, fetchCalls, cancels, erased };
+  for (const file of BACKGROUND_FILES) {
+    vm.runInContext(readFileSync(path.join(__dirname, file), 'utf8'), sandbox2, {
+      filename: file,
+    });
+  }
+  return {
+    sandbox: sandbox2,
+    chrome: chromeMock,
+    browser: browserMock,
+    listeners,
+    fetchCalls,
+    cancels,
+    erased,
+    rows,
+    webRequestListeners,
+  };
 }
 
 async function backgroundReady(harness) {
@@ -1024,8 +1057,101 @@ async function fireDeterminingFilename(harness, item) {
   assert(!harness.cancels.includes(4), 'stored empty capture extension list disables automatic capture');
 }
 
+{
+  const harness = makeBackgroundHarness(
+    {
+      falconCaptureExtensions: 'zip',
+      falconCaptureBlockedHosts: 'blocked.example',
+    },
+    { firefox: true },
+  );
+  await backgroundReady(harness);
+  assert(!harness.listeners.determiningFilename, 'Firefox simulation has no onDeterminingFilename');
+  assert(harness.listeners.firefoxBlockingCapture, 'Firefox registers a blocking capture listener');
+  assert(
+    harness.webRequestListeners.some(
+      (listener) =>
+        listener.extraInfoSpec.includes('blocking') &&
+        listener.extraInfoSpec.includes('responseHeaders') &&
+        listener.filter.types.includes('main_frame'),
+    ),
+    'Firefox capture listener uses blocking response headers on document requests',
+  );
+  assert(vm.runInContext('ext === browser', harness.sandbox), 'Firefox uses the browser promise namespace');
+
+  const blockedBefore = harness.fetchCalls.length;
+  const blocked = await harness.listeners.firefoxBlockingCapture({
+    url: 'https://cdn.example.com/download',
+    type: 'main_frame',
+    tabId: 42,
+    originUrl: 'https://blocked.example/page',
+    responseHeaders: [
+      { name: 'Content-Disposition', value: 'attachment; filename="blocked.zip"' },
+      { name: 'Content-Type', value: 'application/octet-stream' },
+    ],
+  });
+  assert(!blocked.cancel, 'blocking capture honors the never-capture host list');
+  assert(harness.fetchCalls.length === blockedBefore, 'blocked response is not enqueued');
+
+  const media = await harness.listeners.firefoxBlockingCapture({
+    url: 'https://cdn.example.com/media.zip',
+    type: 'media',
+    tabId: 42,
+    originUrl: 'https://page.example/watch',
+    responseHeaders: [
+      { name: 'Content-Disposition', value: 'attachment; filename="media.zip"' },
+      { name: 'Content-Type', value: 'application/octet-stream' },
+    ],
+  });
+  assert(!media.cancel, 'media element traffic is never cancelled as a download');
+
+  const captured = await harness.listeners.firefoxBlockingCapture({
+    url: 'https://cdn.example.com/download?id=1',
+    type: 'main_frame',
+    tabId: 42,
+    originUrl: 'https://page.example/start',
+    responseHeaders: [
+      { name: 'Content-Disposition', value: "attachment; filename*=UTF-8''release%20x.zip" },
+      { name: 'Content-Type', value: 'application/octet-stream' },
+    ],
+  });
+  assert(captured.cancel === true, 'attachment response is cancelled before Firefox writes it');
+  await tick(100);
+  const post = harness.fetchCalls.find((call) => call.url.endsWith('/api/add'));
+  assert(post, 'blocking capture enqueues through the shared hijack path');
+  assert(post.body.filename === 'release x.zip', `RFC 5987 filename decoded, got ${post.body.filename}`);
+  assert(post.body.referrer === 'https://page.example/start', 'webRequest origin becomes the referrer');
+  assert(harness.cancels.length === 0, 'primary webRequest capture has no browser download row to cancel');
+}
+
+{
+  const harness = makeBackgroundHarness({ falconCaptureExtensions: 'zip' }, { firefox: true });
+  await backgroundReady(harness);
+  harness.rows.set(50, { id: 50, state: 'in_progress', filename: '' });
+  harness.listeners.created({
+    id: 50,
+    url: 'https://files.example.com/fallback.zip',
+    finalUrl: 'https://files.example.com/fallback.zip',
+    referrer: 'https://files.example.com/page',
+    filename: '',
+  });
+  await tick(25);
+  assert(harness.cancels.includes(50), 'Firefox fallback cancels the browser download early');
+  assert(
+    !harness.fetchCalls.some((call) => call.url.endsWith('/api/add')),
+    'fallback waits briefly for the resolved filename before enqueueing',
+  );
+  harness.rows.get(50).filename = 'server-name.zip';
+  harness.listeners.downloadChanged({ id: 50, filename: { current: 'server-name.zip' } });
+  await tick(160);
+  const post = harness.fetchCalls.find((call) => call.url.endsWith('/api/add'));
+  assert(post, 'Firefox fallback enqueues after filename resolution');
+  assert(post.body.filename === 'server-name.zip', `fallback keeps the server filename, got ${post.body.filename}`);
+  assert(harness.erased.includes(50), 'fallback purges the cancelled browser row after the handoff');
+}
+
 // Code pairing: 202 (waiting) → 200 (approved) stores the token; 403 forgets the code.
-async function runPairing(responses) {
+async function runPairing(responses, env = {}) {
   const store = {};
   const notes = [];
   const calls = [];
@@ -1064,6 +1190,23 @@ async function runPairing(responses) {
       return { ok: false, status: 404, json: async () => ({}) };
     },
   };
+  const firefoxInternalId = 'e3225586-81a0-47c3-8612-d95fb0c2a609';
+  if (env.firefox) {
+    sandbox2.chrome.runtime.id = 'falcon@falcondm.app';
+    sandbox2.browser = {
+      ...sandbox2.chrome,
+      runtime: {
+        ...sandbox2.chrome.runtime,
+        getBrowserInfo: async () => ({ name: 'Firefox', version: '136.0' }),
+      },
+    };
+  }
+  sandbox2.chrome.i18n.getMessage = (key) =>
+    key === '@@extension_id'
+      ? env.firefox
+        ? firefoxInternalId
+        : sandbox2.chrome.runtime.id
+      : '';
   sandbox2.globalThis = sandbox2;
   vm.createContext(sandbox2);
   for (const file of ['media-utils.js', 'shared.js', 'pairing.js']) {
@@ -1101,6 +1244,22 @@ async function runPairing(responses) {
   assert(!declined.store.falconPairCode, 'declined code is discarded for a fresh one');
 }
 
+{
+  const approved = await runPairing(
+    [
+      { status: 202, body: { pending: true } },
+      { status: 200, body: { ok: true, token: 'tok-firefox' } },
+    ],
+    { firefox: true },
+  );
+  assert(approved.result === 'tok-firefox', 'Firefox pairing returns the token');
+  assert(
+    approved.calls[0].extension_id === 'e3225586-81a0-47c3-8612-d95fb0c2a609',
+    `Firefox pairing uses the moz-extension Origin UUID, got ${approved.calls[0].extension_id}`,
+  );
+  assert(approved.calls[0].extension_id !== 'falcon@falcondm.app', 'Gecko runtime.id is not the Origin id');
+}
+
 let live = false;
 try {
   const health = await fetch('http://127.0.0.1:14201/api/health', {
@@ -1108,7 +1267,7 @@ try {
   });
   if (health.ok) {
     const body = await health.json();
-    assert(body.ok === true && body.service === 'falcon-dm' && body.protocol === 2, 'health payload');
+    assert(body.ok === true && body.service === 'falcon-dm' && body.protocol === 3, 'health payload');
     live = true;
   }
 } catch (_) {}

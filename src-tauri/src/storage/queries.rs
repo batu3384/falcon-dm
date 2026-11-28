@@ -1,6 +1,6 @@
 use super::database::{Database, DatabaseError, Result};
 use super::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
-use crate::util::{open_cookies, seal_cookies, youtube_dedup_base};
+use crate::util::{open_cookies, seal_cookies, split_falcon_format, youtube_dedup_base};
 use chrono::Utc;
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Row, TransactionBehavior};
@@ -99,18 +99,25 @@ impl Database {
             .map_err(DatabaseError::from)?;
         let existing = if let Some(base) = youtube_dedup_base(&download.url) {
             // `_`/`%` in watch IDs are LIKE wildcards unless escaped (F-86).
+            // Dedupe is format-aware: the same video may be queued in several
+            // quality variants, but never twice in the same variant.
             let fmt_pattern = format!("{}#falconfmt=%", like_escape(&base));
-            tx.query_row(
-                "SELECT id FROM downloads
+            let mut stmt = tx.prepare(
+                "SELECT id, url FROM downloads
                  WHERE (url = ?1 OR url = ?2 OR url LIKE ?3 ESCAPE '\\')
                    AND status IN ('Queued', 'Downloading', 'Paused', 'Merging')
                    AND archived = 0
-                 ORDER BY id DESC
-                 LIMIT 1",
-                params![download.url, base, fmt_pattern],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
+                 ORDER BY id DESC",
+            )?;
+            let rows = stmt
+                .query_map(params![download.url, base, fmt_pattern], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let new_fmt = split_falcon_format(&download.url).1;
+            rows.iter()
+                .find(|(_, existing_url)| split_falcon_format(existing_url).1 == new_fmt)
+                .map(|(id, _)| *id)
         } else {
             tx.query_row(
                 "SELECT id FROM downloads

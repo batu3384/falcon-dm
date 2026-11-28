@@ -59,12 +59,12 @@ $('title').textContent = t('optionsTitle', 'Falcon DM');
 $('desc').textContent = t('optionsDesc', 'Send downloads from your browser to Falcon DM.');
 $('conn-title').textContent = t('optionsConnection', 'Connection');
 $('id-label').textContent = t('optionsExtensionId', 'Extension ID');
-$('extension-id').textContent = chrome.runtime.id;
+$('extension-id').textContent = extensionOriginId();
 $('copy-id').textContent = t('optionsCopyId', 'Copy');
 $('capture-title').textContent = t('optionsCapture', 'Downloads');
 $('capture-label').textContent = t('popupCapture', 'Send browser downloads to Falcon DM');
-$('capture-hint').textContent = t('popupCaptureHint', 'When off, Chrome downloads files itself.');
-$('fallback-label').textContent = t('optionsFallback', 'Let Chrome download when Falcon DM is closed');
+$('capture-hint').textContent = t('popupCaptureHint', 'When off, the browser downloads files itself.');
+$('fallback-label').textContent = t('optionsFallback', 'Let the browser download when Falcon DM is closed');
 $('fallback-hint').textContent = t(
   'optionsFallbackHint',
   'When off, a download Falcon DM cannot take is cancelled — click the link again once Falcon DM is running.',
@@ -90,7 +90,7 @@ $('blocked-sites-hint').textContent = t(
 
 async function loadCaptureRules() {
   try {
-    const rules = await chrome.storage.local.get({
+    const rules = await ext.storage.local.get({
       falconCaptureExtensions: defaultCaptureExtensionsText(),
       falconCaptureBlockedHosts: '',
     });
@@ -105,7 +105,7 @@ function bindCaptureRule(id, storageKey, normalize) {
     const normalized = normalize(el.value);
     if (rewrite) el.value = normalized.text;
     try {
-      await chrome.storage.local.set({ [storageKey]: normalized.text });
+      await ext.storage.local.set({ [storageKey]: normalized.text });
     } catch (_) {
       notice(t('optionsRulesSaveFailed', 'Could not save capture rules'));
     }
@@ -129,7 +129,7 @@ $('pair').addEventListener('click', async () => {
 
 $('copy-id').addEventListener('click', async () => {
   try {
-    await navigator.clipboard.writeText(chrome.runtime.id);
+    await navigator.clipboard.writeText(extensionOriginId());
     notice(t('optionsIdCopied', 'Extension ID copied'));
   } catch (_) {
     notice(t('optionsCopyFailed', 'Could not copy'));

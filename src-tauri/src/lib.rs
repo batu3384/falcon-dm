@@ -47,11 +47,46 @@ pub(crate) fn token_matches(provided: &str, expected: &str) -> bool {
 }
 
 pub(crate) fn extension_id_from_origin(origin: &str) -> Option<&str> {
-    origin.strip_prefix("chrome-extension://").or_else(|| origin.strip_prefix("edge-extension://"))
+    origin
+        .strip_prefix("chrome-extension://")
+        .or_else(|| origin.strip_prefix("edge-extension://"))
+        .or_else(|| origin.strip_prefix("moz-extension://"))
+}
+
+fn is_guid_extension_id(id: &str) -> bool {
+    let inner = id.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(id);
+    if inner.len() != 36 {
+        return false;
+    }
+    inner.bytes().enumerate().all(|(index, byte)| {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit()
+        }
+    })
+}
+
+fn is_gecko_email_extension_id(id: &str) -> bool {
+    if id.len() > 80 {
+        return false;
+    }
+    let Some((local, domain)) = id.split_once('@') else {
+        return false;
+    };
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+    };
+    !domain.contains('@') && valid_part(local) && valid_part(domain)
 }
 
 pub(crate) fn is_valid_extension_id(id: &str) -> bool {
-    id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+    (id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)))
+        || is_guid_extension_id(id)
+        || is_gecko_email_extension_id(id)
 }
 
 /// Canonical form of an HTTP(S) URL for storage: lowercase scheme and host,
@@ -146,6 +181,7 @@ pub(crate) fn notify_download(app: &AppHandle, db: &Database, id: i64, success: 
 pub(crate) fn remove_download_artifacts(save_path: &str, filename: &str, id: i64) {
     download::http::remove_artifacts(save_path, filename, id);
     download::hls::remove_artifacts(id);
+    download::dash::remove_artifacts(id);
     download::ytdlp::remove_artifacts(save_path, id);
 }
 
@@ -565,7 +601,18 @@ pub(crate) fn check_api_token(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Origin required — blocks bare curl with stolen token (must forge extension Origin + allowlist).
+    // CLI path: valid token + explicit nonbrowser marker + no Origin header at
+    // all. A cross-origin browser POST carries Origin, and `X-Falcon-Client`
+    // is a custom header outside the CORS allowlist, so a malicious page cannot
+    // produce this combination — its preflight fails before the request is sent.
+    // The 0600 same-user settings token remains the secret boundary. Requests
+    // shaped like extension traffic (any Origin, even an empty or invalid one)
+    // continue through the stricter Origin + allowlist path below.
+    let cli_client = headers.get("x-falcon-client").and_then(|v| v.to_str().ok()) == Some("cli");
+    if origin.is_none() && !headers.contains_key("origin") && cli_client {
+        return Ok(());
+    }
+
     let origin = origin.filter(|s| !s.is_empty()).ok_or(StatusCode::FORBIDDEN)?;
     let ext_id = extension_id_from_origin(origin).ok_or(StatusCode::FORBIDDEN)?;
     if !is_valid_extension_id(ext_id) {
@@ -594,17 +641,37 @@ mod tests {
 
     #[test]
     fn extension_origin_must_contain_a_valid_id() {
+        let chrome_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let firefox_uuid = "e3225586-81a0-47c3-8612-d95fb0c2a609";
         assert_eq!(
             extension_id_from_origin("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            Some(chrome_id)
+        );
+        assert_eq!(
+            extension_id_from_origin("moz-extension://e3225586-81a0-47c3-8612-d95fb0c2a609"),
+            Some(firefox_uuid)
         );
         assert!(extension_id_from_origin("https://example.com").is_none());
-        assert!(
-            extension_id_from_origin("moz-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_none()
-        );
-        assert!(!is_valid_extension_id("short"));
-        assert!(!is_valid_extension_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
-        assert!(parse_extension_id(" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ").is_ok());
+        assert!(is_valid_extension_id(chrome_id));
+        assert!(is_valid_extension_id(firefox_uuid));
+        assert!(is_valid_extension_id("{E3225586-81A0-47C3-8612-D95FB0C2A609}"));
+        assert!(is_valid_extension_id("falcon@falcondm.app"));
+        assert!(parse_extension_id(" falcon@falcondm.app ").is_ok());
+        for invalid in [
+            "",
+            "short",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "e3225586-81a0-47c3-8612-d95fb0c2a60z",
+            "falcon @falcondm.app",
+            "falcon@falcondm.app/path",
+            "falcon@falcondm..app\n",
+            "@falcondm.app",
+            "falcon@",
+            "falcon@@falcondm.app",
+        ] {
+            assert!(!is_valid_extension_id(invalid), "{invalid:?} must be rejected");
+        }
+        assert!(!is_valid_extension_id(&format!("{}@x", "a".repeat(80))));
         assert!(parse_extension_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err());
     }
 
@@ -741,7 +808,15 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-falcon-token", token.parse().unwrap());
         assert!(check_api_token(&headers, &state, Some(&origin)).is_ok());
+        let firefox_ext = "e3225586-81a0-47c3-8612-d95fb0c2a609";
+        let firefox_state = test_app_state(token, firefox_ext);
+        let firefox_origin = format!("moz-extension://{firefox_ext}");
+        assert!(check_api_token(&headers, &firefox_state, Some(&firefox_origin)).is_ok());
         assert_eq!(check_api_token(&headers, &state, None), Err(StatusCode::FORBIDDEN));
+        assert_eq!(
+            check_api_token(&HeaderMap::new(), &state, Some(&origin)),
+            Err(StatusCode::UNAUTHORIZED)
+        );
         let unknown = test_app_state(token, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert_eq!(check_api_token(&headers, &unknown, Some(&origin)), Err(StatusCode::FORBIDDEN));
         let mut bad = HeaderMap::new();
@@ -752,5 +827,50 @@ mod tests {
             check_api_token(&headers, &legacy, Some(&origin)),
             Err(StatusCode::UNAUTHORIZED)
         );
+    }
+
+    #[test]
+    fn cli_auth_requires_valid_token_exact_client_header_and_no_origin() {
+        let ext = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token = "cli-live-token";
+        let state = test_app_state(token, ext);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-falcon-token", token.parse().unwrap());
+        headers.insert("x-falcon-client", "cli".parse().unwrap());
+        assert!(check_api_token(&headers, &state, None).is_ok());
+
+        let mut wrong_client = headers.clone();
+        wrong_client.insert("x-falcon-client", "curl".parse().unwrap());
+        assert_eq!(check_api_token(&wrong_client, &state, None), Err(StatusCode::FORBIDDEN));
+
+        let mut bad_token = headers.clone();
+        bad_token.insert("x-falcon-token", "wrong".parse().unwrap());
+        assert_eq!(check_api_token(&bad_token, &state, None), Err(StatusCode::UNAUTHORIZED));
+
+        let mut no_client = headers.clone();
+        no_client.remove("x-falcon-client");
+        assert_eq!(check_api_token(&no_client, &state, None), Err(StatusCode::FORBIDDEN));
+
+        // Any Origin at all selects the extension path; the CLI marker never weakens it.
+        let unknown_origin = "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert_eq!(
+            check_api_token(&headers, &state, Some(unknown_origin)),
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(check_api_token(&headers, &state, Some("")), Err(StatusCode::FORBIDDEN));
+
+        // Even undecodable Origin bytes count as an Origin header: they must not
+        // collapse into the no-Origin CLI path through `origin_of`'s string conversion.
+        let mut opaque_origin = headers.clone();
+        opaque_origin.insert(
+            "origin",
+            axum::http::HeaderValue::from_bytes(&[0xff]).expect("opaque header bytes"),
+        );
+        assert_eq!(check_api_token(&opaque_origin, &state, None), Err(StatusCode::FORBIDDEN));
+
+        // Extension-style auth remains valid with the same token, even when the
+        // optional client marker is present.
+        let origin = format!("chrome-extension://{ext}");
+        assert!(check_api_token(&headers, &state, Some(&origin)).is_ok());
     }
 }

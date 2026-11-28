@@ -1062,7 +1062,33 @@ mod tests {
     }
 
     #[test]
-    fn insert_download_deduped_still_collapses_same_watch_format_fragment() {
+    fn insert_download_deduped_collapses_same_watch_same_format() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-dm-fmt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap().to_string();
+
+        let mut first = create_test_download("one.mp4");
+        first.url = "https://www.youtube.com/watch?v=abc_def%ghi#falconfmt=best".into();
+        first.status = DownloadStatus::Downloading;
+        first.save_path = save.clone();
+        let first_id = db.insert_download(&first).unwrap();
+
+        let mut second = create_test_download("two.mp4");
+        second.url = "https://www.youtube.com/watch?v=abc_def%ghi#falconfmt=best".into();
+        second.status = DownloadStatus::Queued;
+        second.save_path = save;
+        match db.insert_download_deduped(&mut second).unwrap() {
+            crate::storage::InsertDownloadResult::Existing(id) => assert_eq!(id, first_id),
+            crate::storage::InsertDownloadResult::Created(_) => {
+                panic!("same watch URL with the same format should dedupe")
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn insert_download_deduped_collapses_formatless_watch_pair() {
         let db = Database::in_memory().unwrap();
         let dir = std::env::temp_dir().join(format!("falcon-dm-fmt-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1075,13 +1101,54 @@ mod tests {
         let first_id = db.insert_download(&first).unwrap();
 
         let mut second = create_test_download("two.mp4");
-        second.url = "https://www.youtube.com/watch?v=abcdefghijk#falconfmt=best".into();
+        second.url = "https://www.youtube.com/watch?v=abcdefghijk".into();
         second.status = DownloadStatus::Queued;
         second.save_path = save;
         match db.insert_download_deduped(&mut second).unwrap() {
             crate::storage::InsertDownloadResult::Existing(id) => assert_eq!(id, first_id),
             crate::storage::InsertDownloadResult::Created(_) => {
-                panic!("same watch URL with format fragment should dedupe")
+                panic!("identical formatless watch URLs should dedupe")
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn insert_download_deduped_allows_same_watch_different_format() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-dm-fmt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap().to_string();
+
+        let mut first = create_test_download("one.mp4");
+        first.url =
+            "https://www.youtube.com/watch?v=abcdefghijk#falconfmt=best%5Bheight%3C%3D720%5D"
+                .into();
+        first.status = DownloadStatus::Downloading;
+        first.save_path = save.clone();
+        db.insert_download(&first).unwrap();
+
+        let mut second = create_test_download("two.mp4");
+        second.url =
+            "https://www.youtube.com/watch?v=abcdefghijk#falconfmt=best%5Bheight%3C%3D1080%5D"
+                .into();
+        second.status = DownloadStatus::Queued;
+        second.save_path = save;
+        match db.insert_download_deduped(&mut second).unwrap() {
+            crate::storage::InsertDownloadResult::Created(_) => {}
+            crate::storage::InsertDownloadResult::Existing(_) => {
+                panic!("same watch URL in a different quality must be allowed")
+            }
+        }
+
+        let mut third = create_test_download("three.mp4");
+        third.url = "https://www.youtube.com/watch?v=abcdefghijk".into();
+        third.status = DownloadStatus::Queued;
+        third.save_path = dir.to_str().unwrap().to_string();
+        match db.insert_download_deduped(&mut third).unwrap() {
+            crate::storage::InsertDownloadResult::Created(_) => {}
+            crate::storage::InsertDownloadResult::Existing(_) => {
+                panic!("formatless watch URL must not dedupe against formatted rows")
             }
         }
         std::fs::remove_dir_all(dir).unwrap();

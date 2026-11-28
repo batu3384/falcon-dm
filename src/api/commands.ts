@@ -49,6 +49,8 @@ const ERROR_CODES: Record<string, string> = {
   ERR_FFMPEG_MISSING: 'errors.ffmpeg_missing',
   ERR_YTDLP_MISSING: 'errors.ytdlp_missing',
   ERR_HLS_LIVE: 'errors.hls_live',
+  ERR_DASH_LIVE: 'errors.dash_live',
+  ERR_DASH_DRM: 'errors.dash_drm',
   ERR_REMOTE_CHANGED: 'errors.remote_changed',
   ERR_FILE_MISSING: 'errors.file_missing',
   ERR_PARTIAL_RESPONSE: 'errors.partial_response',

@@ -123,7 +123,7 @@
     "message": "Falcon DM çevrimdışı — indirme engellendi"
   },
   "interceptQueued": {
-    "message": "Chrome indirmesi iptal — Falcon kuyruğuna alındı (dosya Falcon'da, Chrome İndirilenler'de değil)"
+    "message": "Tarayıcı indirmesi iptal — Falcon kuyruğuna alındı (dosya Falcon'da, tarayıcı İndirilenler'de değil)"
   },
   "labelFilename": {
     "message": "Dosya adı"
@@ -237,7 +237,7 @@
     "message": "İndirmeler"
   },
   "optionsFallback": {
-    "message": "Falcon DM kapalıyken Chrome indirsin"
+    "message": "Falcon DM kapalıyken tarayıcı indirsin"
   },
   "optionsFallbackHint": {
     "message": "Kapalıyken Falcon DM'in devralamadığı indirme iptal edilir — Falcon DM çalışırken bağlantıya yeniden tıklayın."
@@ -315,7 +315,7 @@
     "message": "Tarayıcı indirmelerini Falcon DM'e gönder"
   },
   "popupCaptureHint": {
-    "message": "Kapalıyken dosyaları Chrome kendisi indirir."
+    "message": "Kapalıyken dosyaları tarayıcı kendisi indirir."
   },
   "popupStateChecking": {
     "message": "Denetleniyor…"

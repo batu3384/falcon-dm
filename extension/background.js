@@ -1,4 +1,4 @@
-importScripts('media-utils.js', 'shared.js', 'pairing.js', 'api.js');
+// Loaded after media-utils.js, shared.js, pairing.js and api.js (see manifest.json).
 
 const GRAB_BATCH_LIMIT = 100;
 
@@ -69,6 +69,71 @@ function basenameFilename(raw) {
   return parts[parts.length - 1] || s;
 }
 
+function splitHeaderParameters(value) {
+  const parts = [];
+  let current = '';
+  let quoted = false;
+  let escaped = false;
+  for (const ch of String(value || '')) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && quoted) {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') quoted = !quoted;
+    if (ch === ';' && !quoted) {
+      parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  parts.push(current);
+  return parts;
+}
+
+function unquoteHeaderValue(value) {
+  const trimmed = String(value || '').trim();
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1).replace(/\\(.)/g, '$1');
+  }
+  return trimmed;
+}
+
+function decodeRfc5987Value(value) {
+  const match = String(value || '').match(/^[^']*'[^']*'(.*)$/);
+  const encoded = match ? match[1] : String(value || '');
+  try {
+    return decodeURIComponent(encoded);
+  } catch (_) {
+    return encoded;
+  }
+}
+
+function contentDispositionFilename(header) {
+  const parts = splitHeaderParameters(header);
+  let plain = '';
+  let extended = '';
+  for (const part of parts.slice(1)) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const key = part.slice(0, eq).trim().toLowerCase();
+    const value = unquoteHeaderValue(part.slice(eq + 1));
+    if (key === 'filename*') extended = decodeRfc5987Value(value);
+    else if (key === 'filename') plain = value;
+  }
+  return basenameFilename(extended || plain);
+}
+
+function isAttachmentDisposition(header) {
+  return splitHeaderParameters(header)[0].trim().toLowerCase() === 'attachment';
+}
+
 function isPublicEnqueueUrl(url) {
   if (!url || !/^https?:/i.test(String(url))) return false;
   if (self.FalconMedia && self.FalconMedia.isPublicHttpUrl) {
@@ -114,7 +179,7 @@ async function getPageTitle(pageUrl) {
   if (!pageUrl) return '';
   try {
     const key = pageUrl.split('#')[0];
-    const tabs = await chrome.tabs.query({});
+    const tabs = await ext.tabs.query({});
     const tab = tabs.find((t) => t.url && t.url.split('#')[0] === key);
     return (tab && tab.title) || '';
   } catch (_) {
@@ -122,7 +187,7 @@ async function getPageTitle(pageUrl) {
   }
 }
 
-async function resolveHijackFilename(item) {
+async function resolveHijackFilename(item, waitMs = 0) {
   const FM = self.FalconMedia;
   const sourceUrl = item.url || '';
   const pick = (raw) => {
@@ -136,12 +201,20 @@ async function resolveHijackFilename(item) {
   if (name) return name;
 
   if (item.id != null) {
-    try {
-      const rows = await chrome.downloads.search({ id: item.id });
-      const row = rows && rows[0];
-      name = pick(row && row.filename);
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      try {
+        const rows = await ext.downloads.search({ id: item.id });
+        const row = rows && rows[0];
+        name = pick(row && row.filename);
+        if (name) return name;
+      } catch (_) {}
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const changed = await waitForFilenameChange(item.id, Math.min(120, remaining));
+      name = pick(changed);
       if (name) return name;
-    } catch (_) {}
+    }
   }
 
   try {
@@ -154,7 +227,7 @@ async function resolveHijackFilename(item) {
   return '';
 }
 
-async function buildHijackEnqueue(item) {
+async function buildHijackEnqueue(item, opts = {}) {
   const pageUrl = item.referrer || item.url;
   const FM = self.FalconMedia;
   const hijack = FM && FM.hijackPayloadForFalcon
@@ -162,7 +235,9 @@ async function buildHijackEnqueue(item) {
     : { url: item.url, format: null };
   const urlRewritten = hijack.url !== item.url;
 
-  let filename = takePendingChromeFilename(item) || (await resolveHijackFilename(item));
+  let filename =
+    takePendingChromeFilename(item) ||
+    (await resolveHijackFilename(item, opts.waitForFilename ? FILENAME_WAIT_MS : 0));
 
   // Title rewrite only when URL becomes a YouTube watch page and Chrome had no real name.
   if (
@@ -172,9 +247,9 @@ async function buildHijackEnqueue(item) {
     FM.defaultFilename
   ) {
     const pageTitle = await getPageTitle(pageUrl);
-    const ext =
+    const fileExt =
       FM.guessExtensionFromDownloadUrl ? FM.guessExtensionFromDownloadUrl(item.url) : 'mp4';
-    filename = FM.defaultFilename(pageTitle, { ext });
+    filename = FM.defaultFilename(pageTitle, { ext: fileExt });
   }
 
   if (!filename) {
@@ -190,10 +265,44 @@ const pendingChromeNames = new Map();
 const abortedBrowserIds = new Set();
 const hijackWatchIds = new Set();
 const hijackInFlight = new Set();
+const deferredPurgeIds = new Set();
 /** onCreated often fires before Chrome knows the real filename — wait for onDeterminingFilename. */
 const awaitingFilename = new Map(); // id -> timeoutId
 const HIJACK_DEDUP_MS = 8000;
 const FILENAME_WAIT_MS = 450;
+const filenameWaiters = new Map(); // Firefox fallback: id -> pending onChanged watchers
+
+function waitForFilenameChange(id, timeoutMs) {
+  return new Promise((resolve) => {
+    let waiters = filenameWaiters.get(id);
+    if (!waiters) {
+      waiters = new Set();
+      filenameWaiters.set(id, waiters);
+    }
+    const waiter = { resolve, timer: 0 };
+    waiter.timer = setTimeout(() => {
+      const current = filenameWaiters.get(id);
+      if (current) {
+        current.delete(waiter);
+        if (!current.size) filenameWaiters.delete(id);
+      }
+      resolve('');
+    }, timeoutMs);
+    waiters.add(waiter);
+  });
+}
+
+function notifyFilenameWaiters(delta) {
+  const name = delta && delta.filename && delta.filename.current;
+  if (!name) return;
+  const waiters = filenameWaiters.get(delta.id);
+  if (!waiters) return;
+  filenameWaiters.delete(delta.id);
+  for (const waiter of waiters) {
+    clearTimeout(waiter.timer);
+    waiter.resolve(name);
+  }
+}
 
 function hijackKey(item) {
   if (item && item.id != null) return `id:${item.id}`;
@@ -260,7 +369,7 @@ function stashPendingChromeFilename(item) {
 /** Delete Chrome history row + any file already written to disk. */
 function purgeBrowserDownload(id) {
   if (id == null) return;
-  chrome.downloads
+  ext.downloads
     .search({ id })
     .then((rows) => {
       const row = rows && rows[0];
@@ -296,7 +405,16 @@ function purgeBrowserDownload(id) {
     });
 }
 
-/** Cancel Chrome immediately (IDM-style). purge deletes any partial/complete file. */
+/** Cancellation without purge: Firefox reads the row briefly for a late filename. */
+function cancelBrowserDownloadOnly(id) {
+  if (id == null) return;
+  hijackWatchIds.add(id);
+  if (abortedBrowserIds.has(id)) return;
+  abortedBrowserIds.add(id);
+  chrome.downloads.cancel(id, () => void chrome.runtime.lastError);
+}
+
+/** Cancel the browser download immediately (IDM-style). purge deletes partial/complete files. */
 function abortAndEraseBrowserDownload(id) {
   if (id == null) return;
   hijackWatchIds.add(id);
@@ -327,10 +445,14 @@ async function runHijack(item, opts = {}) {
 
   hijackInFlight.add(key);
   const failClosed = await getInterceptFailClosed();
+  const deferBrowserPurge = !!opts.deferBrowserPurge;
+  const finishBrowserDownload = () => {
+    if (!deferBrowserPurge) abortAndEraseBrowserDownload(item.id);
+  };
   let filename = '';
 
   try {
-    const built = await buildHijackEnqueue(item);
+    const built = await buildHijackEnqueue(item, opts);
     filename = built.filename;
     const { pageUrl, hijack } = built;
     const cookieLookup = cookieLookupUrl(item.url, pageUrl);
@@ -345,7 +467,7 @@ async function runHijack(item, opts = {}) {
       cookie_url: cookieLookup,
       format: hijack.format || undefined,
     });
-    abortAndEraseBrowserDownload(item.id);
+    finishBrowserDownload();
     if (notifySuccess) {
       notify(
         'Falcon DM',
@@ -355,13 +477,13 @@ async function runHijack(item, opts = {}) {
   } catch (e) {
     console.error(e);
     if (failClosed) {
-      abortAndEraseBrowserDownload(item.id);
+      finishBrowserDownload();
       notify(
         'Falcon DM',
         e.message || msg('interceptBlocked', 'Falcon DM offline — download blocked'),
       );
     } else {
-      abortAndEraseBrowserDownload(item.id);
+      finishBrowserDownload();
       try {
         await fallbackBrowserDownload(item, filename);
         notify(
@@ -377,8 +499,106 @@ async function runHijack(item, opts = {}) {
       }
     }
   } finally {
+    if (deferBrowserPurge) {
+      deferredPurgeIds.delete(item.id);
+      purgeBrowserDownload(item.id);
+    }
     hijackInFlight.delete(key);
   }
+}
+
+const supportsDeterminingFilename = !!(
+  chrome.downloads && chrome.downloads.onDeterminingFilename
+);
+const isFirefoxRuntime =
+  typeof browser !== 'undefined' &&
+  !!(browser.runtime && typeof browser.runtime.getBrowserInfo === 'function');
+const useFirefoxBlockingCapture = isFirefoxRuntime && !supportsDeterminingFilename;
+
+/* Types Firefox cannot normally render inline. Renderable pdf/video/audio stay out:
+   navigation alone is not proof that the user asked for a download. */
+const DOWNLOADABLE_RESPONSE_TYPES = new Set([
+  'application/octet-stream',
+  'binary/octet-stream',
+  'application/x-binary',
+  'application/x-download',
+  'application/x-unknown-content-type',
+  'application/zip',
+  'application/x-zip-compressed',
+  'application/x-7z-compressed',
+  'application/x-rar-compressed',
+  'application/vnd.rar',
+  'application/x-tar',
+  'application/x-gtar',
+  'application/gzip',
+  'application/x-gzip',
+  'application/x-bzip',
+  'application/x-bzip2',
+  'application/x-xz',
+  'application/x-msdownload',
+  'application/x-ms-dos-executable',
+  'application/vnd.microsoft.portable-executable',
+  'application/x-msi',
+  'application/x-ms-installer',
+  'application/x-apple-diskimage',
+  'application/x-debian-package',
+  'application/vnd.debian.binary-package',
+  'application/x-rpm',
+  'application/x-iso9660-image',
+  'application/x-bittorrent',
+]);
+const FIREFOX_DOCUMENT_REQUEST_TYPES = new Set(['main_frame', 'sub_frame', 'object']);
+
+function isDownloadableResponseType(contentType) {
+  const base = String(contentType || '').split(';')[0].trim().toLowerCase();
+  return DOWNLOADABLE_RESPONSE_TYPES.has(base);
+}
+
+function firefoxCaptureItemFromResponse(details) {
+  if (!details || details.tabId == null || details.tabId < 0) return null;
+  if (!FIREFOX_DOCUMENT_REQUEST_TYPES.has(details.type || 'main_frame')) return null;
+  const url = details.url || '';
+  if (!isPublicEnqueueUrl(url)) return null;
+
+  const disposition = headerValue(details.responseHeaders, 'content-disposition');
+  const type = headerValue(details.responseHeaders, 'content-type');
+  const attachment = isAttachmentDisposition(disposition);
+  if (!attachment && !isDownloadableResponseType(type)) return null;
+
+  const item = {
+    url,
+    finalUrl: url,
+    referrer: details.originUrl || details.documentUrl || '',
+    filename: contentDispositionFilename(disposition) || urlBasename(url),
+  };
+  return automaticCaptureAllowed(item) ? item : null;
+}
+
+async function captureFirefoxResponse(details) {
+  try {
+    await prefsReady;
+    if (interceptPaused) return {};
+    const item = firefoxCaptureItemFromResponse(details);
+    if (!item) return {};
+    if (hijackRecentlyHandled(item) || hijackInFlight.has(hijackKey(item))) {
+      // Redirect/duplicate bytes must not become a second browser copy.
+      return { cancel: true };
+    }
+    markHijackStarted(item);
+    runHijack(item, { skipDedup: true }).catch((err) => console.error(err));
+    return { cancel: true };
+  } catch (err) {
+    console.error(err);
+    return {};
+  }
+}
+
+if (useFirefoxBlockingCapture) {
+  chrome.webRequest.onHeadersReceived.addListener(
+    captureFirefoxResponse,
+    { urls: ['<all_urls>'], types: ['main_frame', 'sub_frame', 'object'] },
+    ['blocking', 'responseHeaders'],
+  );
 }
 
 async function notifyOverlayMedia(tabId) {
@@ -386,7 +606,7 @@ async function notifyOverlayMedia(tabId) {
   const injected = await ensureContentScript(tabId);
   if (!injected) return;
   try {
-    await chrome.tabs.sendMessage(tabId, { action: 'media_updated' });
+    await ext.tabs.sendMessage(tabId, { action: 'media_updated' });
   } catch (_) {
     /* ponytail: tab may be navigating — FAB resyncs on next sniff */
   }
@@ -435,14 +655,15 @@ chrome.webRequest.onHeadersReceived.addListener(
   ['responseHeaders'],
 );
 
-chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+if (chrome.downloads.onDeterminingFilename)
+  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   const run = () => {
     if (interceptPaused) {
       suggest();
       return;
     }
     // Fail-open fallback uses chrome.downloads.download — must not re-hijack our own item.
-    if (item.byExtensionId === chrome.runtime.id) {
+    if (isOwnBrowserDownload(item)) {
       suggest();
       return;
     }
@@ -480,9 +701,22 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   run();
 });
 
+function captureFirefoxCreatedDownload(item) {
+  markHijackStarted(item);
+  stashPendingChromeFilename(item);
+  if (item.id != null) deferredPurgeIds.add(item.id);
+  // Cancel before any filename wait: Firefox may already be writing partial bytes.
+  cancelBrowserDownloadOnly(item.id);
+  runHijack(item, {
+    skipDedup: true,
+    waitForFilename: true,
+    deferBrowserPurge: true,
+  }).catch((err) => console.error(err));
+}
+
 // onCreated fires before filename is known — never enqueue here (wrong URL basename).
 chrome.downloads.onCreated.addListener((item) => {
-  if (item.byExtensionId === chrome.runtime.id) return;
+  if (isOwnBrowserDownload(item)) return;
   if (!isPublicEnqueueUrl(item.url)) return;
   if (hijackInFlight.has(hijackKey(item)) || hijackWatchIds.has(item.id) || abortedBrowserIds.has(item.id)) {
     abortAndEraseBrowserDownload(item.id);
@@ -496,16 +730,21 @@ chrome.downloads.onCreated.addListener((item) => {
       abortAndEraseBrowserDownload(item.id);
       return;
     }
-    if (connectionState !== 'connected' && !(await appHealthy())) return;
-    // Wait briefly for onDeterminingFilename to supply the server filename.
-    scheduleCreatedBackup(item);
+    if (supportsDeterminingFilename) {
+      if (connectionState !== 'connected' && !(await appHealthy())) return;
+      // Wait briefly for onDeterminingFilename to supply the server filename.
+      scheduleCreatedBackup(item);
+      return;
+    }
+    captureFirefoxCreatedDownload(item);
   })().catch((err) => console.error(err));
 });
 
 chrome.downloads.onChanged.addListener((delta) => {
+  notifyFilenameWaiters(delta);
   if (delta.id == null || !hijackWatchIds.has(delta.id)) return;
   const state = delta.state && delta.state.current;
-  if (state === 'complete' || state === 'interrupted') {
+  if ((state === 'complete' || state === 'interrupted') && !deferredPurgeIds.has(delta.id)) {
     purgeBrowserDownload(delta.id);
   }
 });
@@ -570,7 +809,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         failClosed: interceptFailClosed,
         notifySuccess,
         pairCode: formatPairCode(visiblePairCode()),
-        extensionId: chrome.runtime.id,
+        extensionId: extensionOriginId(),
       });
       if (!(await appHealthy())) {
         setState('offline');
@@ -619,8 +858,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // user's hijack preference (previously a SW restart would reset to false).
     markPauseWrite();
     interceptPaused = next;
-    chrome.storage.local.set({ falconInterceptPaused: next }).catch(() => {});
-    chrome.storage.session.remove('falconInterceptPaused').catch(() => {});
+    ext.storage.local.set({ falconInterceptPaused: next }).catch(() => {});
+    ext.storage.session.remove('falconInterceptPaused').catch(() => {});
     sendResponse({ ok: true, paused: interceptPaused });
     return true;
   }
@@ -745,9 +984,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     };
 
     // Pull YouTube player_response from MAIN world (isolated world cannot see it)
-    const isYt = isYoutubePage(pageUrl) && tabId > -1 && chrome.scripting;
+    const isYt = isYoutubePage(pageUrl) && tabId > -1 && ext.scripting;
     if (isYt) {
-      chrome.scripting
+      ext.scripting
         .executeScript({
           target: { tabId },
           world: 'MAIN',

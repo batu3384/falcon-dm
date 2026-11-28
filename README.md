@@ -68,21 +68,28 @@ Resume is deliberately conservative. The state stores a strong ETag or Last-Modi
 
 When active work drains and no queued or paused rows remain, Falcon DM can do nothing, put the Mac to sleep, or run an executable script once. Failed downloads count as finished for this action. Scripts run directly, not through a shell, and must live in the user's home folder, `/opt/homebrew/bin` or `/usr/local/bin`. On macOS the app holds a `caffeinate` idle-sleep assertion only while workers are active.
 
-### Local API (browser extension)
+### Local API (browser extension and CLI)
 
 Axum serves `http://127.0.0.1:14201`:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/health` | Liveness (loopback, no token, `protocol: 2`) |
+| `GET /api/health` | Liveness (loopback, no token, `protocol: 3`) |
 | `POST /api/pair` | Extension pairing by 6-digit code (`200` token or `202` pending approval) |
 | `POST /api/ping` | Authenticated liveness for a paired extension |
-| `GET /api/downloads` | Live download rows for the popup |
+| `GET /api/downloads` | Last 8 live/recent rows for the popup |
+| `GET /api/downloads/all` | Filtered, paginated automation rows (`include=url` opt-in) |
+| `GET /api/stats` | Queue counters, current speed and disk/limit state |
 | `POST /api/intercept` | Media / captured browser download |
-| `POST /api/add` | Direct URL (for example grabber batch or context menu) |
+| `POST /api/add` | Direct URL (for example grabber batch, context menu or CLI) |
 | `POST /api/upload` | Blob media (32 MiB binary cap) |
+| `POST /api/pause`, `resume`, `remove` | Per-download queue control |
+| `POST /api/pause_all`, `resume_all` | Whole-queue control |
+| `POST /api/speed_limit` | Global or per-download speed cap |
 
-Authenticated requests require `X-Falcon-Token` and a paired `chrome-extension://` or `edge-extension://` Origin. Non-health API calls are rate-limited; uploads have an additional stricter bucket. Pairing approval is consumed after one token handoff, so re-pairing requires user approval again. See [extension/README.md](extension/README.md).
+Extension requests require `X-Falcon-Token` and a paired `chrome-extension://` or `edge-extension://` Origin. Scripts use the same token with `X-Falcon-Client: cli` and no Origin header; browsers cannot produce that combination cross-origin because the custom header is not CORS-allowed. Non-health API calls are rate-limited; uploads have an additional stricter bucket. Pairing approval is consumed after one token handoff, so re-pairing requires user approval again. See [extension/README.md](extension/README.md).
+
+`python3 scripts/falconctl.py` is a stdlib-only CLI for add/list/pause/resume/remove/limits/stats automation. It reads the token from the same-user `settings.json`; `--wake` can launch the app through `falcondm://wake` when the API is not listening yet.
 
 ## Build requirements
 

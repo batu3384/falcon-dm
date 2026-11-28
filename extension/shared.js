@@ -7,6 +7,20 @@ const REQUEST_TIMEOUT_MS = 10000;
 const HEALTH_TIMEOUT_MS = 4000;
 const PAIR_POLL_ATTEMPTS = 15;
 
+/** Firefox's Origin host is the per-install UUID exposed as @@extension_id, not runtime.id. */
+function extensionOriginId() {
+  try {
+    const internal = chrome.i18n.getMessage('@@extension_id');
+    if (internal) return internal;
+  } catch (_) {}
+  return (chrome.runtime && chrome.runtime.id) || '';
+}
+
+function isOwnBrowserDownload(item) {
+  const owner = item && item.byExtensionId;
+  return !!owner && (owner === chrome.runtime.id || owner === extensionOriginId());
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -31,7 +45,7 @@ function fetchWithTimeout(url, options, timeoutMs, label) {
 
 // Connection / UI state shared with popup + toolbar badge.
 // ponytail: MV3 service workers die after ~30s idle; in-memory prefs reset.
-// Pause + fail-closed live in chrome.storage.local so Chrome restart keeps them.
+// Pause + fail-closed live in storage.local so a browser restart keeps them.
 let connectionState = 'offline'; // "connected" | "pending" | "blocked" | "offline"
 let interceptPaused = false; // when true, automatic hijack is off (browser downloads natively)
 let interceptFailClosed = true; // default fail-closed: Chrome does not keep hijacked files
@@ -202,8 +216,8 @@ function applyCaptureBlockedHosts(input) {
 }
 
 try {
-  if (chrome.storage && chrome.storage.onChanged) {
-    chrome.storage.onChanged.addListener((changes, area) => {
+  if (ext.storage && ext.storage.onChanged) {
+    ext.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
       if (changes.falconCaptureExtensions) {
         captureExtensionsDirty = true;
@@ -239,32 +253,32 @@ function markNotifySuccessWrite() {
 
 const prefsReady = (async () => {
   try {
-    const { falconConnectionState } = await chrome.storage.session.get({
+    const { falconConnectionState } = await ext.storage.session.get({
       falconConnectionState: 'offline',
     });
-    const { falconInterceptFailClosed } = await chrome.storage.local.get({
+    const { falconInterceptFailClosed } = await ext.storage.local.get({
       falconInterceptFailClosed: true,
     });
-    const { falconNotifySuccess } = await chrome.storage.local.get({
+    const { falconNotifySuccess } = await ext.storage.local.get({
       falconNotifySuccess: false,
     });
-    const captureRulesBag = await chrome.storage.local.get({
+    const captureRulesBag = await ext.storage.local.get({
       falconCaptureExtensions: defaultCaptureExtensionsText(),
       falconCaptureBlockedHosts: '',
     });
-    const localPauseBag = await chrome.storage.local.get('falconInterceptPaused');
+    const localPauseBag = await ext.storage.local.get('falconInterceptPaused');
     const hasLocalPause = Object.hasOwn(localPauseBag, 'falconInterceptPaused');
     // Session is a one-shot migrate from the old SW-only pause. Explicit local
     // false (Resume) must win — defaulted get() treated Resume as "missing".
     let paused = hasLocalPause ? !!localPauseBag.falconInterceptPaused : false;
     if (!hasLocalPause) {
-      const sessionPause = await chrome.storage.session.get({ falconInterceptPaused: false });
+      const sessionPause = await ext.storage.session.get({ falconInterceptPaused: false });
       paused = !!sessionPause.falconInterceptPaused;
       if (paused) {
-        chrome.storage.local.set({ falconInterceptPaused: true }).catch(() => {});
+        ext.storage.local.set({ falconInterceptPaused: true }).catch(() => {});
       }
     }
-    chrome.storage.session.remove('falconInterceptPaused').catch(() => {});
+    ext.storage.session.remove('falconInterceptPaused').catch(() => {});
     if (!pauseDirty) {
       interceptPaused = paused;
     }
@@ -283,7 +297,7 @@ const prefsReady = (async () => {
 async function getInterceptFailClosed() {
   if (failClosedDirty) return interceptFailClosed;
   try {
-    const { falconInterceptFailClosed } = await chrome.storage.local.get({
+    const { falconInterceptFailClosed } = await ext.storage.local.get({
       falconInterceptFailClosed: true,
     });
     interceptFailClosed = !!falconInterceptFailClosed;
@@ -301,14 +315,14 @@ function eraseBrowserDownload(id) {
 async function setInterceptFailClosed(next) {
   markFailClosedWrite();
   interceptFailClosed = !!next;
-  await chrome.storage.local.set({ falconInterceptFailClosed: interceptFailClosed });
+  await ext.storage.local.set({ falconInterceptFailClosed: interceptFailClosed });
   return interceptFailClosed;
 }
 
 async function setNotifySuccessEnabled(next) {
   markNotifySuccessWrite();
   notifySuccess = !!next;
-  await chrome.storage.local.set({ falconNotifySuccess: notifySuccess });
+  await ext.storage.local.set({ falconNotifySuccess: notifySuccess });
   return notifySuccess;
 }
 
@@ -317,7 +331,7 @@ function setState(s) {
   connectionState = s;
   refreshBadge();
   // Best-effort persist (non-blocking); SW restart will restore the badge.
-  chrome.storage.session.set({ falconConnectionState: connectionState }).catch(() => {});
+  ext.storage.session.set({ falconConnectionState: connectionState }).catch(() => {});
 }
 
 /** Reflect connection state on the toolbar icon badge. */
@@ -331,8 +345,8 @@ function refreshBadge() {
   };
   const b = map[connectionState] || map.offline;
   try {
-    chrome.action.setBadgeBackgroundColor({ color: b.color });
-    chrome.action.setBadgeText({ text: b.text });
+    ext.action.setBadgeBackgroundColor({ color: b.color });
+    ext.action.setBadgeText({ text: b.text });
   } catch (_) {}
 }
 
@@ -340,14 +354,14 @@ function refreshBadge() {
 /** Popup window is last-focused while open — never query lastFocusedWindow for page tabs. */
 async function getActiveBrowserTab() {
   try {
-    const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
+    const win = await ext.windows.getLastFocused({ windowTypes: ['normal'] });
     if (win && win.id != null) {
-      const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
+      const [tab] = await ext.tabs.query({ active: true, windowId: win.id });
       if (tab) return tab;
     }
   } catch (_) {}
   try {
-    const [tab] = await chrome.tabs.query({ active: true, windowType: 'normal' });
+    const [tab] = await ext.tabs.query({ active: true, windowType: 'normal' });
     if (tab) return tab;
   } catch (_) {}
   return null;
@@ -356,7 +370,7 @@ async function getActiveBrowserTab() {
 /** Inject the on-demand content script once per tab. Idempotent. */
 async function resetContentScriptGuard(tabId) {
   try {
-    await chrome.scripting.executeScript({
+    await ext.scripting.executeScript({
       target: { tabId },
       func: () => {
         delete window.__falconDmReady;
@@ -370,7 +384,7 @@ async function resetContentScriptGuard(tabId) {
 async function reinitContentScriptsAfterReload() {
   INJECTED.clear();
   try {
-    const tabs = await chrome.tabs.query({
+    const tabs = await ext.tabs.query({
       url: [
         '*://*.youtube.com/*',
         '*://youtu.be/*',
@@ -387,7 +401,7 @@ async function reinitContentScriptsAfterReload() {
 async function ensureContentScript(tabId) {
   if (!tabId || tabId < 0) return false;
   try {
-    await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+    await ext.tabs.sendMessage(tabId, { action: 'ping' });
     INJECTED.add(tabId);
     return true;
   } catch (_) {
@@ -396,11 +410,11 @@ async function ensureContentScript(tabId) {
   INJECTED.add(tabId);
   try {
     await resetContentScriptGuard(tabId);
-    await chrome.scripting.executeScript({
+    await ext.scripting.executeScript({
       target: { tabId },
       files: ['media-utils.js', 'content.js'],
     });
-    await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+    await ext.tabs.sendMessage(tabId, { action: 'ping' });
     return true;
   } catch (_) {
     INJECTED.delete(tabId); // allow retry (e.g. chrome:// pages reject injection)
@@ -409,7 +423,7 @@ async function ensureContentScript(tabId) {
 }
 
 async function getToken() {
-  const { apiToken } = await chrome.storage.local.get({ apiToken: '' });
+  const { apiToken } = await ext.storage.local.get({ apiToken: '' });
   return (apiToken || '').trim();
 }
 
@@ -476,7 +490,7 @@ function cookieLookupUrl(downloadUrl, pageUrl) {
 async function getCookiesHeader(url) {
   if (!url) return '';
   try {
-    const cookies = await withTimeout(chrome.cookies.getAll({ url }), 3000, 'Cookie lookup');
+    const cookies = await withTimeout(ext.cookies.getAll({ url }), 3000, 'Cookie lookup');
     if (cookies.length) {
       return cookies.map((c) => `${c.name}=${c.value}`).join('; ');
     }
@@ -493,7 +507,7 @@ function notify(title, message) {
   const now = Date.now();
   if (now - (notifyLastAt.get(key) || 0) < NOTIFY_DEDUP_MS) return;
   notifyLastAt.set(key, now);
-  chrome.notifications.create({
+  ext.notifications.create({
     type: 'basic',
     iconUrl: 'icon128.png',
     title,
@@ -504,7 +518,7 @@ function notify(title, message) {
 async function fetchBlobPayload(tabId, blobUrl) {
   const maxBytes =
     (self.FalconMedia && self.FalconMedia.BLOB_MAX_BYTES) || 32 * 1024 * 1024;
-  const [{ result }] = await chrome.scripting.executeScript({
+  const [{ result }] = await ext.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
     func: async (url, limit) => {

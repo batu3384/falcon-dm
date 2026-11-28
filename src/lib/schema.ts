@@ -108,7 +108,14 @@ export const ScheduleSchema = z.object({
   active: z.boolean(),
 });
 
-const ExtensionIdSchema = z.string().regex(/^[a-p]{32}$/);
+// Chromium ids are 32 lowercase hex-ish chars [a-p]; Firefox uses a bare or
+// braced UUID, or an email-style Gecko id — mirrors `is_valid_extension_id` in the backend.
+const ExtensionIdSchema = z
+  .string()
+  .max(256)
+  .regex(
+    /^([a-p]{32}|\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?|[\w.+-]+@[\w-]+(\.[\w-]+)+)$/,
+  );
 
 export const PairRequestSchema = z.object({
   extension_id: ExtensionIdSchema,

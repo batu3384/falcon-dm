@@ -123,7 +123,7 @@
     "message": "Falcon DM offline — download blocked"
   },
   "interceptQueued": {
-    "message": "Browser download cancelled — queued in Falcon DM (file saves in Falcon, not Chrome Downloads)"
+    "message": "Browser download cancelled — queued in Falcon DM (file saves in Falcon, not browser Downloads)"
   },
   "labelFilename": {
     "message": "File name"
@@ -237,7 +237,7 @@
     "message": "Downloads"
   },
   "optionsFallback": {
-    "message": "Let Chrome download when Falcon DM is closed"
+    "message": "Let the browser download when Falcon DM is closed"
   },
   "optionsFallbackHint": {
     "message": "When off, a download Falcon DM cannot take is cancelled — click the link again once Falcon DM is running."
@@ -315,7 +315,7 @@
     "message": "Send browser downloads to Falcon DM"
   },
   "popupCaptureHint": {
-    "message": "When off, Chrome downloads files itself."
+    "message": "When off, the browser downloads files itself."
   },
   "popupStateChecking": {
     "message": "Checking…"

@@ -1,5 +1,11 @@
 /* Shared media URL analysis — loaded in background + content scripts */
 (function (root) {
+  // Firefox exposes promise-based browser.*; Chrome uses promise-capable chrome.* in MV3.
+  if (!root.ext) {
+    root.ext =
+      typeof browser !== 'undefined' ? browser : typeof chrome !== 'undefined' ? chrome : undefined;
+  }
+
   function _i18n(key, fb) {
     try {
       if (typeof chrome !== 'undefined' && chrome.i18n && chrome.i18n.getMessage) {

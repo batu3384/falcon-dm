@@ -398,6 +398,7 @@ pub fn is_youtube_watch_url(url: &str) -> bool {
     u.path().starts_with("/watch")
         || u.path().starts_with("/shorts/")
         || u.path().starts_with("/live/")
+        || u.path().starts_with("/embed/")
 }
 
 /// Watch-page base URL for dedup — same video, different `#falconfmt` counts as one active job.
@@ -834,6 +835,12 @@ mod tests {
         let watch = youtube_page_url_for_download(cdn, Some("https://www.youtube.com/watch?v=abc"))
             .unwrap();
         assert!(watch.contains("#falconfmt=best%5Bheight%3C%3D720%5D"));
+    }
+
+    #[test]
+    fn youtube_watch_url_accepts_embed() {
+        assert!(is_youtube_watch_url("https://www.youtube.com/embed/dQw4w9WgXcQ"));
+        assert!(is_youtube_watch_url("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"));
     }
 
     #[test]

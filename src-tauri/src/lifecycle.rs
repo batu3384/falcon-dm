@@ -162,6 +162,10 @@ fn download_roots(settings: &Settings) -> Vec<std::path::PathBuf> {
     roots
 }
 
+fn is_extension_cors_origin(origin: &str) -> bool {
+    crate::extension_id_from_origin(origin).is_some_and(crate::is_valid_extension_id)
+}
+
 fn spawn_local_api(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         use tauri::http::HeaderValue;
@@ -169,10 +173,7 @@ fn spawn_local_api(app_handle: tauri::AppHandle) {
 
         let cors = CorsLayer::new()
             .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
-                origin.to_str().is_ok_and(|origin| {
-                    origin.starts_with("chrome-extension://")
-                        || origin.starts_with("edge-extension://")
-                })
+                origin.to_str().is_ok_and(is_extension_cors_origin)
             }))
             // Health is GET; browsers may OPTIONS-preflight localhost (private network).
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
@@ -184,6 +185,14 @@ fn spawn_local_api(app_handle: tauri::AppHandle) {
             .route("/api/pair", post(crate::local_api::handle_pair))
             .route("/api/ping", post(crate::local_api::handle_ping))
             .route("/api/downloads", get(crate::local_api::handle_downloads))
+            .route("/api/downloads/all", get(crate::local_api::handle_downloads_all))
+            .route("/api/stats", get(crate::local_api::handle_stats))
+            .route("/api/pause", post(crate::local_api::handle_pause))
+            .route("/api/resume", post(crate::local_api::handle_resume))
+            .route("/api/remove", post(crate::local_api::handle_remove))
+            .route("/api/pause_all", post(crate::local_api::handle_pause_all))
+            .route("/api/resume_all", post(crate::local_api::handle_resume_all))
+            .route("/api/speed_limit", post(crate::local_api::handle_speed_limit))
             .route("/api/add", post(crate::local_api::handle_api_add))
             .route("/api/intercept", post(crate::local_api::handle_intercept))
             .route("/api/upload", post(crate::local_api::handle_api_upload))
@@ -814,6 +823,17 @@ pub fn set_ui_language(app: AppHandle, lang: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_cors_origin_requires_scheme_and_valid_id() {
+        assert!(is_extension_cors_origin("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(is_extension_cors_origin("moz-extension://e3225586-81a0-47c3-8612-d95fb0c2a609"));
+        assert!(!is_extension_cors_origin("moz-extension://not-a-valid-id"));
+        assert!(!is_extension_cors_origin("https://example.com"));
+        assert!(!is_extension_cors_origin(
+            "moz-extension://e3225586-81a0-47c3-8612-d95fb0c2a609/path"
+        ));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
