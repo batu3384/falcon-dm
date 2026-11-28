@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email **support@batuhan.tech** with `Falcon DM security` in the subject. Include affected version/commit, reproduction steps, impact, and proof of concept if available.
+The preferred channel is [GitHub Private Vulnerability Reporting](https://github.com/batu3384/falcon-dm/security/advisories/new) — open a draft security advisory there. If that is unavailable, email **support@batuhan.tech** with `Falcon DM security` in the subject. Either way, include affected version/commit, reproduction steps, impact, and proof of concept if available.
 
 Do **not** file public GitHub issues or pull requests for vulnerabilities. We aim to acknowledge reports within 72 hours and coordinate disclosure after a fix is available.
 

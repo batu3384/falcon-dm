@@ -3,6 +3,9 @@
 # in release.yml matrix).
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -20,11 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Install pinned gitleaks
         run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_darwin_arm64.tar.gz -o gitleaks.tar.gz
-          echo "d942f3ad147250c9edbaab3fed9e482f98d3b59ba10ae97b8d75647e3ade492c  gitleaks.tar.gz" | shasum -a 256 -c -
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz -o gitleaks.tar.gz
+          echo "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5  gitleaks.tar.gz" | shasum -a 256 -c -
           tar xzf gitleaks.tar.gz gitleaks
       - name: Scan full history
         run: ./gitleaks git --redact --verbose .
@@ -34,6 +38,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           # Node 22 LTS — GH runners default to Node 24 which breaks jsdom/vitest (undici).
@@ -60,8 +66,11 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: 1.100.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -71,20 +80,24 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy (deny warnings)
         working-directory: src-tauri
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         working-directory: src-tauri
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       - name: Build (debug)
         working-directory: src-tauri
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
   cargo-deny:
     name: Supply-chain audit (cargo deny)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.100.1
       - name: cargo deny
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:

@@ -38,6 +38,17 @@ Thumbs.db
 *.sw?
 .env
 .env.local
+.env.*
+!.env.example
+
+# Secrets, signing material, editor/backup cruft — never commit these.
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*.bak
+*.orig
+*~
 
 # Falcon DM Temp Files
 *.falcondm-temp
@@ -57,4 +68,7 @@ coverage.html
 audit/
 security-report/
 design-system/
+# docs/ is intentionally reserved for local dev artifacts (notes, exports).
+# If real product documentation is added later, narrow this entry (e.g.
+# docs/local/) rather than dropping it.
 docs/

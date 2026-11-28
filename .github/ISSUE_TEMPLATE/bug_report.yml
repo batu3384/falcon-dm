@@ -2,6 +2,10 @@ name: Bug report
 description: Report something that's broken
 labels: ["bug"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Before pasting logs or errors:** redact tokens, cookies, signed URL query parameters (e.g. `token=`, `sig=`, `expire=`, `X-Falcon-Token` values) and personal file paths. Logs can contain capture cookies and pre-signed CDN links that stay valid for hours.
   - type: textarea
     id: what-happened
     attributes:
