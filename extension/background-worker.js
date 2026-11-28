@@ -1503,7 +1503,7 @@ async function postFalcon(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   try {
     data = await response.json();
   } catch {
-    data = null;
+    // Error responses without a JSON body fall through with data = null.
   }
 
   if (response.status === 403) setState('blocked');
