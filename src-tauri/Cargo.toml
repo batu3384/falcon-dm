@@ -67,7 +67,7 @@ tauri-plugin-notification = "2.3.3"
 tower-http = { version = "0.7.0", features = ["cors"] }
 tauri-plugin-deep-link = "2"
 window-vibrancy = "0.8.0"
-base64 = "0.22"
+base64 = "0.23"
 chacha20poly1305 = "0.11.0"
 getrandom = "0.3"
 tauri-plugin-single-instance = "2.5.5"
