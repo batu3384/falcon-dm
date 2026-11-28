@@ -16,6 +16,10 @@ Product direction for **Falcon DM**. This page tracks milestones — not a relea
 | Item | Notes |
 |------|-------|
 | Native YouTube pipeline | Innertube extraction, selector subset parser (strict height caps, MP4-only merges), adaptive muxing and subtitle export in Rust — yt-dlp and ffmpeg removed entirely |
+| Native DASH + complex HLS | SegmentTemplate/List/Base+sidx DASH engine; AES-128, fMP4, byte-range, discontinuity and split-audio HLS finalized by the native muxer |
+| Firefox extension port | Single manifest serves Chromium MV3 + Firefox ordered background scripts; blocking webRequest capture, moz-extension pairing |
+| `falconctl` CLI + API protocol 3 | add/list/pause/resume/remove/pause-all/resume-all/limit/stats over authenticated loopback endpoints |
+| Native subtitles | YouTube timedtext and HLS TYPE=SUBTITLES renditions to VTT/SRT next to the video; per-download opt-out |
 | Parallel HTTP (range, speed limit, byte verify) | CA-001 closed |
 | Byte-exact HTTP resume | Offset writes + `.falcon.state` segment bitmap; crash/restart continue every connection in parallel |
 | Resume validator enforcement | Strong ETag/Last-Modified required; validator-less or changed content restarts from zero |
@@ -61,7 +65,6 @@ Product direction for **Falcon DM**. This page tracks milestones — not a relea
 | Item | Status | Notes |
 |------|--------|-------|
 | Windows desktop build + packaging | **Next** | Installer smoke |
-| Firefox MV3 extension | **Next** | Pairing + intercept parity with Chromium |
 
 ## Later
 
