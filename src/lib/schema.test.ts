@@ -178,7 +178,7 @@ describe('ExtensionStatusSchema', () => {
   it('accepts approved ids and pending code requests', () => {
     const parsed = ExtensionStatusSchema.parse({
       approved_extension_ids: ['abc'],
-      pending: [{ extension_id: 'abcdefghijklmnopabcdefghijklmnop', code: '482913' }],
+      pending: [{ extension_id: 'pppppppppppppppppppppppppppppppp', code: '482913' }],
     });
     expect(parsed.pending[0].code).toBe('482913');
   });
@@ -186,7 +186,7 @@ describe('ExtensionStatusSchema', () => {
     expect(() =>
       ExtensionStatusSchema.parse({
         approved_extension_ids: [],
-        pending: [{ extension_id: 'abcdefghijklmnopabcdefghijklmnop', code: '12ab56' }],
+        pending: [{ extension_id: 'pppppppppppppppppppppppppppppppp', code: '12ab56' }],
       }),
     ).toThrow();
   });

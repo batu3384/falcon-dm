@@ -14,6 +14,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Install pinned gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_darwin_arm64.tar.gz -o gitleaks.tar.gz
+          echo "d942f3ad147250c9edbaab3fed9e482f98d3b59ba10ae97b8d75647e3ade492c  gitleaks.tar.gz" | shasum -a 256 -c -
+          tar xzf gitleaks.tar.gz gitleaks
+      - name: Scan full history
+        run: ./gitleaks git --redact --verbose .
+
   frontend:
     name: Frontend (lint + test + build)
     runs-on: macos-15

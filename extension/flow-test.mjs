@@ -1252,7 +1252,7 @@ async function runPairing(responses, env = {}) {
     Promise,
     crypto: globalThis.crypto,
     chrome: {
-      runtime: { id: 'abcdefghijklmnopabcdefghijklmnop' },
+      runtime: { id: 'pppppppppppppppppppppppppppppppp' },
       i18n: { getMessage: () => '' },
       action: { setBadgeBackgroundColor() {}, setBadgeText() {} },
       notifications: { create: (_id, opts) => notes.push(opts) },

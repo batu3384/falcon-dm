@@ -1,0 +1,7 @@
+# Documented exceptions — audited as non-sensitive public values.
+#
+# YouTube embeds this Innertube key in every watch page; it is a public client
+# identifier present in every open-source YouTube client (yt-dlp included),
+# not a credential. The live code no longer carries it in plain form; this is
+# the one historical commit that introduced it.
+74fad7b1ccea05c2d0d71f124ec5a14349c08684:src-tauri/src/download/youtube.rs:gcp-api-key:23

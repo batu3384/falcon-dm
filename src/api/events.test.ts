@@ -24,7 +24,7 @@ describe('event payload guards', () => {
   });
 
   it('requires a valid extension id and a six-digit code', () => {
-    const id = 'abcdefghijklmnopabcdefghijklmnop';
+    const id = 'pppppppppppppppppppppppppppppppp';
     expect(parsePairRequest({ extension_id: id, code: '123456' })).toEqual({
       extension_id: id,
       code: '123456',

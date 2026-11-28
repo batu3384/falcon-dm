@@ -51,3 +51,10 @@ coverage.html
 .vitest-cache/
 .eslintcache
 *.tsbuildinfo
+
+# Development artifacts — audit reports, design explorations, agent plans.
+# Kept locally, never tracked in the repository.
+audit/
+security-report/
+design-system/
+docs/
