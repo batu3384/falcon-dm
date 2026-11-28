@@ -25,8 +25,7 @@ use youtube_cipher::CipherError;
 // every open-source client). It is written in two concatenated halves so
 // repository secret scanners do not match the Google-API-key pattern and
 // noise-alert the project; the value itself is not sensitive.
-const DEFAULT_WEB_API_KEY: &str =
-    concat!("AIzaSyAO_FJ2SlqU8Q4ST", "EHLGCilw_Y9_11qcW8");
+const DEFAULT_WEB_API_KEY: &str = concat!("AIzaSyAO_FJ2SlqU8Q4ST", "EHLGCilw_Y9_11qcW8");
 const PLAYER_API_URL: &str = "https://www.youtube.com/youtubei/v1/player";
 const YOUTUBE_ORIGIN: &str = "https://www.youtube.com";
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
