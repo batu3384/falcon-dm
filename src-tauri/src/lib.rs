@@ -103,6 +103,26 @@ pub(crate) fn canonical_store_url(raw: &str) -> String {
     }
 }
 
+/// Priority: explicit API `format` field, then the user's `#falconfmt` fragment
+/// already on the URL, then — for YouTube only — the default video selector.
+/// The default must never overwrite a selector the user typed.
+fn resolve_effective_format(
+    payload_format: Option<&str>,
+    base: &str,
+    is_youtube: bool,
+) -> Option<String> {
+    if let Some(f) = payload_format.and_then(util::sanitize_format_selector) {
+        return Some(f);
+    }
+    if let Some(f) = util::split_falcon_format(base).1 {
+        return Some(f);
+    }
+    if is_youtube {
+        return Some(download::ytselect::DEFAULT_VIDEO_FORMAT.to_string());
+    }
+    None
+}
+
 pub(crate) fn parse_extension_id(raw: &str) -> Result<&str, String> {
     let id = raw.trim();
     if is_valid_extension_id(id) {
@@ -289,12 +309,8 @@ pub(crate) async fn enqueue_download(
     let base = watch_url.clone().unwrap_or_else(|| normalize_media_url(payload.url.trim()));
     // One spelling everywhere: dedupe, resume state and routing compare strings.
     let base = canonical_store_url(&base);
-    let format = payload.format.as_deref().or(if watch_url.is_some() {
-        Some(download::ytselect::DEFAULT_VIDEO_FORMAT)
-    } else {
-        None
-    });
-    let url = util::attach_falcon_format(&base, format);
+    let format = resolve_effective_format(payload.format.as_deref(), &base, watch_url.is_some());
+    let url = util::attach_falcon_format(&base, format.as_deref());
     let force_hls = is_hls_url(&url);
     let mut filename = resolve_download_filename(
         &url,
@@ -756,6 +772,24 @@ mod tests {
         // Non-HTTP(S) rows (blob uploads) and unparseable strings pass through.
         assert_eq!(canonical_store_url("blob:https://x/y"), "blob:https://x/y");
         assert_eq!(canonical_store_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn effective_format_prefers_url_fragment_over_youtube_default() {
+        // Regression: a user-supplied #falconfmt selector was silently replaced
+        // by DEFAULT_VIDEO_FORMAT, so every quality pick downloaded the default.
+        let base = "https://www.youtube.com/watch?v=aqz-KE-bpKQ#falconfmt=bestvideo%5Bheight%3C%3D360%5D%2Bbestaudio";
+        let fmt = resolve_effective_format(None, base, true).unwrap();
+        assert_eq!(fmt, "bestvideo[height<=360]+bestaudio");
+        // Explicit API format still wins over the fragment.
+        let fmt = resolve_effective_format(Some("best"), base, true).unwrap();
+        assert_eq!(fmt, "best");
+        // No fragment and no payload: YouTube gets the default selector.
+        let plain = "https://www.youtube.com/watch?v=aqz-KE-bpKQ";
+        let fmt = resolve_effective_format(None, plain, true).unwrap();
+        assert_eq!(fmt, download::ytselect::DEFAULT_VIDEO_FORMAT);
+        // Non-YouTube rows never gain a selector.
+        assert!(resolve_effective_format(None, "https://cdn.example.com/x.bin", false).is_none());
     }
 
     #[test]
