@@ -2631,7 +2631,9 @@ mod tests {
                 .unwrap();
             assert!(
                 output.status.success(),
-                "TS memory child failed:\n{}",
+                "TS memory child failed (status {:?}):\nstdout:\n{}\nstderr:\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
             return;
