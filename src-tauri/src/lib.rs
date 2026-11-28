@@ -15,7 +15,9 @@ use download::queue::{QueueManager, StopReason};
 use pairing::PairingState;
 use serde::Deserialize;
 use settings::Settings;
-use storage::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
+use storage::models::{
+    Download, DownloadCategory, DownloadFilter, DownloadStatus, SubtitleTrackSelection,
+};
 use storage::Database;
 use storage::InsertDownloadResult;
 use tauri::{AppHandle, Emitter, Manager};
@@ -235,6 +237,9 @@ pub(crate) struct ExternalDownloadPayload {
     /// Lenient checksum input (bare hex or `algo:`-prefixed); canonicalized
     /// to `algo:hex` in `enqueue_download`, rejected when unparseable.
     pub expected_hash: Option<String>,
+    /// Explicit subtitle choice from the YouTube picker. `None` uses the
+    /// extractor default; `Some([])` deliberately downloads no subtitles.
+    pub subtitle_tracks: Option<Vec<SubtitleTrackSelection>>,
 }
 
 /// A selector with no video stream (`bestaudio[ext=m4a]/bestaudio`).
@@ -332,6 +337,10 @@ pub(crate) async fn enqueue_download(
     let prof_ua = profile.and_then(|p| p.user_agent.clone());
     let prof_cookies = profile.and_then(|p| p.cookies.clone());
     let referrer = payload.referrer.as_deref().or(prof_referrer.as_deref());
+    let subtitle_tracks = payload
+        .subtitle_tracks
+        .as_ref()
+        .map(|tracks| download::subtitles::normalize_subtitle_selection(tracks));
 
     let mut dl = Download {
         id: None,
@@ -361,6 +370,7 @@ pub(crate) async fn enqueue_download(
         retry_at: None,
         expected_hash,
         speed_limit_kbps: None,
+        subtitle_tracks,
     };
 
     let insert_result = state.db.insert_download_deduped(&mut dl).map_err(|e| e.to_string())?;
@@ -440,6 +450,7 @@ pub(crate) async fn ingest_uploaded_file(
         retry_at: None,
         expected_hash: None,
         speed_limit_kbps: None,
+        subtitle_tracks: None,
     };
     let insert_result = state.db.insert_download_deduped(&mut dl).map_err(|e| e.to_string())?;
     let id = insert_result.id();

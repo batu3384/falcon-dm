@@ -1,5 +1,7 @@
 use crate::pairing::{is_valid_pair_code, PairRequestOutcome};
-use crate::storage::models::{Download, DownloadCategory, DownloadFilter, DownloadStatus};
+use crate::storage::models::{
+    Download, DownloadCategory, DownloadFilter, DownloadStatus, SubtitleTrackSelection,
+};
 use crate::util::{lock_or_recover, LEGACY_DEFAULT_API_TOKEN};
 use crate::{
     check_api_token, enqueue_download, extension_id_from_origin, ingest_uploaded_file,
@@ -106,6 +108,7 @@ pub(crate) struct AddDownloadRequest {
     cookie_url: Option<String>,
     format: Option<String>,
     title: Option<String>,
+    subtitle_tracks: Option<Vec<SubtitleTrackSelection>>,
 }
 
 pub(crate) async fn handle_api_add(
@@ -131,6 +134,7 @@ pub(crate) async fn handle_api_add(
                 format: payload.format,
                 save_path: None,
                 expected_hash: None,
+                subtitle_tracks: payload.subtitle_tracks,
             },
         )
         .await,
@@ -148,6 +152,9 @@ pub(crate) struct InterceptRequest {
     pub referer: Option<String>,
     pub filename: Option<String>,
     pub format: Option<String>,
+    /// `[{lang, kind?}]` from the YouTube picker. Unlike `format`, this is
+    /// structured data and does not travel on the URL fragment.
+    pub subtitle_tracks: Option<Vec<SubtitleTrackSelection>>,
 }
 
 pub(crate) async fn handle_intercept(
@@ -173,6 +180,7 @@ pub(crate) async fn handle_intercept(
                 format: payload.format,
                 save_path: None,
                 expected_hash: None,
+                subtitle_tracks: payload.subtitle_tracks,
             },
         )
         .await,
@@ -639,6 +647,26 @@ mod tests {
     use super::*;
     use crate::storage::models::DownloadCategory;
 
+    #[test]
+    fn intercept_deserializes_structured_subtitle_choice() {
+        let payload: InterceptRequest = serde_json::from_str(
+            r#"{
+                "url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "subtitle_tracks":[{"lang":"en"},{"lang":"tr","kind":"asr"}]
+            }"#,
+        )
+        .unwrap();
+        let tracks = payload.subtitle_tracks.unwrap();
+        assert_eq!(tracks[0].lang, "en");
+        assert_eq!(tracks[0].kind, None);
+        assert_eq!(tracks[1].kind.as_deref(), Some("asr"));
+
+        let without: InterceptRequest =
+            serde_json::from_str(r#"{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}"#)
+                .unwrap();
+        assert_eq!(without.subtitle_tracks, None, "omitted choice keeps the default policy");
+    }
+
     fn insert_api_row(
         state: &AppState,
         filename: &str,
@@ -671,6 +699,7 @@ mod tests {
                 retry_at: None,
                 expected_hash: None,
                 speed_limit_kbps: Some(128),
+                subtitle_tracks: None,
             })
             .unwrap()
     }
@@ -830,6 +859,7 @@ mod tests {
             retry_at: None,
             expected_hash: None,
             speed_limit_kbps: None,
+            subtitle_tracks: None,
         };
         let json = serde_json::to_string(&ApiDownload::from(row)).unwrap();
         assert!(!json.contains("secret.example"), "{json}");

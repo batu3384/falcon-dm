@@ -12,6 +12,7 @@
 use crate::download::http_client::{open, parse_content_range, HttpHeaders, Opened, RangeRequest};
 use crate::download::job::JobContext;
 use crate::download::limiter::{cancelled, sleep_or_cancel};
+use crate::download::mux::{self, MergeError};
 use crate::download::DownloadError;
 use crate::util::{split_falcon_format, validate_fetch_url_async};
 use dash_mpd_core::{
@@ -1840,75 +1841,68 @@ fn container_corrected_name(dest: &Path, mime_type: Option<&str>) -> Option<Stri
     Some(format!("{stem}.{}", extension_for_mime(mime_type)))
 }
 
-fn audio_companion_target(landed: &Path, mime_type: Option<&str>) -> Option<PathBuf> {
-    let stem = landed.file_stem()?.to_str()?;
-    Some(landed.parent()?.join(format!("{stem}.audio.{}", extension_for_mime(mime_type))))
-}
-
-/// Keep the temporary split-audio concatenation next to the delivered video.
-/// This deliberately uses the finished primary name: if `video.mp4` landed as
-/// `video (1).mp4`, its companion cannot collide with another download's audio.
-async fn place_audio_companion(
-    audio: &AssembledRepresentation,
-    landed: &Path,
-) -> Result<PathBuf, DownloadError> {
-    let Some(target) = audio_companion_target(landed, audio.metadata.mime_type.as_deref()) else {
-        return Err(DownloadError::fatal("DASH audio output filename is invalid"));
-    };
-    let source = audio.path.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::util::move_file_unique(&source, &target, &std::collections::HashSet::new())
-    })
-    .await
-    .map_err(|e| DownloadError::fatal(format!("DASH audio output worker failed: {e}")))?
-    .map_err(DownloadError::fatal)
-}
-
 /// Deliver the assembled representations through the single-file job pipeline.
 async fn finalize_assembly(
     ctx: &JobContext,
     assembly: &DashAssembly,
     dest: &Path,
 ) -> Result<PathBuf, DownloadError> {
-    // muxer integration point: consume `assembly` here and hand one muxed temp file to `ctx.finalize` instead of the primary concatenation plus companion.
     ctx.progress.set_merging();
-    if assembly.representations.len() > 1 {
+    let primary = assembly
+        .representations
+        .get(assembly.primary)
+        .ok_or_else(|| DownloadError::fatal("DASH primary representation is missing"))?;
+    let video = assembly
+        .representations
+        .iter()
+        .find(|representation| representation.metadata.kind == MediaKind::Video);
+    let audio = assembly
+        .representations
+        .iter()
+        .find(|representation| representation.metadata.kind == MediaKind::Audio);
+    let merge_pair = if assembly.representations.len() == 2 { video.zip(audio) } else { None };
+    let naming_representation = merge_pair.map(|(video, _)| video).unwrap_or(primary);
+    let mut dest = dest.to_path_buf();
+    if let Some(wanted) =
+        container_corrected_name(&dest, naming_representation.metadata.mime_type.as_deref())
+    {
+        dest = ctx.rename(&dest, &wanted);
+    }
+
+    if let Some((video, audio)) = merge_pair {
         log::debug!(
             "download {}: DASH mux metadata is at {}",
             ctx.id,
             assembly.mux_manifest.display()
         );
-    }
-    let primary = assembly
-        .representations
-        .get(assembly.primary)
-        .ok_or_else(|| DownloadError::fatal("DASH primary representation is missing"))?;
-    let mut dest = dest.to_path_buf();
-    if let Some(wanted) = container_corrected_name(&dest, primary.metadata.mime_type.as_deref()) {
-        dest = ctx.rename(&dest, &wanted);
-    }
-    let landed = ctx.finalize(&primary.path, &dest).await?;
-    if let Some(audio) = assembly
-        .representations
-        .iter()
-        .enumerate()
-        .find(|(index, representation)| {
-            *index != assembly.primary && representation.metadata.kind == MediaKind::Audio
+        let merged = video
+            .path
+            .parent()
+            .ok_or_else(|| DownloadError::fatal("DASH assembly path is invalid"))?
+            .join("merged.mp4");
+        let video_path = video.path.clone();
+        let audio_path = audio.path.clone();
+        let merged_path = merged.clone();
+        let cancel = ctx.cancel.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let should_cancel = || *cancel.borrow();
+            mux::merge_av_mp4(&video_path, &audio_path, &merged_path, &should_cancel)
         })
-        .map(|(_, representation)| representation)
-    {
-        if let Err(error) = place_audio_companion(audio, &landed).await {
-            // The primary deliverable is already safely finalized. Losing the
-            // temporary companion must not turn that successful download into
-            // a failed row; the muxer path will replace this transitional copy.
-            log::warn!(
-                "download {}: could not keep DASH audio companion: {}",
-                ctx.id,
-                error.message()
-            );
-        }
+        .await
+        .map_err(|e| DownloadError::fatal(format!("DASH merge task failed: {e}")))?;
+        return match result {
+            Ok(()) => ctx.finalize(&merged, &dest).await,
+            Err(MergeError::Cancelled) => Err(DownloadError::Cancelled),
+            Err(error) => Err(DownloadError::Fatal(error.to_string())),
+        };
     }
-    Ok(landed)
+    if assembly.representations.len() != 1 {
+        return Err(DownloadError::fatal(
+            "DASH selection has an unsupported representation layout; refusing to drop media",
+        ));
+    }
+
+    ctx.finalize(&primary.path, &dest).await
 }
 
 /// Download a DASH presentation to `out_path`. Returns where the file landed.
@@ -1951,6 +1945,7 @@ pub async fn process_dash_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shiguredo_mp4::Decode;
     use std::collections::HashMap;
 
     fn template(xml: &str) -> SegmentTemplate {
@@ -2071,14 +2066,6 @@ mod tests {
     fn session_dir_is_per_download() {
         assert_eq!(dash_session_dirname(7), "dash-7.falcondm-temp");
         assert!(dash_session_dir(7).ends_with("downloads_temp/dash-7.falcondm-temp"));
-    }
-
-    #[test]
-    fn audio_companion_follows_the_finished_primary_name() {
-        assert_eq!(
-            audio_companion_target(Path::new("/tmp/movie (1).mp4"), Some("audio/mp4")),
-            Some(PathBuf::from("/tmp/movie (1).audio.m4a"))
-        );
     }
 
     fn headers(connections: usize) -> HttpHeaders {
@@ -2398,6 +2385,62 @@ mod tests {
         assert_eq!(mux["representations"][1]["codecs"], "mp4a.40.2");
         assert_eq!(ctx.progress.downloaded(), (5 + 2 + 2 + 5 + 2 + 2) as u64);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn adaptive_download_finalizes_one_faststart_merged_mp4() {
+        let mpd = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+          <BaseURL>media/</BaseURL><Period duration="PT2S">
+            <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.64001f">
+              <SegmentTemplate timescale="1000" duration="1000" startNumber="1" media="v$Number$.m4s" initialization="vinit.mp4"/>
+              <Representation id="v" bandwidth="800000" width="160" height="90"/>
+            </AdaptationSet>
+            <AdaptationSet contentType="audio" mimeType="audio/mp4" codecs="mp4a.40.2">
+              <SegmentTemplate timescale="1000" duration="2000" startNumber="1" media="a$Time$.m4s" initialization="ainit.mp4"/>
+              <Representation id="a" bandwidth="96000"/>
+            </AdaptationSet>
+          </Period></MPD>"#;
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/dash");
+        let mut files = one_file_manifest(mpd);
+        for name in ["vinit.mp4", "v1.m4s", "v2.m4s", "ainit.mp4", "a0.m4s"] {
+            files.insert(format!("/media/{name}"), std::fs::read(fixture_root.join(name)).unwrap());
+        }
+        let fixture = serve(files, Vec::new()).await;
+        let out_dir = fresh_dir("adaptive-finalize-out");
+        let id = test_id();
+        remove_artifacts(id);
+        let (ctx, _tx) = JobContext::for_tests(id);
+        let _g = crate::util::allow_loopback_for_tests();
+        let landed = process_dash_stream(
+            &ctx,
+            &format!("{}/index.mpd", fixture.base),
+            out_dir.join("movie.mpd").to_str().unwrap(),
+            headers(4),
+        )
+        .await
+        .unwrap();
+        assert_eq!(landed.file_name().unwrap(), "movie.mp4");
+        assert!(!landed.with_file_name("movie.audio.m4a").exists());
+        let bytes = std::fs::read(&landed).unwrap();
+        let (mp4, _) =
+            shiguredo_mp4::Mp4File::<shiguredo_mp4::boxes::RootBox>::decode(&bytes).unwrap();
+        let mut saw_moov = false;
+        let mut track_count = 0;
+        for root in &mp4.boxes {
+            match root {
+                shiguredo_mp4::boxes::RootBox::Moov(moov) => {
+                    saw_moov = true;
+                    track_count = moov.trak_boxes.len();
+                }
+                shiguredo_mp4::boxes::RootBox::Mdat(_) => {
+                    assert!(saw_moov, "final DASH output must be faststart")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(track_count, 2, "merged output carries both video and audio");
+        std::fs::remove_dir_all(out_dir).unwrap();
+        remove_artifacts(id);
     }
 
     #[tokio::test]

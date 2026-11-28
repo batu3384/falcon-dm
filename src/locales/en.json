@@ -415,6 +415,7 @@
     "ytdlp_missing": "yt-dlp is needed for this site. Install it with “brew install yt-dlp”.",
     "ytdlp_path_invalid": "The yt-dlp location in Settings is not valid.",
     "hls_live": "Live streams cannot be downloaded.",
+    "hls_drm": "This HLS stream uses DRM-protected sample encryption and cannot be downloaded.",
     "dash_live": "Live DASH streams cannot be downloaded.",
     "dash_drm": "This DASH stream is protected by DRM and cannot be downloaded.",
     "video_unavailable": "This video is unavailable.",

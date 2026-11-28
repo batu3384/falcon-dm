@@ -82,6 +82,8 @@ transmux = "0.33.0"
 dash-mpd-core = "0.1.0"
 rquickjs = { version = "0.15.0", default-features = false, features = ["std"] }
 shiguredo_mp4 = "2026.6.0-canary.3"
+aes = "0.9.3"
+cbc = "0.2.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

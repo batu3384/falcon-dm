@@ -43,6 +43,7 @@ pub async fn add_download(
             format: blank(format),
             save_path: blank(save_path),
             expected_hash: blank(expected_hash),
+            subtitle_tracks: None,
         },
     )
     .await?;
@@ -973,6 +974,7 @@ mod speed_limit_tests {
             retry_at: None,
             expected_hash: None,
             speed_limit_kbps: None,
+            subtitle_tracks: None,
         })
         .unwrap()
     }
@@ -1049,6 +1051,7 @@ mod control_core_tests {
                 retry_at: Some(123),
                 expected_hash: None,
                 speed_limit_kbps: None,
+                subtitle_tracks: None,
             })
             .unwrap()
     }

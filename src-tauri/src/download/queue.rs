@@ -784,6 +784,7 @@ mod tests {
             retry_at: None,
             expected_hash: None,
             speed_limit_kbps: None,
+            subtitle_tracks: None,
         }
     }
 
@@ -965,6 +966,7 @@ mod tests {
                 retry_at: None,
                 expected_hash: None,
                 speed_limit_kbps: None,
+                subtitle_tracks: None,
             })
             .unwrap();
         let qm = QueueManager::new();

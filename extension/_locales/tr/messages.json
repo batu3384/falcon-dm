@@ -319,5 +319,11 @@
   },
   "popupStateChecking": {
     "message": "Denetleniyor…"
+  },
+  "labelSubtitles": {
+    "message": "Altyazılar"
+  },
+  "subtitleAuto": {
+    "message": "otomatik"
   }
 }

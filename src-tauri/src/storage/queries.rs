@@ -10,10 +10,16 @@ use std::collections::HashSet;
 const DOWNLOAD_COLUMNS: &str = "id, url, filename, save_path, total_size, downloaded_size, \
      status, category, speed, segments, priority, created_at, completed_at, error_message, \
      referrer, user_agent, cookies, archived, attempts, retry_at, expected_hash, \
-     speed_limit_kbps";
+     speed_limit_kbps, subtitle_tracks";
 
 fn stored_speed_limit(limit: Option<u32>) -> Option<i64> {
     limit.filter(|kbps| *kbps > 0).map(i64::from)
+}
+
+fn stored_subtitle_tracks(
+    tracks: Option<&Vec<super::models::SubtitleTrackSelection>>,
+) -> Option<String> {
+    tracks.and_then(|tracks| serde_json::to_string(tracks).ok())
 }
 
 fn like_escape(value: &str) -> String {
@@ -62,8 +68,8 @@ impl Database {
             "INSERT INTO downloads (
                 url, filename, save_path, total_size, downloaded_size, status, category,
                 speed, segments, priority, created_at, completed_at, error_message,
-                referrer, user_agent, cookies, archived, expected_hash, speed_limit_kbps
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                referrer, user_agent, cookies, archived, expected_hash, speed_limit_kbps, subtitle_tracks
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 download.url,
                 download.filename,
@@ -84,6 +90,7 @@ impl Database {
                 download.archived as i64,
                 download.expected_hash,
                 stored_speed_limit(download.speed_limit_kbps),
+                stored_subtitle_tracks(download.subtitle_tracks.as_ref()),
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -155,8 +162,8 @@ impl Database {
             "INSERT INTO downloads (
                 url, filename, save_path, total_size, downloaded_size, status, category,
                 speed, segments, priority, created_at, completed_at, error_message,
-                referrer, user_agent, cookies, archived, expected_hash, speed_limit_kbps
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                referrer, user_agent, cookies, archived, expected_hash, speed_limit_kbps, subtitle_tracks
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 download.url,
                 download.filename,
@@ -177,6 +184,7 @@ impl Database {
                 download.archived as i64,
                 download.expected_hash,
                 stored_speed_limit(download.speed_limit_kbps),
+                stored_subtitle_tracks(download.subtitle_tracks.as_ref()),
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -232,8 +240,9 @@ impl Database {
                 cookies = ?16,
                 archived = ?17,
                 expected_hash = ?18,
-                speed_limit_kbps = ?19
-            WHERE id = ?20",
+                speed_limit_kbps = ?19,
+                subtitle_tracks = ?20
+            WHERE id = ?21",
             params![
                 download.url,
                 download.filename,
@@ -254,6 +263,7 @@ impl Database {
                 download.archived as i64,
                 download.expected_hash,
                 stored_speed_limit(download.speed_limit_kbps),
+                stored_subtitle_tracks(download.subtitle_tracks.as_ref()),
                 id,
             ],
         )?;
@@ -857,6 +867,14 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
     let retry_at: Option<i64> = row.get(19)?;
     let expected_hash: Option<String> = row.get(20)?;
     let speed_limit_kbps: Option<i64> = row.get(21)?;
+    let subtitle_tracks_json: Option<String> = row.get(22)?;
+    let subtitle_tracks = subtitle_tracks_json.and_then(|json| {
+        serde_json::from_str(&json)
+            .map_err(|error| {
+                log::warn!("downloads#{id}: ignoring malformed subtitle_tracks: {error}")
+            })
+            .ok()
+    });
 
     Ok(Download {
         id: Some(id),
@@ -889,6 +907,7 @@ fn row_to_download(row: &Row) -> rusqlite::Result<Download> {
         speed_limit_kbps: speed_limit_kbps
             .and_then(|kbps| u32::try_from(kbps).ok())
             .filter(|kbps| *kbps > 0),
+        subtitle_tracks,
     })
 }
 
@@ -921,7 +940,40 @@ mod tests {
             retry_at: None,
             expected_hash: None,
             speed_limit_kbps: None,
+            subtitle_tracks: None,
         }
+    }
+
+    #[test]
+    fn subtitle_selection_roundtrips_and_empty_array_stays_explicit() {
+        let db = Database::in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("falcon-subs-db-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.to_str().unwrap();
+
+        let mut download = row("https://cdn.example.com/sub.bin", "sub.bin", save);
+        download.subtitle_tracks = Some(vec![
+            crate::storage::models::SubtitleTrackSelection { lang: "en".into(), kind: None },
+            crate::storage::models::SubtitleTrackSelection {
+                lang: "tr".into(),
+                kind: Some("asr".into()),
+            },
+        ]);
+        let id = db.insert_download(&download).unwrap();
+        assert_eq!(db.get_download(id).unwrap().subtitle_tracks, download.subtitle_tracks);
+        let stored = db.get_download(id).unwrap();
+        db.update_download(id, &stored).unwrap();
+        assert_eq!(
+            db.get_download(id).unwrap().subtitle_tracks,
+            download.subtitle_tracks,
+            "full-row maintenance updates must not drop the subtitle choice"
+        );
+
+        let mut none = row("https://cdn.example.com/no-sub.bin", "no-sub.bin", save);
+        none.subtitle_tracks = Some(Vec::new());
+        let id = db.insert_download(&none).unwrap();
+        assert_eq!(db.get_download(id).unwrap().subtitle_tracks, Some(Vec::new()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

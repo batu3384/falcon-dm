@@ -2,7 +2,7 @@
 
 ## Extension cannot pair
 
-- Confirm Falcon DM is running (`GET http://127.0.0.1:14201/api/health` returns `"protocol": 2`)
+- Confirm Falcon DM is running (`GET http://127.0.0.1:14201/api/health` returns `"protocol": 3`)
 - Open the extension popup: it shows a 6-digit code while it waits
 - Approve the same code in Falcon DM (dialog, or **Settings → Extension**)
 - Declined by mistake? Click **Request a New Code** in the popup

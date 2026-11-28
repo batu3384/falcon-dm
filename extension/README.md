@@ -68,7 +68,7 @@ Firefox 136+ chooses `background.scripts` through `preferred_environment`; Chrom
 
 ## API calls
 
-- `GET /api/health` — unauthenticated liveness, expects `protocol: 2`
+- `GET /api/health` — unauthenticated liveness, expects `protocol: 3`
 - `POST /api/pair` — 6-digit pairing (`202` while user approval is pending)
 - `POST /api/ping` — authenticated liveness
 - `POST /api/intercept` — captured/media download

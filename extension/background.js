@@ -969,7 +969,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       });
     }
 
-    const finish = async (extraUrls) => {
+    const finish = async (extraUrls, captions) => {
       const merged = [...new Set([...(urls || []), ...(extraUrls || [])])];
       const cookiePage = (pageUrl || '').split('#')[0];
       const cookies = cookiePage ? await getCookiesHeader(cookiePage) : '';
@@ -980,6 +980,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         title,
         cookies,
         userAgent: navigator.userAgent,
+        captions: Array.isArray(captions) ? captions.slice(0, 64) : [],
       });
     };
 
@@ -992,10 +993,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           world: 'MAIN',
           func: () => {
             const out = [];
+            const captions = [];
+            const seenCaptions = new Set();
+            const captionLabel = (track) => {
+              const name = track && track.name;
+              if (!name) return '';
+              if (typeof name.simpleText === 'string') return name.simpleText;
+              if (Array.isArray(name.runs)) return name.runs.map((run) => run.text || '').join('');
+              return '';
+            };
             const pushPr = (pr) => {
-              if (!pr || !pr.streamingData) return;
-              for (const f of pr.streamingData.formats || []) if (f.url) out.push(f.url);
-              for (const f of pr.streamingData.adaptiveFormats || []) if (f.url) out.push(f.url);
+              if (!pr) return;
+              if (pr.streamingData) {
+                for (const f of pr.streamingData.formats || []) if (f.url) out.push(f.url);
+                for (const f of pr.streamingData.adaptiveFormats || []) if (f.url) out.push(f.url);
+              }
+              for (const track of pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || []) {
+                const lang = String(track.languageCode || '').trim();
+                if (!track.baseUrl || !lang) continue;
+                const kind = typeof track.kind === 'string' && track.kind ? track.kind : null;
+                const key = `${lang}|${kind || ''}`;
+                if (seenCaptions.has(key)) continue;
+                seenCaptions.add(key);
+                captions.push({
+                  lang,
+                  kind,
+                  label: captionLabel(track),
+                  baseUrl: track.baseUrl,
+                });
+              }
             };
             try {
               pushPr(window.ytInitialPlayerResponse);
@@ -1012,12 +1038,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 pushPr(el.getPlayerResponse());
               }
             } catch (_) {}
-            return out;
+            return { urls: out, captions };
           },
         })
         .then((results) => {
-          const extra = (results && results[0] && results[0].result) || [];
-          finish(extra);
+          const result = (results && results[0] && results[0].result) || {};
+          // Older mocked/test responses are bare arrays of URLs.
+          const extra = Array.isArray(result) ? result : result.urls || [];
+          finish(extra, Array.isArray(result) ? [] : result.captions || []);
         })
         .catch(() => finish([]));
       return true;
@@ -1138,6 +1166,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         filename: request.filename || null,
         media_type: request.media_type || 'application/octet-stream',
         format: request.format || null,
+        subtitle_tracks: Array.isArray(request.subtitle_tracks)
+          ? request.subtitle_tracks
+              .slice(0, 32)
+              .map((track) => ({
+                lang: String((track && track.lang) || '').slice(0, 40),
+                kind: typeof track?.kind === 'string' && track.kind ? track.kind.slice(0, 16) : undefined,
+              }))
+              .filter((track) => track.lang)
+          : undefined,
       })
         .then((data) => sendResponse({ success: true, data }))
         .catch((err) => sendResponse({ success: false, error: err.message }));

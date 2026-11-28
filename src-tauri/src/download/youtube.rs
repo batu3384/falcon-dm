@@ -88,7 +88,7 @@ impl ValidatedFetcher {
     }
 
     #[cfg(test)]
-    fn with_endpoint_origin(origin: &str) -> Self {
+    pub(crate) fn with_endpoint_origin(origin: &str) -> Self {
         Self { endpoint_origin: Some(origin.to_string()), ..Self::default() }
     }
 
@@ -119,6 +119,18 @@ impl ValidatedFetcher {
 
     async fn get(&self, url: &str, headers: HeaderMap) -> Result<FetchResponse, ExtractError> {
         self.fetch(Method::GET, url, headers, None).await
+    }
+
+    /// Text GET for sibling extraction features (subtitles). Keeping the response
+    /// type private preserves the extractor boundary while reusing the same
+    /// validated/pinned network path.
+    pub(crate) async fn get_text(
+        &self,
+        url: &str,
+        headers: HeaderMap,
+    ) -> Result<(u16, String), ExtractError> {
+        let response = self.get(url, headers).await?;
+        Ok((response.status, response.body))
     }
 
     async fn post_json(

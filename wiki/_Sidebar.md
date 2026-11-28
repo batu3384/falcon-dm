@@ -8,6 +8,7 @@
 
 **Reference**
 - [Architecture](Architecture)
+- [CLI](CLI)
 - [Security](Security)
 - [Roadmap](Roadmap)
 

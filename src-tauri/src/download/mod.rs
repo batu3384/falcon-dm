@@ -9,6 +9,7 @@ pub mod limiter;
 pub mod mux;
 pub mod progress;
 pub mod queue;
+pub mod subtitles;
 pub mod tools;
 pub mod youtube;
 pub mod ytdlp;

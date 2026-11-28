@@ -313,6 +313,7 @@ mod tests {
                 retry_at: None,
                 expected_hash: expected_hash.map(str::to_string),
                 speed_limit_kbps: None,
+                subtitle_tracks: None,
             })
             .unwrap();
         let (_cancel, rx) = watch::channel(false);

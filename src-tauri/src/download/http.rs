@@ -1331,6 +1331,7 @@ mod tests {
             retry_at: None,
             expected_hash: None,
             speed_limit_kbps: None,
+            subtitle_tracks: None,
         })
         .unwrap()
     }
@@ -2377,6 +2378,7 @@ mod tests {
             retry_at: None,
             expected_hash: Some(expected_hash.into()),
             speed_limit_kbps: None,
+            subtitle_tracks: None,
         })
         .unwrap()
     }

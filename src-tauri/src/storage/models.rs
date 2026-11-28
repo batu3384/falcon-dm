@@ -114,6 +114,15 @@ impl FromStr for DownloadCategory {
     }
 }
 
+/// Subtitle language/kind chosen in the browser overlay. `kind = Some("asr")`
+/// is YouTube's automatic speech-recognition track; `None` is the manual track.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubtitleTrackSelection {
+    pub lang: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Download {
     pub id: Option<i64>,
@@ -153,6 +162,11 @@ pub struct Download {
     /// the command boundary) means the row follows the global speed limit.
     #[serde(default)]
     pub speed_limit_kbps: Option<u32>,
+    /// Browser-selected subtitle tracks as structured data (stored in SQLite
+    /// as JSON). `None` = no explicit choice, use the default policy;
+    /// `Some([])` = the user explicitly chose no subtitles.
+    #[serde(default)]
+    pub subtitle_tracks: Option<Vec<SubtitleTrackSelection>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

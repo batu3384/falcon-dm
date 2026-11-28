@@ -310,13 +310,60 @@
     return { host, shadow, panel, close };
   }
 
-  function createModal(pageTitle, pageUrl, cookies, ua, sources) {
+  function normalizeSubtitleTracks(rawTracks) {
+    if (!Array.isArray(rawTracks)) return null;
+    const out = [];
+    const seen = new Set();
+    for (const track of rawTracks.slice(0, 64)) {
+      const lang = String((track && (track.lang || track.languageCode)) || '').trim();
+      if (!lang) continue;
+      const rawKind = typeof track.kind === 'string' ? track.kind.trim().toLowerCase() : '';
+      const kind = rawKind || null;
+      const key = `${lang.toLowerCase()}|${(kind || '').toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        lang,
+        kind,
+        label: String(track.label || track.name || lang),
+      });
+    }
+    return out;
+  }
+
+  function subtitleLanguagesOverlap(left, right) {
+    const a = String(left || '').replace(/_/g, '-').toLowerCase();
+    const b = String(right || '').replace(/_/g, '-').toLowerCase();
+    return !!a && !!b && (a === b || a.startsWith(`${b}-`) || b.startsWith(`${a}-`));
+  }
+
+  function defaultSubtitleSelection(tracks) {
+    const manual = tracks.filter((track) => track.kind !== 'asr');
+    const asr = tracks.find(
+      (track) =>
+        track.kind === 'asr' &&
+        !manual.some((manualTrack) => subtitleLanguagesOverlap(manualTrack.lang, track.lang)),
+    );
+    return [...manual, ...(asr ? [asr] : [])];
+  }
+
+  function subtitleKey(track) {
+    return `${track.lang}|${track.kind || ''}`;
+  }
+
+  function createModal(pageTitle, pageUrl, cookies, ua, sources, rawSubtitleTracks) {
     FM = mediaApi() || FM;
     if (!FM) {
       showFabError(msg('errorMediaUtils', 'Falcon module failed to load — reload extension'));
       throw new Error(msg('errorMediaUtils', 'Falcon module failed to load — reload extension'));
     }
 
+    const subtitleTracks = normalizeSubtitleTracks(rawSubtitleTracks);
+    const selectedSubtitles = new Set(
+      subtitleTracks && subtitleTracks.length
+        ? defaultSubtitleSelection(subtitleTracks).map(subtitleKey)
+        : [],
+    );
     let selected = FM.pickBest(sources) || sources[0] || null;
     const sheet = openSheet(msg('downloadVideo', 'Download with Falcon DM'));
     const { panel, close } = sheet;
@@ -455,6 +502,37 @@
       syncWarn();
       panel.appendChild(cards);
       panel.appendChild(warn);
+
+      if (subtitleTracks && subtitleTracks.length) {
+        const subLabel = el('div');
+        subLabel.className = 'fm-label';
+        subLabel.id = 'fm-subtitles-label';
+        subLabel.textContent = msg('labelSubtitles', 'Subtitles');
+        panel.appendChild(subLabel);
+
+        const subList = el('div');
+        subList.className = 'fm-cards';
+        subList.setAttribute('aria-labelledby', 'fm-subtitles-label');
+        subtitleTracks.forEach((track) => {
+          const row = el('label');
+          row.className = 'fm-check';
+          const box = el('input');
+          box.type = 'checkbox';
+          box.checked = selectedSubtitles.has(subtitleKey(track));
+          const text = el('span');
+          const auto = track.kind === 'asr' ? ` · ${msg('subtitleAuto', 'automatic')}` : '';
+          text.textContent = `${track.label || track.lang} (${track.lang})${auto}`;
+          row.appendChild(box);
+          row.appendChild(text);
+          box.addEventListener('change', () => {
+            const key = subtitleKey(track);
+            if (box.checked) selectedSubtitles.add(key);
+            else selectedSubtitles.delete(key);
+          });
+          subList.appendChild(row);
+        });
+        panel.appendChild(subList);
+      }
     }
 
     panel.appendChild(nameWrap);
@@ -485,6 +563,12 @@
           ? FM.overlayEnqueuePayload(pageUrl, selected)
           : { url: selected.url, format: null };
       const { url: downloadUrl, format } = payload;
+      const subtitle_tracks =
+        subtitleTracks && subtitleTracks.length
+          ? subtitleTracks
+              .filter((track) => selectedSubtitles.has(subtitleKey(track)))
+              .map((track) => (track.kind ? { lang: track.lang, kind: track.kind } : { lang: track.lang }))
+          : undefined;
 
       try {
         const action = selected.isBlob || FM.isBlobUrl(selected.url) ? 'download_blob' : 'download_video';
@@ -498,6 +582,7 @@
           user_agent: ua,
           filename: nameInput.value,
           format,
+          subtitle_tracks,
         });
         if (response && response.success) {
           goBtn.textContent = msg('queued', 'Queued in Falcon DM');
@@ -532,14 +617,21 @@
 
     const isYtWatch = !!(FM.isYoutubeWatchUrl && FM.isYoutubeWatchUrl(location.href));
 
-    // YouTube watch: overlay from yt-dlp cards immediately — sniff wait was thrown away anyway.
+    // YouTube watch uses yt-dlp cards, but caption metadata still has to come
+    // from the MAIN-world player response through the service worker.
     if (isYtWatch) {
+      let captions = null;
+      try {
+        const resp = await sendBg({ action: 'get_real_media_url', page_url: location.href });
+        captions = resp && resp.captions;
+      } catch (_) {}
       createModal(
         document.title,
         location.href,
         '',
         navigator.userAgent,
         FM.youtubeFallbackSources(location.href),
+        captions,
       );
       return;
     }
@@ -592,6 +684,7 @@
       (resp && resp.cookies) || '',
       (resp && resp.userAgent) || navigator.userAgent,
       sources,
+      resp && resp.captions,
     );
   }
 

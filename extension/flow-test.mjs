@@ -348,7 +348,18 @@ function loadScripts(win, files) {
           onSend(payload) {
             if (payload.action === 'download_video') return { success: true };
             if (payload.action === 'get_real_media_url') {
-              return { urls: [], metaMap: {}, title: 'Rick', cookies: '', userAgent: 'ua' };
+              return {
+                urls: [],
+                metaMap: {},
+                title: 'Rick',
+                cookies: '',
+                userAgent: 'ua',
+                captions: [
+                  { lang: 'en', label: 'English' },
+                  { lang: 'tr', label: 'Turkish' },
+                  { lang: 'en', kind: 'asr', label: 'English auto' },
+                ],
+              };
             }
             return { ok: true };
           },
@@ -392,6 +403,19 @@ function loadScripts(win, files) {
       'overlay offers an audio-only card on watch pages',
     );
 
+    const subtitleRows = [...panel.querySelectorAll('.fm-check')];
+    assert(subtitleRows.length === 3, 'caption tracks render as overlay checkboxes');
+    assert(
+      subtitleRows.filter((row) => row.querySelector('input').checked).length === 2,
+      'manual caption tracks are preselected while redundant ASR is not',
+    );
+    const turkishRow = subtitleRows.find((row) => /Turkish/.test(row.textContent));
+    assert(turkishRow, 'Turkish caption row exists');
+    const turkishBox = turkishRow.querySelector('input');
+    turkishBox.checked = false;
+    turkishBox.dispatchEvent(new win.Event('change', { bubbles: true }));
+    await tick();
+
     const goBtn = [...panel.querySelectorAll('button')].find((b) => /start download/i.test(b.textContent));
     assert(goBtn, 'Start Download button exists');
     goBtn.click();
@@ -403,6 +427,10 @@ function loadScripts(win, files) {
     assert(
       String(job.format || '').includes('height<=360'),
       `format follows selected 360, got ${job.format}`,
+    );
+    assert(
+      JSON.stringify(job.subtitle_tracks) === JSON.stringify([{ lang: 'en' }]),
+      `subtitle choice follows unchecked checkbox, got ${JSON.stringify(job.subtitle_tracks)}`,
     );
   });
 }
@@ -887,6 +915,7 @@ function makeBackgroundHarness(initialLocal = {}, env = {}) {
     if (target.endsWith('/api/health')) return jsonResponse(200, { ok: true });
     if (target.endsWith('/api/ping')) return jsonResponse(200, { ok: true });
     if (target.endsWith('/api/add')) return jsonResponse(200, { ok: true, id: 77 });
+    if (target.endsWith('/api/intercept')) return jsonResponse(200, { success: true, id: 78 });
     return jsonResponse(404, {});
   };
 
@@ -941,6 +970,16 @@ async function fireDeterminingFilename(harness, item) {
   });
   await tick(60);
   return suggested;
+}
+
+function sendBackgroundMessage(harness, message, sender = {}) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('background message timed out')), 1000);
+    harness.listeners.message(message, sender, (response) => {
+      clearTimeout(timer);
+      resolve(response);
+    });
+  });
 }
 
 {
@@ -1026,6 +1065,53 @@ async function fireDeterminingFilename(harness, item) {
       (call) => call.url.endsWith('/api/add') && call.body?.url === 'https://cdn.wild.example/manual.xyz',
     ),
     'manual context-menu send bypasses the never-capture blocklist',
+  );
+}
+
+{
+  const harness = makeBackgroundHarness();
+  await backgroundReady(harness);
+  harness.chrome.scripting.executeScript = async () => [
+    {
+      result: {
+        urls: ['https://media.example.com/video.mp4'],
+        captions: [
+          { lang: 'en', kind: null, label: 'English', baseUrl: 'https://www.youtube.com/api/timedtext?lang=en' },
+          { lang: 'tr', kind: 'asr', label: 'Turkish auto', baseUrl: 'https://www.youtube.com/api/timedtext?lang=tr&kind=asr' },
+        ],
+      },
+    },
+  ];
+  const sender = {
+    tab: { id: 42, url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', title: 'Video' },
+  };
+  const mediaInfo = await sendBackgroundMessage(
+    harness,
+    { action: 'get_real_media_url', page_url: sender.tab.url },
+    sender,
+  );
+  assert(mediaInfo.captions.length === 2, 'MAIN-world caption tracks reach the content script');
+  assert(mediaInfo.captions[1].kind === 'asr', 'caption kind survives the service-worker boundary');
+
+  const queued = await sendBackgroundMessage(
+    harness,
+    {
+      action: 'download_video',
+      url: 'https://media.example.com/video.mp4',
+      page_url: sender.tab.url,
+      title: 'Video',
+      filename: 'video.mp4',
+      format: 'best',
+      subtitle_tracks: [{ lang: 'tr', kind: 'asr' }, { lang: '', kind: 'asr' }],
+    },
+    sender,
+  );
+  assert(queued && queued.success === true, `download_video succeeds, got ${queued && queued.error}`);
+  const intercept = harness.fetchCalls.find((call) => call.url.endsWith('/api/intercept'));
+  assert(intercept, 'download_video posts to /api/intercept');
+  assert(
+    JSON.stringify(intercept.body.subtitle_tracks) === JSON.stringify([{ lang: 'tr', kind: 'asr' }]),
+    `subtitle selection is bounded and forwarded, got ${JSON.stringify(intercept.body.subtitle_tracks)}`,
   );
 }
 

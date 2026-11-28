@@ -179,6 +179,9 @@ impl Database {
             // v6 — optional per-download speed cap in decimal KB/s. NULL means
             // the row follows the global token bucket.
             M::up("ALTER TABLE downloads ADD COLUMN speed_limit_kbps INTEGER;"),
+            // v7 — optional JSON subtitle-track choice from the browser overlay.
+            // NULL means no explicit choice; the JSON empty array means none.
+            M::up("ALTER TABLE downloads ADD COLUMN subtitle_tracks TEXT;"),
         ]);
         migrations.to_latest(&mut conn).map_err(|e| {
             DatabaseError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
@@ -215,6 +218,7 @@ mod tests {
             retry_at: None,
             expected_hash: None,
             speed_limit_kbps: None,
+            subtitle_tracks: None,
         }
     }
 
@@ -958,6 +962,52 @@ mod tests {
         assert_eq!(has_column, 1, "v5 must add the expected_hash column");
         let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
         assert!(version >= 5, "user_version should reach 5, got {version}");
+        drop(conn);
+        drop(db);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn v6_database_migrates_to_v7_without_losing_rows() {
+        let temp_dir = std::env::temp_dir().join(format!("falcon_v6_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        {
+            // Schema as shipped at v6: all media/checksum/limit columns, no subtitles.
+            let conn = rusqlite::Connection::open(temp_dir.join("falcon_dm.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE downloads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL,
+                    filename TEXT NOT NULL, save_path TEXT NOT NULL,
+                    total_size INTEGER DEFAULT 0, downloaded_size INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'Queued', category TEXT DEFAULT 'Other',
+                    speed REAL DEFAULT 0.0, segments INTEGER DEFAULT 8,
+                    priority INTEGER DEFAULT 1, created_at TEXT NOT NULL,
+                    completed_at TEXT, error_message TEXT, referrer TEXT,
+                    user_agent TEXT, cookies TEXT,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    attempts INTEGER NOT NULL DEFAULT 0, retry_at INTEGER,
+                    expected_hash TEXT, speed_limit_kbps INTEGER);
+                 INSERT INTO downloads (url, filename, save_path, status, created_at, speed_limit_kbps)
+                   VALUES ('https://example.com/v6.zip', 'v6.zip', '/tmp', 'Completed',
+                           '2026-07-30T13:00:00Z', 512);
+                 PRAGMA user_version = 6;",
+            )
+            .unwrap();
+        }
+        let db = Database::init(&temp_dir).expect("v6 → v7 migration");
+        let rows = db.get_downloads(&DownloadFilter::default()).unwrap();
+        assert_eq!(rows.len(), 1, "the pre-migration row must survive");
+        assert_eq!(rows[0].speed_limit_kbps, Some(512));
+        assert_eq!(rows[0].subtitle_tracks, None, "existing rows keep the default policy");
+        let conn = db.conn.get().unwrap();
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'subtitle_tracks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1, "v7 must add the subtitle_tracks column");
         drop(conn);
         drop(db);
         let _ = fs::remove_dir_all(&temp_dir);
