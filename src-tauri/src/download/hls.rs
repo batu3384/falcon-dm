@@ -3,8 +3,9 @@
 //! Segments are fetched in parallel into a per-download temp dir, each written
 //! to `*.tmp` and renamed when complete, so an interrupted run never leaves a
 //! half segment that a resume would trust. AES-128 pieces are decrypted after
-//! their HTTP length/range validation and before the final atomic rename. The
-//! native remuxer assembles MPEG-TS; fMP4 is already an MP4 representation and
+//! their HTTP length/range validation and before the final atomic rename; key
+//! bytes stay memory-only and are refetched to validate encrypted-piece caches.
+//! The native remuxer assembles MPEG-TS; fMP4 is already an MP4 representation and
 //! is concatenated as init sections + media fragments.
 //!
 //! EXT-X-DISCONTINUITY does not change the VOD byte plan: pieces are fetched in
@@ -29,7 +30,7 @@ use aes::cipher::{
 use futures::stream::{self, StreamExt};
 use m3u8_rs::{AlternativeMedia, AlternativeMediaType, MasterPlaylist};
 use reqwest::{Client, Response, StatusCode};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -463,9 +464,12 @@ struct Plan {
     /// Main rendition first; a selected split-audio rendition second.
     renditions: Vec<MediaPlan>,
     estimated_bytes: Option<u64>,
-    /// FNV-1a over query-stripped piece locators plus range/IV/init facts.
-    /// Signed-URL rotation must not invalidate cache, while a re-cut or
-    /// re-laddered playlist (different paths or addressing) must.
+    /// FNV-1a over query-stripped piece locators plus range/IV/init/key-path
+    /// facts. Signed media-URL rotation must not invalidate cache, while a
+    /// re-cut or re-laddered playlist (different paths or addressing) must.
+    /// Key bytes are fingerprinted separately once fetched: they, not a
+    /// signed key URL's query string, decide whether plaintext pieces still
+    /// mean the same media.
     fingerprint: String,
     /// Subtitle renditions selected from the master playlist, written next to
     /// the video after it finalizes. `None` for plain media playlists and for
@@ -993,7 +997,7 @@ async fn fetch_piece_once(
     source: &Url,
     piece: &Piece,
     headers: &HttpHeaders,
-    keys: &[Option<[u8; AES_KEY_BYTES]>],
+    keys: &[[u8; AES_KEY_BYTES]],
     client: &mut HostClient,
     tmp: &Path,
     encrypted_tmp: &Path,
@@ -1056,7 +1060,7 @@ async fn fetch_piece_once(
     if let Some(encryption) = piece.encryption.as_ref() {
         let key = keys
             .get(encryption.key)
-            .and_then(|key| *key)
+            .copied()
             .ok_or_else(|| DownloadError::fatal("HLS encryption key is missing"))?;
         let plaintext = decrypt_file_cbc(encrypted_tmp, tmp, &key, &encryption.iv).await?;
         let _ = tokio::fs::remove_file(encrypted_tmp).await;
@@ -1173,7 +1177,7 @@ async fn fetch_piece(
     ctx: &JobContext,
     plan: &Plan,
     headers: &HttpHeaders,
-    keys: &Arc<Vec<Option<[u8; AES_KEY_BYTES]>>>,
+    keys: &Arc<Vec<[u8; AES_KEY_BYTES]>>,
     client: &mut HostClient,
     key: PieceKey,
     root: &Path,
@@ -1236,20 +1240,50 @@ struct CacheManifest {
     renditions: usize,
     pieces: usize,
     keys: usize,
+    /// SHA-256 over the ordered key bytes. Plaintext pieces are encryption-output
+    /// artifacts, so the cache identity must change when the key material does.
+    #[serde(default)]
+    key_fingerprint: String,
 }
+
+const CACHE_VERSION: u32 = 3;
 
 fn manifest_path(dir: &Path) -> PathBuf {
     dir.join("manifest.json")
 }
 
-async fn write_manifest(dir: &Path, plan: &Plan, pieces: usize) -> Result<(), DownloadError> {
+fn key_material_fingerprint(keys: &[[u8; AES_KEY_BYTES]]) -> String {
+    use sha2::Digest;
+    use std::fmt::Write as _;
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"falcon-hls-key-material-v1");
+    hasher.update((keys.len() as u64).to_le_bytes());
+    for key in keys {
+        hasher.update(key);
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+async fn write_manifest(
+    dir: &Path,
+    plan: &Plan,
+    pieces: usize,
+    key_fingerprint: &str,
+) -> Result<(), DownloadError> {
     let manifest = CacheManifest {
-        version: 2,
+        version: CACHE_VERSION,
         playlist: plan.renditions.first().map(|r| r.media_url.to_string()).unwrap_or_default(),
         fingerprint: plan.fingerprint.clone(),
         renditions: plan.renditions.len(),
         pieces,
         keys: plan.keys.len(),
+        key_fingerprint: key_fingerprint.to_string(),
     };
     let body = serde_json::to_vec(&manifest)
         .map_err(|e| DownloadError::fatal(format!("could not encode cache manifest: {e}")))?;
@@ -1276,44 +1310,46 @@ async fn trusted_piece_len(root: &Path, plan: &Plan, key: PieceKey) -> Option<u6
     (recorded == meta.len()).then_some(meta.len())
 }
 
-/// Drop anything a previous run left when playlist addressing no longer
-/// matches: mixing pieces of two different cuts produces a broken file.
-async fn validate_cache(dir: &Path, plan: &Plan, pieces: usize) -> Result<(), DownloadError> {
+/// Key bytes are memory-only. Both the current per-key directory and the
+/// legacy single-file name are deleted so upgrades never leave media keys on disk.
+async fn remove_legacy_key_caches(dir: &Path) {
+    let _ = tokio::fs::remove_dir_all(dir.join("keys")).await;
+    let _ = tokio::fs::remove_file(dir.join("key-cache.bin")).await;
+}
+
+/// Drop anything a previous run left when playlist addressing or key material
+/// no longer matches: mixing pieces of two different cuts produces a broken file.
+async fn validate_cache(
+    dir: &Path,
+    plan: &Plan,
+    pieces: usize,
+    key_fingerprint: &str,
+) -> Result<(), DownloadError> {
     let cached: Option<CacheManifest> = tokio::fs::read(manifest_path(dir))
         .await
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
     let matches = cached.as_ref().is_some_and(|manifest| {
-        manifest.version == 2
+        manifest.version == CACHE_VERSION
             && manifest.fingerprint == plan.fingerprint
             && manifest.renditions == plan.renditions.len()
             && manifest.pieces == pieces
             && manifest.keys == plan.keys.len()
+            && manifest.key_fingerprint == key_fingerprint
     });
     if matches {
         return Ok(());
     }
     if cached.is_some() {
-        log::info!("HLS playlist changed since the cache was written — restarting clean");
+        log::info!(
+            "HLS playlist or key material changed since the cache was written — restarting clean"
+        );
     }
     let _ = tokio::fs::remove_dir_all(dir).await;
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| io_error("could not create temp folder", &e))?;
-    write_manifest(dir, plan, pieces).await
-}
-
-fn key_path(root: &Path, index: usize) -> PathBuf {
-    root.join("keys").join(format!("key_{index:03}.bin"))
-}
-
-async fn cached_key(path: &Path) -> Option<[u8; AES_KEY_BYTES]> {
-    let meta = tokio::fs::metadata(path).await.ok()?;
-    if meta.len() != AES_KEY_BYTES as u64 {
-        return None;
-    }
-    let bytes = tokio::fs::read(path).await.ok()?;
-    <[u8; AES_KEY_BYTES]>::try_from(bytes.as_slice()).ok()
+    write_manifest(dir, plan, pieces, key_fingerprint).await
 }
 
 async fn fetch_key_once(
@@ -1350,23 +1386,16 @@ async fn fetch_key_once(
         .map_err(|_| DownloadError::fatal("HLS AES-128 key must be exactly 16 bytes"))
 }
 
-/// Fetch one key with segment-style transient retries and cache it behind a
-/// `.tmp` + atomic rename. The fixed 16-byte length is the trust validator.
+/// Fetch one key with segment-style transient retries. The fixed 16-byte length
+/// is the trust validator; key bytes stay memory-only and are never persisted.
 async fn fetch_key(
     ctx: &JobContext,
     plan: &Plan,
     headers: &HttpHeaders,
     index: usize,
-    root: &Path,
 ) -> Result<[u8; AES_KEY_BYTES], DownloadError> {
     let target =
         &plan.keys.get(index).ok_or_else(|| DownloadError::fatal("HLS key plan is invalid"))?.url;
-    let path = key_path(root, index);
-    let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("key")
-    ));
-    let _ = tokio::fs::remove_file(&tmp).await;
     let mut cancel = ctx.cancel.clone();
     let mut attempt = 0u32;
     loop {
@@ -1376,20 +1405,8 @@ async fn fetch_key(
             _ = cancelled(&mut cancel) => Err(DownloadError::Cancelled),
         };
         match result {
-            Ok(key) => {
-                let mut file = tokio::fs::File::create(&tmp)
-                    .await
-                    .map_err(|e| io_error("could not write HLS key", &e))?;
-                file.write_all(&key).await.map_err(|e| io_error("could not write HLS key", &e))?;
-                file.sync_all().await.map_err(|e| io_error("could not sync HLS key", &e))?;
-                drop(file);
-                tokio::fs::rename(&tmp, &path)
-                    .await
-                    .map_err(|e| io_error("could not cache HLS key", &e))?;
-                return Ok(key);
-            }
+            Ok(key) => return Ok(key),
             Err(error) => {
-                let _ = tokio::fs::remove_file(&tmp).await;
                 attempt += 1;
                 match error {
                     DownloadError::Transient(_) if attempt < SEGMENT_ATTEMPTS => {
@@ -1408,36 +1425,17 @@ async fn fetch_key(
     }
 }
 
-/// Load exactly the key indexes needed by missing encrypted pieces. Cached
-/// plaintext pieces do not need their key again, so pause/resume does not
-/// re-hit the key server when media bytes are already trusted.
-async fn ensure_keys(
+/// Fetch every planned key before cache validation. Cached pieces are plaintext
+/// output of those keys, so even a fully cached interrupted run must prove the
+/// key material still matches before any piece may be trusted.
+async fn fetch_keys(
     ctx: &JobContext,
     plan: &Plan,
     headers: &HttpHeaders,
-    root: &Path,
-    needed: &HashSet<usize>,
-) -> Result<Vec<Option<[u8; AES_KEY_BYTES]>>, DownloadError> {
-    let mut keys = vec![None; plan.keys.len()];
-    if needed.is_empty() {
-        return Ok(keys);
-    }
-    let key_dir = root.join("keys");
-    tokio::fs::create_dir_all(&key_dir)
-        .await
-        .map_err(|e| io_error("could not create HLS key cache", &e))?;
-    let mut ordered = needed.iter().copied().collect::<Vec<_>>();
-    ordered.sort_unstable();
-    for index in ordered {
-        let path = key_path(root, index);
-        let key = match cached_key(&path).await {
-            Some(key) => key,
-            None => {
-                let _ = tokio::fs::remove_file(&path).await;
-                fetch_key(ctx, plan, headers, index, root).await?
-            }
-        };
-        keys[index] = Some(key);
+) -> Result<Vec<[u8; AES_KEY_BYTES]>, DownloadError> {
+    let mut keys = Vec::with_capacity(plan.keys.len());
+    for index in 0..plan.keys.len() {
+        keys.push(fetch_key(ctx, plan, headers, index).await?);
     }
     Ok(keys)
 }
@@ -1453,7 +1451,10 @@ async fn download_pieces(
         .await
         .map_err(|e| io_error("could not create temp folder", &e))?;
     let keys = piece_keys(plan);
-    validate_cache(dir, plan, keys.len()).await?;
+    remove_legacy_key_caches(dir).await;
+    let key_material = Arc::new(fetch_keys(ctx, plan, headers).await?);
+    let key_fingerprint = key_material_fingerprint(&key_material);
+    validate_cache(dir, plan, keys.len(), &key_fingerprint).await?;
     for rendition in 0..plan.renditions.len() {
         tokio::fs::create_dir_all(rendition_dir(dir, rendition))
             .await
@@ -1463,14 +1464,10 @@ async fn download_pieces(
     let count = keys.len();
     let mut have_bytes = 0u64;
     let mut missing = Vec::new();
-    let mut needed_keys = HashSet::new();
     for key in keys {
         if let Some(bytes) = trusted_piece_len(dir, plan, key).await {
             have_bytes += bytes;
         } else {
-            if piece_for(plan, key)?.encryption.as_ref().is_some_and(|e| e.key < plan.keys.len()) {
-                needed_keys.insert(piece_for(plan, key)?.encryption.as_ref().expect("checked").key);
-            }
             missing.push(key);
             if let Ok(path) = piece_path(dir, plan, key) {
                 let name = piece_name(plan, key);
@@ -1482,7 +1479,6 @@ async fn download_pieces(
             }
         }
     }
-    let key_material = Arc::new(ensure_keys(ctx, plan, headers, dir, &needed_keys).await?);
     let done_pieces = Arc::new(AtomicU64::new((count - missing.len()) as u64));
     let done_bytes = Arc::new(AtomicU64::new(have_bytes));
     let estimate = plan.estimated_bytes.unwrap_or(0);
@@ -2025,6 +2021,36 @@ mod tests {
             plan_fingerprint(&encrypted, &keys),
             "encryption changes what cached plaintext means"
         );
+
+        let rotated_keys = [KeyPlan {
+            url: Url::parse("https://cdn.example.com/rotated-key.bin?token=a").unwrap(),
+        }];
+        assert_ne!(
+            plan_fingerprint(&encrypted, &keys),
+            plan_fingerprint(&encrypted, &rotated_keys),
+            "a different key URI is a different encryption identity"
+        );
+        let mut other_iv_init = piece("init.mp4");
+        other_iv_init.encryption = Some(Encryption { key: 0, iv: [8; 16] });
+        let other_iv = make(
+            vec![other_iv_init],
+            vec![SegmentPlan { piece: piece("seg0.m4s"), init: Some(0) }],
+        );
+        assert_ne!(
+            plan_fingerprint(&encrypted, &keys),
+            plan_fingerprint(&other_iv, &keys),
+            "the CBC IV is part of the plaintext identity"
+        );
+    }
+
+    #[test]
+    fn key_material_fingerprint_changes_with_key_bytes() {
+        let one = key_material_fingerprint(&[[0x11; AES_KEY_BYTES]]);
+        let two = key_material_fingerprint(&[[0x22; AES_KEY_BYTES]]);
+        let repeated = key_material_fingerprint(&[[0x11; AES_KEY_BYTES]]);
+        assert_ne!(one, two);
+        assert_eq!(one, repeated);
+        assert_eq!(one.len(), 64, "SHA-256 hex");
     }
 
     #[test]
@@ -3022,11 +3048,120 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("init_000.bin")).unwrap(), init_plain);
         assert_eq!(std::fs::read(dir.join("seg_00000.m4s")).unwrap(), frag_plain);
         assert_eq!(fixture.hits.lock().unwrap()["/key.bin"], 1);
-        download_pieces(&ctx, &plan, &headers(2), &dir).await.unwrap();
+        assert!(!dir.join("keys").exists(), "key bytes are never persisted");
+
+        // Simulate both a crash after one piece and a pre-upgrade plaintext key cache.
+        // Resume must ignore/delete the stale key file and refetch the key instead.
+        std::fs::remove_file(dir.join("seg_00000.m4s")).unwrap();
+        std::fs::remove_file(dir.join("seg_00000.m4s.len")).unwrap();
+        std::fs::create_dir_all(dir.join("keys")).unwrap();
+        std::fs::write(dir.join("keys/key_000.bin"), [0x99u8; AES_KEY_BYTES]).unwrap();
+        std::fs::write(dir.join("key-cache.bin"), [0x99u8; AES_KEY_BYTES]).unwrap();
+        let (ctx_restart, _tx_restart) = JobContext::for_tests(177);
+        download_pieces(&ctx_restart, &plan, &headers(2), &dir).await.unwrap();
+        assert_eq!(std::fs::read(dir.join("seg_00000.m4s")).unwrap(), frag_plain);
+        assert!(!dir.join("keys").exists(), "legacy plaintext key cache is deleted");
+        assert!(!dir.join("key-cache.bin").exists(), "legacy single-file key cache is deleted");
         let hits = fixture.hits.lock().unwrap();
-        assert_eq!(hits["/key.bin"], 1, "trusted plaintext cache must not refetch the key");
+        assert_eq!(hits["/key.bin"], 2, "resume refetches key material");
         assert_eq!(hits["/init.mp4"], 1, "trusted init cache is reused");
-        assert_eq!(hits["/frag.m4s"], 1, "trusted fragment cache is reused");
+        assert_eq!(hits["/frag.m4s"], 2, "only the missing fragment is fetched again");
+        drop(hits);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The playlist shape and even the key URI can stay byte-identical while the
+    /// key server rotates the key bytes. Plaintext pieces encrypted under the old
+    /// key are a different media artifact and must be dropped, even though their
+    /// length sidecars still match.
+    #[tokio::test]
+    async fn rotated_key_bytes_invalidates_plaintext_piece_cache() {
+        let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:1.0,\nseg0.ts\n#EXTINF:1.0,\nseg1.ts\n#EXT-X-ENDLIST\n";
+        let encrypted_files = |key: &[u8; AES_KEY_BYTES], fill: u8| {
+            let mut files = HashMap::new();
+            files.insert("/index.m3u8".to_string(), playlist.as_bytes().to_vec());
+            files.insert("/key.bin".to_string(), key.to_vec());
+            for index in 0..2u64 {
+                let plain = vec![fill + index as u8; 37];
+                files.insert(
+                    format!("/seg{index}.ts"),
+                    encrypt_aes128(key, &sequence_iv(index), &plain),
+                );
+            }
+            files
+        };
+        let first_key = [0x11; AES_KEY_BYTES];
+        let rotated_key = [0x22; AES_KEY_BYTES];
+        let (fixture, files) = serve_mutable(encrypted_files(&first_key, b'O')).await;
+        let dir = fresh_dir("key-rotation");
+        let (ctx, _tx) = JobContext::for_tests(79);
+        let _g = crate::util::allow_loopback_for_tests();
+        let plan =
+            resolve_plan(&ctx, &format!("{}/index.m3u8", fixture.base), &headers(2)).await.unwrap();
+        download_pieces(&ctx, &plan, &headers(2), &dir).await.unwrap();
+        assert_eq!(std::fs::read(dir.join("seg_00000.ts")).unwrap(), vec![b'O'; 37]);
+        assert_eq!(std::fs::read(dir.join("seg_00001.ts")).unwrap(), vec![b'O' + 1; 37]);
+
+        *files.lock().unwrap() = encrypted_files(&rotated_key, b'N');
+        let (ctx_restart, _tx_restart) = JobContext::for_tests(179);
+        let plan2 =
+            resolve_plan(&ctx_restart, &format!("{}/index.m3u8", fixture.base), &headers(2))
+                .await
+                .unwrap();
+        assert_eq!(
+            plan.fingerprint, plan2.fingerprint,
+            "the fixture changes only key bytes, not playlist addressing"
+        );
+        download_pieces(&ctx_restart, &plan2, &headers(2), &dir).await.unwrap();
+        assert_eq!(std::fs::read(dir.join("seg_00000.ts")).unwrap(), vec![b'N'; 37]);
+        assert_eq!(std::fs::read(dir.join("seg_00001.ts")).unwrap(), vec![b'N' + 1; 37]);
+        let hits = fixture.hits.lock().unwrap();
+        assert_eq!(hits["/key.bin"], 2, "key bytes are refetched on resume");
+        assert_eq!(hits["/seg0.ts"], 2, "old-key plaintext is not reused");
+        assert_eq!(hits["/seg1.ts"], 2, "old-key plaintext is not reused");
+        drop(hits);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Key rotation commonly mints a new key URI too. Even when the key bytes happen
+    /// to be identical, that URI is part of the playlist identity and invalidates pieces.
+    #[tokio::test]
+    async fn rotated_key_uri_invalidates_piece_cache() {
+        let key = [0x33; AES_KEY_BYTES];
+        let playlist = |key_name: &str| {
+            format!(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-KEY:METHOD=AES-128,URI=\"{key_name}\"\n#EXTINF:1.0,\nseg0.ts\n#EXT-X-ENDLIST\n"
+            )
+        };
+        let build_files = |key_name: &str| {
+            let mut files = HashMap::new();
+            files.insert("/index.m3u8".to_string(), playlist(key_name).into_bytes());
+            files.insert("/key-a.bin".to_string(), key.to_vec());
+            files.insert("/key-b.bin".to_string(), key.to_vec());
+            files
+                .insert("/seg0.ts".to_string(), encrypt_aes128(&key, &sequence_iv(0), &[b'K'; 21]));
+            files
+        };
+        let (fixture, files) = serve_mutable(build_files("key-a.bin")).await;
+        let dir = fresh_dir("key-uri-rotation");
+        let (ctx, _tx) = JobContext::for_tests(80);
+        let _g = crate::util::allow_loopback_for_tests();
+        let plan =
+            resolve_plan(&ctx, &format!("{}/index.m3u8", fixture.base), &headers(1)).await.unwrap();
+        download_pieces(&ctx, &plan, &headers(1), &dir).await.unwrap();
+        assert_eq!(fixture.hits.lock().unwrap()["/seg0.ts"], 1);
+
+        files.lock().unwrap().insert("/index.m3u8".to_string(), playlist("key-b.bin").into_bytes());
+        let (ctx_restart, _tx_restart) = JobContext::for_tests(181);
+        let plan2 =
+            resolve_plan(&ctx_restart, &format!("{}/index.m3u8", fixture.base), &headers(1))
+                .await
+                .unwrap();
+        assert_ne!(plan.fingerprint, plan2.fingerprint);
+        download_pieces(&ctx_restart, &plan2, &headers(1), &dir).await.unwrap();
+        let hits = fixture.hits.lock().unwrap();
+        assert_eq!(hits["/seg0.ts"], 2, "a different key URI misses the piece cache");
+        assert_eq!(hits["/key-b.bin"], 1);
         drop(hits);
         std::fs::remove_dir_all(dir).unwrap();
     }

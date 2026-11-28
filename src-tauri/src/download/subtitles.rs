@@ -219,34 +219,82 @@ pub fn normalize_subtitle_selection(
     out
 }
 
-/// Replace (never append) the timedtext `fmt` parameter with `vtt`.
+/// Replace every exact `fmt` parameter value with `vtt` without decoding or
+/// re-encoding anything else in the query. Returns `None` when no exact
+/// byte-level `fmt` key exists. Value bytes are the only original bytes dropped;
+/// signed parameters such as percent-encoded `sig` values stay bit-for-bit intact.
+fn replace_fmt_values_preserving_query(query: &str) -> Option<String> {
+    let bytes = query.as_bytes();
+    let mut rewritten = Vec::with_capacity(query.len());
+    let mut copied = 0usize;
+    let mut position = 0usize;
+    let mut replaced = false;
+    loop {
+        let end =
+            query[position..].find('&').map(|relative| position + relative).unwrap_or(query.len());
+        let equals = query[position..end].find('=').map(|relative| position + relative);
+        let key_end = equals.unwrap_or(end);
+        if bytes[position..key_end] == *b"fmt" {
+            let value_start = equals.map(|index| index + 1).unwrap_or(end);
+            rewritten.extend_from_slice(&bytes[copied..value_start]);
+            if equals.is_none() {
+                rewritten.push(b'=');
+            }
+            rewritten.extend_from_slice(b"vtt");
+            copied = end;
+            replaced = true;
+        }
+        if end == query.len() {
+            break;
+        }
+        position = end + 1;
+    }
+    if !replaced {
+        return None;
+    }
+    rewritten.extend_from_slice(&bytes[copied..]);
+    // ASCII delimiter positions are UTF-8 boundaries, and every copied byte
+    // comes from the original valid string; the inserted bytes are ASCII.
+    Some(String::from_utf8(rewritten).expect("query rewrite preserves UTF-8"))
+}
+
+/// Replace (never normalize) the timedtext `fmt` parameter with `vtt`.
+///
+/// YouTube signs timedtext URLs. `Url::query_pairs_mut()` decodes and then
+/// re-encodes every parameter, which can turn byte-distinct but semantically
+/// equal encodings into a signature mismatch. Validation therefore uses `Url`,
+/// while the returned string is assembled from the original bytes.
 pub fn timedtext_vtt_url(base_url: &str) -> SubtitleResult<String> {
-    let mut url = Url::parse(base_url.trim())
+    let original = base_url.trim();
+    let url = Url::parse(original)
         .map_err(|error| SubtitleError::InvalidUrl(format!("invalid timedtext URL: {error}")))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(SubtitleError::InvalidUrl("timedtext URL must be HTTP(S)".into()));
     }
-    let pairs: Vec<(String, String)> =
-        url.query_pairs().map(|(key, value)| (key.into_owned(), value.into_owned())).collect();
-    let mut replaced = false;
-    {
-        let mut query = url.query_pairs_mut();
-        query.clear();
-        for (key, value) in pairs {
-            if key == "fmt" {
-                if !replaced {
-                    query.append_pair("fmt", "vtt");
-                    replaced = true;
-                }
-            } else {
-                query.append_pair(&key, &value);
+
+    let end_before_fragment = original.find('#').unwrap_or(original.len());
+    let query_start = original[..end_before_fragment].find('?').map(|index| index + 1);
+    let mut out = String::with_capacity(original.len() + "&fmt=vtt".len());
+    if let Some(query_start) = query_start {
+        let query_end = end_before_fragment;
+        let query = &original[query_start..query_end];
+        out.push_str(&original[..query_start]);
+        if let Some(rewritten) = replace_fmt_values_preserving_query(query) {
+            out.push_str(&rewritten);
+        } else {
+            out.push_str(query);
+            if !query.is_empty() && !query.ends_with('&') {
+                out.push('&');
             }
+            out.push_str("fmt=vtt");
         }
-        if !replaced {
-            query.append_pair("fmt", "vtt");
-        }
+        out.push_str(&original[query_end..]);
+    } else {
+        out.push_str(&original[..end_before_fragment]);
+        out.push_str("?fmt=vtt");
+        out.push_str(&original[end_before_fragment..]);
     }
-    Ok(url.to_string())
+    Ok(out)
 }
 
 fn subtitle_filename(base_filename: &str, language: &str, extension: &str) -> String {
@@ -1219,8 +1267,32 @@ mod tests {
         .unwrap();
         let parsed = Url::parse(&url).unwrap();
         let fmts: Vec<_> = parsed.query_pairs().filter(|(key, _)| key == "fmt").collect();
-        assert_eq!(fmts, vec![("fmt".into(), "vtt".into())]);
+        assert_eq!(fmts, vec![("fmt".into(), "vtt".into()), ("fmt".into(), "vtt".into())]);
         assert!(parsed.query_pairs().any(|(key, value)| key == "sig" && value == "abc"));
+        assert!(!parsed.query_pairs().any(|(key, value)| key == "fmt" && value != "vtt"));
+    }
+
+    #[test]
+    fn timedtext_rewrite_preserves_every_signed_query_byte() {
+        let input = "https://www.youtube.com/api/timedtext?v=abc%2Fdef&sig=Z%2Fy%2B+x%3D&expire=1900000000&lang=en-US&fmt=srv3&origin=https%3A%2F%2Fexample.com%2Fa+b#caption%2Ffrag";
+        let expected = "https://www.youtube.com/api/timedtext?v=abc%2Fdef&sig=Z%2Fy%2B+x%3D&expire=1900000000&lang=en-US&fmt=vtt&origin=https%3A%2F%2Fexample.com%2Fa+b#caption%2Ffrag";
+        assert_eq!(timedtext_vtt_url(input).unwrap(), expected);
+    }
+
+    #[test]
+    fn timedtext_rewrite_appends_without_touching_existing_bytes() {
+        let input = "https://www.youtube.com/api/timedtext?v=abc%2Fdef&sig=Z%2Fy%2B+x%3D";
+        assert_eq!(timedtext_vtt_url(input).unwrap(), format!("{input}&fmt=vtt"));
+        let fragment = "https://www.youtube.com/api/timedtext#captions%2Ffrag";
+        assert_eq!(
+            timedtext_vtt_url(fragment).unwrap(),
+            "https://www.youtube.com/api/timedtext?fmt=vtt#captions%2Ffrag"
+        );
+        let empty_query = "https://www.youtube.com/api/timedtext?#captions";
+        assert_eq!(
+            timedtext_vtt_url(empty_query).unwrap(),
+            "https://www.youtube.com/api/timedtext?fmt=vtt#captions"
+        );
     }
 
     #[test]

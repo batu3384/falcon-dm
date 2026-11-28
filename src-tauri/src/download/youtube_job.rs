@@ -22,6 +22,9 @@ use crate::download::ytselect::{parse_chain, select, Selection, DEFAULT_VIDEO_FO
 use crate::download::DownloadError;
 use crate::storage::models::SubtitleTrackSelection;
 use crate::util::{sanitize_filename, split_falcon_format};
+use shiguredo_mp4::boxes::MoovBox;
+use shiguredo_mp4::Decode;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -181,16 +184,106 @@ fn rewrite_state_url(save_dir: &Path, filename: &str, id: i64, url: &str) -> boo
     std::fs::rename(&tmp, &path).is_ok()
 }
 
+/// Same malformed-input ceiling as the MP4 muxer. `moov` is metadata, so this
+/// stays bounded even though media payloads may be arbitrarily large.
+const MAX_MP4_MOOV_BOX_BYTES: u64 = 64 * 1024 * 1024;
+
+fn read_exact_at(file: &mut std::fs::File, offset: u64, bytes: &mut [u8]) -> bool {
+    file.seek(SeekFrom::Start(offset)).is_ok() && file.read_exact(bytes).is_ok()
+}
+
+/// Cheap completeness evidence for an MP4-family child when the extraction did
+/// not know content-length: the top-level box stream must tile the file exactly,
+/// start with `ftyp`, carry a decodable non-empty `moov`, and contain media bytes
+/// in `mdat`. A truncation either cuts a box header/payload boundary or removes
+/// one of those facts. EOF-sized boxes are rejected here because they make a
+/// truncated tail indistinguishable from a complete one.
+fn mp4_structure_is_complete(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    let file_len = meta.len();
+    let mut offset = 0u64;
+    let mut first_box = true;
+    let mut saw_moov = false;
+    let mut saw_mdat_payload = false;
+    while offset < file_len {
+        if file_len - offset < 8 {
+            return false;
+        }
+        let mut header = [0u8; 8];
+        if !read_exact_at(&mut file, offset, &mut header) {
+            return false;
+        }
+        let size32 = u32::from_be_bytes(header[..4].try_into().expect("four-byte size"));
+        let box_type: [u8; 4] = header[4..].try_into().expect("four-byte box type");
+        let mut header_size = 8u64;
+        let box_size = if size32 == 1 {
+            if file_len - offset < 16 {
+                return false;
+            }
+            let mut large_size = [0u8; 8];
+            if !read_exact_at(&mut file, offset + 8, &mut large_size) {
+                return false;
+            }
+            header_size = 16;
+            u64::from_be_bytes(large_size)
+        } else if size32 == 0 {
+            return false;
+        } else {
+            u64::from(size32)
+        };
+        if box_size < header_size || box_size > file_len - offset {
+            return false;
+        }
+        if first_box && box_type != *b"ftyp" {
+            return false;
+        }
+        first_box = false;
+        match box_type {
+            ty if ty == *b"moov" => {
+                if saw_moov || box_size > MAX_MP4_MOOV_BOX_BYTES {
+                    return false;
+                }
+                let Ok(box_len) = usize::try_from(box_size) else {
+                    return false;
+                };
+                let mut bytes = vec![0u8; box_len];
+                if !read_exact_at(&mut file, offset, &mut bytes) {
+                    return false;
+                }
+                let Ok((moov, consumed)) = MoovBox::decode(&bytes) else {
+                    return false;
+                };
+                if consumed != bytes.len() || moov.trak_boxes.is_empty() {
+                    return false;
+                }
+                saw_moov = true;
+            }
+            ty if ty == *b"mdat" => {
+                saw_mdat_payload |= box_size > header_size;
+            }
+            _ => {}
+        }
+        offset += box_size;
+    }
+    saw_moov && saw_mdat_payload
+}
+
 /// A finished child stream: complete file present, no in-progress siblings.
 /// googlevideo entities are immutable per itag, so a size match is strong
-/// evidence; without a known length any non-zero complete file counts.
+/// evidence. Without a known length, nonzero size alone proves nothing: the
+/// file must carry a structurally complete MP4 representation instead.
 fn child_complete(path: &Path, expected_len: Option<u64>, id: i64) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
     let size_matches = match expected_len {
         Some(len) => meta.len() == len,
-        None => meta.len() > 0,
+        None => meta.len() > 0 && mp4_structure_is_complete(path),
     };
     if !size_matches {
         return false;
@@ -518,6 +611,33 @@ mod tests {
     }
 
     #[test]
+    fn child_complete_unknown_length_requires_mp4_structure() {
+        let root = std::env::temp_dir().join(format!("falcon-ytchild-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/dash");
+        for fixture in ["video-frag.mp4", "video-progressive.mp4", "video-progressive-late.mp4"] {
+            let bytes = std::fs::read(fixture_dir.join(fixture)).unwrap();
+            let path = root.join(fixture);
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(
+                child_complete(&path, None, 9898),
+                "structurally complete {fixture} is valid resume evidence"
+            );
+            std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+            assert!(
+                !child_complete(&path, None, 9898),
+                "truncated nonzero {fixture} is not completion evidence"
+            );
+            std::fs::write(&path, vec![0x5a; bytes.len()]).unwrap();
+            assert!(
+                !child_complete(&path, None, 9898),
+                "same-length non-MP4 bytes are not completion evidence"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn expired_credentials_match_only_the_rotation_statuses() {
         assert!(is_expired_credentials(&DownloadError::Fatal("HTTP 401".into())));
         assert!(is_expired_credentials(&DownloadError::Fatal("HTTP 403".into())));
@@ -557,6 +677,7 @@ ytcfg.set({"INNERTUBE_API_KEY":"fixture-key","INNERTUBE_CLIENT_VERSION":"2.20260
 
     struct E2eServer {
         origin: String,
+        hits: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -616,13 +737,20 @@ ytcfg.set({"INNERTUBE_API_KEY":"fixture-key","INNERTUBE_CLIENT_VERSION":"2.20260
         let video = Arc::new(video);
         let audio = Arc::new(audio);
         let player = Arc::new(player);
+        let hits =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::<String, usize>::new()));
+        let hits_outer = Arc::clone(&hits);
         let task = tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     continue;
                 };
-                let (video, audio, player) =
-                    (Arc::clone(&video), Arc::clone(&audio), Arc::clone(&player));
+                let (video, audio, player, hits) = (
+                    Arc::clone(&video),
+                    Arc::clone(&audio),
+                    Arc::clone(&player),
+                    Arc::clone(&hits),
+                );
                 tokio::spawn(async move {
                     let mut raw = Vec::new();
                     let mut chunk = [0u8; 8192];
@@ -643,6 +771,10 @@ ytcfg.set({"INNERTUBE_API_KEY":"fixture-key","INNERTUBE_CLIENT_VERSION":"2.20260
                         .and_then(|l| l.split_whitespace().nth(1))
                         .unwrap_or("");
                     let path = target.split('?').next().unwrap_or("");
+                    {
+                        let mut hits = hits.lock().unwrap();
+                        *hits.entry(path.to_string()).or_insert(0) += 1;
+                    }
                     if path == "/watch" {
                         write_text(&mut socket, 200, "text/html", E2E_WATCH_PAGE).await;
                     } else if path == "/youtubei/v1/player" {
@@ -657,7 +789,7 @@ ytcfg.set({"INNERTUBE_API_KEY":"fixture-key","INNERTUBE_CLIENT_VERSION":"2.20260
                 });
             }
         });
-        E2eServer { origin, task }
+        E2eServer { origin, hits: hits_outer, task }
     }
 
     async fn write_text(
@@ -709,6 +841,60 @@ ytcfg.set({"INNERTUBE_API_KEY":"fixture-key","INNERTUBE_CLIENT_VERSION":"2.20260
     fn dash_fixture(name: &str) -> Vec<u8> {
         std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/dash").join(name))
             .unwrap()
+    }
+
+    /// Unknown content-length must not turn a stale nonzero child into completion
+    /// evidence: the truncated video is fetched again, while the structurally
+    /// complete audio child is reused.
+    #[tokio::test]
+    async fn unknown_length_truncated_child_is_redownloaded_not_accepted() {
+        let _loopback = crate::util::allow_loopback_for_tests();
+        let video = dash_fixture("video-frag.mp4");
+        let audio = dash_fixture("audio-frag.m4a");
+        let server = start_e2e_server(video.clone(), audio.clone()).await;
+        let root = std::env::temp_dir().join(format!("falcon-ytjob-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let id = 4545;
+        let run_dir = run_dir_for(root.to_str().unwrap(), id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("video.mp4"), &video[..video.len() - 17]).unwrap();
+        std::fs::write(run_dir.join("audio.m4a"), &audio).unwrap();
+
+        let fetcher = ValidatedFetcher::with_endpoint_origin(&server.origin);
+        let mut extraction = extract("https://www.youtube.com/watch?v=dQw4w9WgXcQ", &fetcher, None)
+            .await
+            .expect("fixture extraction");
+        for format in &mut extraction.formats {
+            let path = if format.has_video { "/video.mp4" } else { "/audio.m4a" };
+            format.url = format!("{}{path}?itag={}", server.origin, format.itag);
+        }
+        let mut video_format =
+            extraction.formats.iter().find(|format| format.itag == 137).unwrap().clone();
+        let mut audio_format =
+            extraction.formats.iter().find(|format| format.itag == 140).unwrap().clone();
+        video_format.content_length = None;
+        audio_format.content_length = None;
+
+        let (ctx, _cancel) = JobContext::for_tests(id);
+        let headers = HttpHeaders { max_connections: 1, ..Default::default() };
+        let (video_path, audio_path) =
+            download_pair(&ctx, &run_dir, &video_format, &audio_format, &headers)
+                .await
+                .expect("pair download");
+        assert_eq!(std::fs::read(video_path).unwrap(), video);
+        assert_eq!(std::fs::read(audio_path).unwrap(), audio);
+        let hits = server.hits.lock().unwrap();
+        assert!(
+            hits.get("/video.mp4").copied().unwrap_or(0) > 0,
+            "truncated unknown-length child is downloaded again"
+        );
+        assert_eq!(
+            hits.get("/audio.m4a").copied().unwrap_or(0),
+            0,
+            "structurally complete unknown-length child is reused"
+        );
+        drop(hits);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

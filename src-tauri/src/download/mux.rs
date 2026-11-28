@@ -1,7 +1,7 @@
 //! Streaming MPEG-TS remuxing without external tools.
 //!
 //! The MP4 path is deliberately two-pass over the segment files: the first
-//! pass measures the sample tables with zero media payloads in memory, the
+//! pass measures the sample tables without retaining media payloads, and the
 //! second pass writes payload bytes directly to disk. The demuxer's event
 //! queue is drained after every read in both passes, so memory scales with
 //! the MP4 sample tables rather than with the media byte size.
@@ -1507,18 +1507,30 @@ struct TrackBuilders {
 impl TrackBuilders {
     fn add_or_update(&mut self, spec: TrackSpec) -> Result<(), RemuxError> {
         if let Some(existing) = self.tracks.get_mut(&spec.track_id) {
-            if existing.sample_count == 0
-                && (existing.spec.config != spec.config
-                    || existing.spec.timescale != spec.timescale)
+            if existing.spec.config == spec.config && existing.spec.timescale == spec.timescale {
+                // PMT descriptor refreshes can re-announce the exact same codec
+                // state. They do not alter the single output sample entry.
+                return Ok(());
+            }
+            if std::mem::discriminant(&existing.spec.config) != std::mem::discriminant(&spec.config)
             {
-                return existing.rebuild(spec);
+                return Err(RemuxError::fatal(format!(
+                    "codec family changed mid-stream for track {} ({} -> {}); progressive MP4 cannot represent it",
+                    spec.track_id.value(),
+                    existing.spec.config.name(),
+                    spec.config.name()
+                )));
             }
-            if existing.spec.config != spec.config || existing.spec.timescale != spec.timescale {
-                return Err(RemuxError::fatal(
-                    "codec configuration changes mid-stream are unsupported",
-                ));
+            if existing.sample_count != 0 {
+                return Err(RemuxError::fatal(format!(
+                    "codec configuration changed mid-stream for track {}; progressive MP4 sample descriptions cannot describe both configurations",
+                    spec.track_id.value()
+                )));
             }
-            return Ok(());
+            // The shiguredo muxer is not told about a track until its first
+            // sample, so a same-family re-probe before that point can still be
+            // represented coherently. Once seeded, the branch above is fatal.
+            return existing.rebuild(spec);
         }
 
         let Some((kind, sample_entry)) = classify_spec(&spec)? else {
@@ -1754,6 +1766,8 @@ fn scan_media(
             }
             DemuxEvent::Sample { track_id, sample, .. } => {
                 if let Some(track) = tracks.tracks.get_mut(&track_id) {
+                    // Mp4FileMuxer records offsets, sizes and timing metadata;
+                    // the payload itself is dropped with this event.
                     append_sample(&mut muxer, track, &sample, position)?;
                     position += sample.data.len() as u64;
                 }
@@ -1826,6 +1840,8 @@ pub(crate) fn remux_ts_files_to_mp4(
             }
             DemuxEvent::Sample { track_id, sample, .. } => {
                 if let Some(track) = tracks.tracks.get_mut(&track_id) {
+                    // Payload bytes go straight to mdat; the muxer receives
+                    // only their offset/size plus sample-table metadata.
                     writer.write_all(&sample.data).map_err(|e| {
                         RemuxError::fatal(format!("could not write media data: {e}"))
                     })?;
@@ -1926,6 +1942,33 @@ mod tests {
     fn fixture_parts() -> Vec<PathBuf> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/hls");
         (0..3).map(|i| root.join(format!("part{i}.ts"))).collect()
+    }
+
+    fn ts_track_specs(path: &Path) -> BTreeMap<TrackId, TrackSpec> {
+        let mut specs = BTreeMap::new();
+        stream_events(&[path.to_path_buf()], &|| false, |event| {
+            if let DemuxEvent::TrackAdded(spec) = event {
+                specs.insert(spec.track_id, spec);
+            }
+            Ok(())
+        })
+        .unwrap();
+        specs
+    }
+
+    fn fixture_avc_spec() -> TrackSpec {
+        ts_track_specs(&Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/hls/part0.ts"))
+            .into_values()
+            .find(|spec| matches!(spec.config, CodecConfig::Avc { .. }))
+            .expect("part0 fixture has an AVC track")
+    }
+
+    fn seed_output_track(builders: &mut TrackBuilders, track_id: TrackId) {
+        let mut muxer = Mp4FileMuxer::new().unwrap();
+        let position = muxer.initial_boxes_bytes().len() as u64;
+        let sample = transmux::Sample::timed_raw(vec![1, 2, 3, 4], 0, 0, NonZeroU32::new(3_000));
+        let track = builders.tracks.get_mut(&track_id).expect("seeded track");
+        append_sample(&mut muxer, track, &sample, position).unwrap();
     }
 
     fn out(name: &str) -> PathBuf {
@@ -2094,6 +2137,66 @@ mod tests {
         let result = remux_ts_files_to_mp4(&fixture_parts(), &output, &|| true);
         assert_eq!(result, Err(RemuxError::Cancelled));
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn midstream_parameter_set_update_is_a_typed_fatal_error() {
+        let spec = fixture_avc_spec();
+        let mut builders = TrackBuilders::default();
+        builders.add_or_update(spec.clone()).unwrap();
+        seed_output_track(&mut builders, spec.track_id);
+
+        let mut changed = spec.clone();
+        let CodecConfig::Avc { config, .. } = &mut changed.config else {
+            panic!("fixture spec is AVC");
+        };
+        let sps = config.config.sps.first_mut().expect("fixture avcC has SPS");
+        let last = sps.0.len() - 1;
+        sps.0[last] ^= 0x01;
+
+        let Err(RemuxError::Fatal(message)) = builders.add_or_update(changed) else {
+            panic!("seeded-track SPS change must be rejected");
+        };
+        assert!(message.contains("codec configuration changed mid-stream"), "{message}");
+        assert_eq!(builders.tracks[&spec.track_id].sample_count, 1, "failed update is not applied");
+    }
+
+    #[test]
+    fn byte_identical_config_update_after_samples_is_accepted() {
+        let spec = fixture_avc_spec();
+        let mut builders = TrackBuilders::default();
+        builders.add_or_update(spec.clone()).unwrap();
+        seed_output_track(&mut builders, spec.track_id);
+
+        builders.add_or_update(spec.clone()).unwrap();
+        // TS can also re-announce a track when only PMT descriptors change.
+        // Those bytes are not part of the MP4 sample description, so they do
+        // not make the codec-configuration update a semantic change.
+        let mut metadata_refresh = spec.clone();
+        metadata_refresh.es_info_descriptors.extend_from_slice(&[0x52, 0x01, 0x01]);
+        builders.add_or_update(metadata_refresh).unwrap();
+
+        let track = &builders.tracks[&spec.track_id];
+        assert_eq!(track.spec.config, spec.config);
+        assert_eq!(track.sample_count, 1);
+    }
+
+    #[test]
+    fn codec_family_change_is_fatal_even_before_the_first_sample() {
+        let avc = fixture_avc_spec();
+        let hevc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/hls/h265.ts");
+        let mut hevc = ts_track_specs(&hevc_path)
+            .into_values()
+            .find(|spec| matches!(spec.config, CodecConfig::Hevc { .. }))
+            .expect("h265 fixture has an HEVC track");
+        hevc.track_id = avc.track_id;
+
+        let mut builders = TrackBuilders::default();
+        builders.add_or_update(avc).unwrap();
+        let Err(RemuxError::Fatal(message)) = builders.add_or_update(hevc) else {
+            panic!("AVC to HEVC update must be rejected even before samples");
+        };
+        assert!(message.contains("codec family changed mid-stream"), "{message}");
     }
 
     fn dash_fixture(name: &str) -> PathBuf {
@@ -2451,6 +2554,122 @@ mod tests {
         {
             usage.ru_maxrss as u64 * 1024
         }
+    }
+
+    /// Build a variant of the small HLS fixture whose first video access unit
+    /// carries about 1 MiB of trailing filler payload. The filler is inserted
+    /// as whole TS packets before the next video PES start. Sixteen-aligning
+    /// the insertion preserves the PID continuity-counter sequence of every
+    /// following original packet, so the ordinary demux path sees one large
+    /// sample rather than a synthetic discontinuity.
+    #[cfg(unix)]
+    fn write_large_sample_ts(path: &Path) {
+        const TS_PACKET_BYTES: usize = 188;
+        const VIDEO_PID: u16 = 0x100;
+        // 356 continuity-counter cycles × 16 packets × 184 payload bytes is
+        // almost exactly 1 MiB of added PES payload.
+        const FILLER_CYCLES: usize = 356;
+
+        let source =
+            std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/hls/part0.ts"))
+                .unwrap();
+        assert_eq!(source.len() % TS_PACKET_BYTES, 0);
+        let packet_count = source.len() / TS_PACKET_BYTES;
+        let packet = |index: usize| &source[index * TS_PACKET_BYTES..(index + 1) * TS_PACKET_BYTES];
+        let pid = |packet: &[u8]| (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+        let pusi = |packet: &[u8]| packet[1] & 0x40 != 0;
+        let first_video = (0..packet_count)
+            .find(|&index| pid(packet(index)) == VIDEO_PID && pusi(packet(index)))
+            .expect("fixture has a video PES start");
+        let next_video = (first_video + 1..packet_count)
+            .find(|&index| pid(packet(index)) == VIDEO_PID && pusi(packet(index)))
+            .expect("fixture has a second video PES start");
+        let last_cc = (first_video..next_video)
+            .rev()
+            .find_map(|index| {
+                let bytes = packet(index);
+                (pid(bytes) == VIDEO_PID).then_some(bytes[3] & 0x0f)
+            })
+            .expect("first video PES has packets");
+        let filler_packets = FILLER_CYCLES * 16;
+
+        let mut expanded = Vec::with_capacity(source.len() + filler_packets * TS_PACKET_BYTES);
+        expanded.extend_from_slice(&source[..next_video * TS_PACKET_BYTES]);
+        for n in 0..filler_packets {
+            let mut filler = [0xffu8; TS_PACKET_BYTES];
+            filler[0] = 0x47;
+            filler[1] = ((VIDEO_PID >> 8) as u8) & 0x1f;
+            filler[2] = (VIDEO_PID & 0xff) as u8;
+            filler[3] = 0x10 | (((usize::from(last_cc) + 1 + n) % 16) as u8);
+            expanded.extend_from_slice(&filler);
+        }
+        expanded.extend_from_slice(&source[next_video * TS_PACKET_BYTES..]);
+        std::fs::write(path, expanded).unwrap();
+    }
+
+    /// The TS input is a small segment with one roughly-1 MiB synthetic video
+    /// sample, repeated as input files until the logical media size is large.
+    /// That keeps MP4 table entries tiny while making payload bytes dominate:
+    /// if sample payloads accumulate anywhere, RSS must cross a fraction of
+    /// the input size that bounded streaming cannot approach. As with the
+    /// merge test, child-process isolation keeps `ru_maxrss` independent of
+    /// other tests.
+    #[cfg(unix)]
+    #[test]
+    fn large_ts_remux_memory_does_not_scale_with_payload_bytes() {
+        const CHILD_ENV: &str = "FALCON_TS_MUX_MEMORY_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let executable = std::env::current_exe().unwrap();
+            let output = std::process::Command::new(executable)
+                .args([
+                    "download::mux::tests::large_ts_remux_memory_does_not_scale_with_payload_bytes",
+                    "--exact",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "TS memory child failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let dir =
+            std::env::temp_dir().join(format!("falcon-mux-ts-memory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("large-sample.ts");
+        write_large_sample_ts(&input);
+        let input_len = input.metadata().unwrap().len();
+        assert!(input_len > 1024 * 1024, "synthetic sample must dominate the segment");
+        let copies = 128;
+        let inputs = vec![input; copies];
+        let logical_input_bytes = input_len * copies as u64;
+        assert!(logical_input_bytes > 128 * 1024 * 1024);
+
+        let output = dir.join("large-ts-memory.mp4");
+        remux_ts_files_to_mp4(&inputs, &output, &|| false).unwrap();
+        let output_bytes = output.metadata().unwrap().len();
+        assert!(
+            output_bytes > logical_input_bytes * 9 / 10,
+            "large synthetic payloads were not carried into the MP4 ({output_bytes} output bytes from {logical_input_bytes} input bytes)"
+        );
+        let peak = max_rss_bytes();
+        let _ = std::fs::remove_dir_all(dir);
+        eprintln!(
+            "large TS remux peak RSS: {peak} bytes for {logical_input_bytes} input bytes ({output_bytes} output bytes)"
+        );
+        // Whole-payload buffering anywhere in the demux/mux chain would cross
+        // this quarter-input budget immediately. The remaining memory is the
+        // small MP4 sample tables, bounded parser state, one access unit, and
+        // the 1 MiB I/O chunk — none of which scales with total media payload bytes.
+        let budget = logical_input_bytes / 4;
+        assert!(
+            peak < budget,
+            "peak RSS {peak} bytes scaled with a {logical_input_bytes}-byte TS input (budget {budget})"
+        );
     }
 
     /// The parent spawns this same test in an isolated test process so

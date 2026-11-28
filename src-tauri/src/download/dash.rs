@@ -23,7 +23,7 @@ use futures::stream::{self, StreamExt};
 use reqwest::header::CONTENT_ENCODING;
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -38,6 +38,10 @@ const MAX_SEGMENTS_PER_REPRESENTATION: usize = 100_000;
 const SEGMENT_ATTEMPTS: u32 = 4;
 const ERR_DASH_LIVE: &str = "ERR_DASH_LIVE";
 const ERR_DASH_DRM: &str = "ERR_DASH_DRM";
+const ERR_DASH_HIERARCHICAL_SIDX: &str = "ERR_DASH_HIERARCHICAL_SIDX";
+const ERR_DASH_MULTIPERIOD: &str = "ERR_DASH_MULTIPERIOD";
+const ERR_DASH_NO_MUX_COMPATIBLE: &str = "ERR_DASH_NO_MUX_COMPATIBLE";
+const CACHE_FORMAT_VERSION: u32 = 2;
 
 pub(crate) fn dash_session_dirname(download_id: i64) -> String {
     format!("dash-{download_id}.falcondm-temp")
@@ -320,11 +324,13 @@ fn expand_timeline_segments(
 }
 
 fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+    let end = at.checked_add(4)?;
+    Some(u32::from_be_bytes(bytes.get(at..end)?.try_into().ok()?))
 }
 
 fn read_u64(bytes: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_be_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+    let end = at.checked_add(8)?;
+    Some(u64::from_be_bytes(bytes.get(at..end)?.try_into().ok()?))
 }
 
 /// Parse the media references of every top-level `sidx` box in an index range.
@@ -343,7 +349,9 @@ fn parse_sidx_box(
     let read32 = |at: &mut usize| -> Result<u32, DownloadError> {
         let value = read_u32(body, *at)
             .ok_or_else(|| DownloadError::fatal("Truncated DASH segment index"))?;
-        *at += 4;
+        *at = (*at)
+            .checked_add(4)
+            .ok_or_else(|| DownloadError::fatal("DASH segment index offset overflow"))?;
         Ok(value)
     };
     let _reference_id = read32(&mut at)?;
@@ -352,24 +360,25 @@ fn parse_sidx_box(
         let _earliest_presentation_time = read32(&mut at)?;
         u64::from(read32(&mut at)?)
     } else {
-        if body.len() < at + 16 {
-            return Err(DownloadError::fatal("Truncated DASH segment index"));
-        }
-        let _earliest_presentation_time = read_u64(body, at).unwrap_or(0);
-        at += 8;
+        let _earliest_presentation_time = read_u64(body, at)
+            .ok_or_else(|| DownloadError::fatal("Truncated DASH segment index"))?;
+        at = at
+            .checked_add(8)
+            .ok_or_else(|| DownloadError::fatal("DASH segment index offset overflow"))?;
         let offset = read_u64(body, at)
             .ok_or_else(|| DownloadError::fatal("Truncated DASH segment index"))?;
-        at += 8;
+        at = at
+            .checked_add(8)
+            .ok_or_else(|| DownloadError::fatal("DASH segment index offset overflow"))?;
         offset
     };
-    if body.len() < at + 4 {
-        return Err(DownloadError::fatal("Truncated DASH segment index"));
-    }
-    let reserved_and_count =
-        read_u32(body, at).ok_or_else(|| DownloadError::fatal("Truncated DASH segment index"))?;
-    at += 4;
+    let reserved_and_count = read32(&mut at)?;
     let reference_count = (reserved_and_count & 0xffff) as usize;
-    if body.len() < at + reference_count * 12 {
+    let references_end = reference_count
+        .checked_mul(12)
+        .and_then(|bytes| at.checked_add(bytes))
+        .ok_or_else(|| DownloadError::fatal("DASH segment index reference table overflow"))?;
+    if body.len() < references_end {
         return Err(DownloadError::fatal("Truncated DASH segment index"));
     }
     let mut cursor = box_end
@@ -381,17 +390,16 @@ fn parse_sidx_box(
         let size = u64::from(reference & 0x7fff_ffff);
         let _subsegment_duration = read32(&mut at)?;
         let _sap = read32(&mut at)?;
+        if reference_type != 0 {
+            return Err(DownloadError::fatal(ERR_DASH_HIERARCHICAL_SIDX));
+        }
         if size == 0 || size > MAX_SEGMENT_BYTES {
             return Err(DownloadError::fatal("Invalid DASH indexed segment size"));
         }
         let end = cursor
             .checked_add(size - 1)
             .ok_or_else(|| DownloadError::fatal("DASH segment range overflow"))?;
-        // reference_type 1 is another index, not media bytes. It is skipped while
-        // the cursor still advances so following media references stay aligned.
-        if reference_type == 0 {
-            ranges.push(ByteRange { start: cursor, end });
-        }
+        ranges.push(ByteRange { start: cursor, end });
         cursor = end
             .checked_add(1)
             .ok_or_else(|| DownloadError::fatal("DASH segment range overflow"))?;
@@ -404,30 +412,57 @@ fn parse_sidx_segments(
     index_range: ByteRange,
 ) -> Result<Vec<ByteRange>, DownloadError> {
     let mut ranges = Vec::new();
-    let mut pos = 0usize;
-    while pos + 8 <= index.len() {
-        let type_start = pos + 4;
+    let index_len = u64::try_from(index.len())
+        .map_err(|_| DownloadError::fatal("DASH segment index exceeds u64::MAX"))?;
+    let mut pos = 0u64;
+    while let Some(remaining) = index_len.checked_sub(pos).filter(|remaining| *remaining >= 8) {
+        // `pos` is invariantly inside the bounded index buffer; checked
+        // conversion keeps that invariant explicit at the slice boundary.
+        let pos_index = usize::try_from(pos)
+            .map_err(|_| DownloadError::fatal("DASH segment index offset exceeds usize::MAX"))?;
         let mut size = u64::from(
-            read_u32(index, pos).ok_or_else(|| DownloadError::fatal("Bad DASH segment index"))?,
+            read_u32(index, pos_index)
+                .ok_or_else(|| DownloadError::fatal("Bad DASH segment index"))?,
         );
-        let mut header = 8usize;
+        let mut header_size = 8u64;
         if size == 1 {
-            size = read_u64(index, pos + 8)
+            if remaining < 16 {
+                return Err(DownloadError::fatal("Truncated DASH segment index box"));
+            }
+            let large_size_at = pos
+                .checked_add(8)
+                .and_then(|offset| usize::try_from(offset).ok())
+                .ok_or_else(|| DownloadError::fatal("DASH segment index offset overflow"))?;
+            size = read_u64(index, large_size_at)
                 .ok_or_else(|| DownloadError::fatal("Bad DASH segment index"))?;
-            header = 16;
+            header_size = 16;
         } else if size == 0 {
-            size = (index.len() - pos) as u64;
+            // A zero-sized ISO box extends to EOF. An indexRange is a bounded
+            // slice rather than EOF, so accepting it would make the box extent ambiguous.
+            return Err(DownloadError::fatal("DASH segment index contains a zero-sized box"));
         }
-        if size < header as u64 || pos + size as usize > index.len() {
+        if size < header_size || size > remaining {
             return Err(DownloadError::fatal("Truncated DASH segment index box"));
         }
-        let end = pos + size as usize;
-        if index.get(type_start..type_start + 4) == Some(b"sidx") {
+        let end = pos
+            .checked_add(size)
+            .ok_or_else(|| DownloadError::fatal("DASH segment index offset overflow"))?;
+        if end <= pos {
+            return Err(DownloadError::fatal("DASH segment index box does not advance"));
+        }
+        let end_index = usize::try_from(end)
+            .map_err(|_| DownloadError::fatal("DASH segment index offset exceeds usize::MAX"))?;
+        let box_bytes = index
+            .get(pos_index..end_index)
+            .ok_or_else(|| DownloadError::fatal("Bad DASH segment index"))?;
+        if box_bytes.get(4..8) == Some(b"sidx") {
             let box_end = index_range
                 .start
-                .checked_add(end as u64)
+                .checked_add(end)
                 .ok_or_else(|| DownloadError::fatal("DASH segment index offset overflow"))?;
-            parse_sidx_box(&index[pos + header..end], box_end, &mut ranges)?;
+            let header_len = usize::try_from(header_size)
+                .map_err(|_| DownloadError::fatal("DASH segment index header is invalid"))?;
+            parse_sidx_box(&box_bytes[header_len..], box_end, &mut ranges)?;
         }
         pos = end;
     }
@@ -890,6 +925,110 @@ fn adaptation_kind(adaptation: &AdaptationSet) -> Option<MediaKind> {
     None
 }
 
+fn codec_matches_prefix(codec: &str, prefix: &str) -> bool {
+    codec == prefix || codec.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// Mirrors the input matrix enforced by `mux::merge_av_mp4`: h264 (`avc1`),
+/// h265 (`hev1`/`hvc1`), AV1, VP9, and MPEG-4 AAC in `mp4a`.
+fn mux_mp4_video_codec(codec: &str) -> bool {
+    ["avc1", "hev1", "hvc1", "av01", "vp09"]
+        .iter()
+        .any(|prefix| codec_matches_prefix(codec, prefix))
+}
+
+fn mux_mp4_audio_codec(codec: &str) -> bool {
+    // Bare `mp4a` is potentially AAC and is resolved by the muxer's ESDS
+    // validation. An explicit object type must be 0x40 (MPEG-4 audio): other
+    // `mp4a` object types are not AAC even though they share the sample entry.
+    codec == "mp4a"
+        || codec
+            .strip_prefix("mp4a.")
+            .is_some_and(|object| object == "40" || object.starts_with("40."))
+}
+
+fn mux_mp4_compatible_codecs(codecs: &str, kind: MediaKind) -> bool {
+    let mut primary_codec = false;
+    for raw in codecs.split(',').map(str::trim).filter(|codec| !codec.is_empty()) {
+        let codec = raw.to_ascii_lowercase();
+        match kind {
+            MediaKind::Video => {
+                if mux_mp4_video_codec(&codec) {
+                    primary_codec = true;
+                } else if !mux_mp4_audio_codec(&codec) {
+                    return false;
+                }
+            }
+            MediaKind::Audio => {
+                if mux_mp4_audio_codec(&codec) {
+                    primary_codec = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    primary_codec
+}
+
+fn representation_codecs<'a>(
+    adaptation: &'a AdaptationSet,
+    representation: &'a Representation,
+) -> Option<&'a str> {
+    representation.codecs.as_deref().or(adaptation.codecs.as_deref())
+}
+
+fn representation_mux_compatible(
+    adaptation: &AdaptationSet,
+    representation: &Representation,
+    kind: MediaKind,
+) -> bool {
+    representation_codecs(adaptation, representation)
+        .is_some_and(|codecs| mux_mp4_compatible_codecs(codecs, kind))
+}
+
+fn period_has_adaptation_kind(period: &Period, kind: MediaKind) -> bool {
+    period.adaptations.iter().any(|adaptation| adaptation_kind(adaptation) == Some(kind))
+}
+
+fn available_codec_summary(period: &Period, kind: MediaKind) -> String {
+    let mut codecs = BTreeSet::new();
+    for adaptation in
+        period.adaptations.iter().filter(|adaptation| adaptation_kind(adaptation) == Some(kind))
+    {
+        for representation in &adaptation.representations {
+            match representation_codecs(adaptation, representation) {
+                Some(raw) => {
+                    let mut any = false;
+                    for codec in raw.split(',').map(str::trim).filter(|codec| !codec.is_empty()) {
+                        any = true;
+                        codecs.insert(codec.to_ascii_lowercase());
+                    }
+                    if !any {
+                        codecs.insert("<empty>".to_string());
+                    }
+                }
+                None => {
+                    codecs.insert("<unspecified>".to_string());
+                }
+            }
+        }
+    }
+    if codecs.is_empty() {
+        "none declared".to_string()
+    } else {
+        codecs.into_iter().collect::<Vec<_>>().join(", ")
+    }
+}
+
+fn no_mux_compatible_error(period: &Period, kind: MediaKind) -> DownloadError {
+    DownloadError::fatal(format!(
+        "{ERR_DASH_NO_MUX_COMPATIBLE}: no {} representation is compatible with the MP4 muxer (available codecs: {}; supported video: avc1/hev1/hvc1/av01/vp09; supported audio: mp4a/AAC)",
+        kind.as_str(),
+        available_codec_summary(period, kind)
+    ))
+}
+
 /// Rank by bandwidth first, then width and height as required for video.
 fn representation_rank(
     adaptation: &AdaptationSet,
@@ -902,9 +1041,17 @@ fn representation_rank(
     )
 }
 
-fn best_representation(adaptation: &AdaptationSet) -> Option<(usize, (u64, u64, u64))> {
+fn best_representation(
+    adaptation: &AdaptationSet,
+    kind: MediaKind,
+) -> Option<(usize, (u64, u64, u64))> {
     let mut best: Option<(usize, (u64, u64, u64))> = None;
     for (index, representation) in adaptation.representations.iter().enumerate() {
+        // Codec policy is a filter, not a tiebreak: an unsupported high-bitrate
+        // representation must never win over a muxable lower-bitrate one.
+        if !representation_mux_compatible(adaptation, representation, kind) {
+            continue;
+        }
         let rank = representation_rank(adaptation, representation);
         if best.is_none_or(|(_, best_rank)| rank > best_rank) {
             best = Some((index, rank));
@@ -927,7 +1074,7 @@ fn adaptation_choices(period: &Period) -> Vec<AdaptationChoice<'_>> {
         let Some(kind) = adaptation_kind(adaptation) else {
             continue;
         };
-        let Some((representation_index, rank)) = best_representation(adaptation) else {
+        let Some((representation_index, rank)) = best_representation(adaptation, kind) else {
             continue;
         };
         let main = adaptation.Role.iter().any(|role| {
@@ -986,29 +1133,27 @@ fn period_duration_at(mpd: &MPD, starts: &[Option<Duration>], index: usize) -> O
     None
 }
 
-/// Pick the longest period. Server-side ad insertion produces multi-period
-/// MPDs whose full semantic model is outside this engine; choosing the longest
-/// period keeps the main feature rather than concatenating unrelated ads.
-fn select_longest_period(mpd: &MPD) -> Option<(usize, Option<Duration>)> {
-    if mpd.periods.is_empty() {
-        return None;
-    }
+fn period_has_media_content(period: &Period) -> bool {
+    period.adaptations.iter().any(|adaptation| !adaptation.representations.is_empty())
+}
+
+/// Select the sole media-bearing period. Concatenating periods would require
+/// the full multi-period timing model (including server-side ad insertion), so
+/// more than one media period is a loud unsupported-input error rather than a
+/// silent truncation.
+fn select_media_period(mpd: &MPD) -> Result<Option<(usize, Option<Duration>)>, DownloadError> {
     let starts = period_starts(mpd);
-    let mut best = 0usize;
-    let mut best_duration = period_duration_at(mpd, &starts, 0);
-    for index in 1..mpd.periods.len() {
-        let duration = period_duration_at(mpd, &starts, index);
-        let replace = match (duration, best_duration) {
-            (Some(candidate), Some(current)) => candidate > current,
-            (Some(_), None) => true,
-            _ => false,
-        };
-        if replace {
-            best = index;
-            best_duration = duration;
+    let mut selected = None;
+    for (index, period) in mpd.periods.iter().enumerate() {
+        if !period_has_media_content(period) {
+            continue;
         }
+        if selected.is_some() {
+            return Err(DownloadError::fatal(ERR_DASH_MULTIPERIOD));
+        }
+        selected = Some((index, period_duration_at(mpd, &starts, index)));
     }
-    Some((best, best_duration))
+    Ok(selected)
 }
 
 fn has_content_protection(mpd: &MPD) -> bool {
@@ -1157,7 +1302,7 @@ fn hash_piece(hash: &mut u64, piece: &Piece) {
 
 fn plan_fingerprint(representations: &[RepresentationPlan]) -> String {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    hash_text(&mut hash, "falcon-dash-plan-v1");
+    hash_text(&mut hash, "falcon-dash-plan-v2");
     for representation in representations {
         hash_text(&mut hash, &representation.id);
         hash_text(&mut hash, representation.kind.as_str());
@@ -1197,32 +1342,30 @@ async fn resolve_plan(
     if has_content_protection(&mpd) {
         return Err(DownloadError::fatal(ERR_DASH_DRM));
     }
-    let Some((period_index, period_duration)) = select_longest_period(&mpd) else {
+    let Some((period_index, period_duration)) = select_media_period(&mpd)? else {
         return Err(DownloadError::fatal("DASH manifest has no periods"));
     };
-    if mpd.periods.len() > 1 {
-        log::info!(
-            "download {}: multi-period DASH manifest; using the longest period only (server-side ad periods are not concatenated)",
-            ctx.id
-        );
-    }
     let period = &mpd.periods[period_index];
     let choices = adaptation_choices(period);
     let video = choose_adaptation(&choices, MediaKind::Video);
+    if video.is_none() && period_has_adaptation_kind(period, MediaKind::Video) {
+        return Err(no_mux_compatible_error(period, MediaKind::Video));
+    }
+    let video_has_audio = video.is_some_and(|choice| {
+        let representation = &choice.adaptation.representations[choice.representation_index];
+        representation_codecs(choice.adaptation, representation)
+            .is_some_and(|codecs| codecs_include(codecs, false))
+    });
     let audio = choose_adaptation(&choices, MediaKind::Audio);
+    let audio_required = video.is_none() || !video_has_audio;
+    if audio_required && audio.is_none() && period_has_adaptation_kind(period, MediaKind::Audio) {
+        return Err(no_mux_compatible_error(period, MediaKind::Audio));
+    }
     let mut selected = Vec::new();
     if let Some(video) = video {
         selected.push(video);
     }
     if let Some(audio) = audio {
-        let video_has_audio = video.is_some_and(|choice| {
-            let representation = &choice.adaptation.representations[choice.representation_index];
-            representation
-                .codecs
-                .as_deref()
-                .or(choice.adaptation.codecs.as_deref())
-                .is_some_and(|codecs| codecs_include(codecs, false))
-        });
         if !video_has_audio {
             selected.push(audio);
         }
@@ -1504,7 +1647,7 @@ fn manifest_path(dir: &Path) -> PathBuf {
 
 async fn write_manifest(dir: &Path, plan: &Plan, pieces: usize) -> Result<(), DownloadError> {
     let manifest = CacheManifest {
-        version: 1,
+        version: CACHE_FORMAT_VERSION,
         manifest: plan.manifest_url.to_string(),
         fingerprint: plan.fingerprint.clone(),
         representations: plan.representations.len(),
@@ -1543,7 +1686,7 @@ async fn validate_cache(dir: &Path, plan: &Plan, pieces: usize) -> Result<(), Do
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
     let matches = cached.as_ref().is_some_and(|manifest| {
-        manifest.version == 1
+        manifest.version == CACHE_FORMAT_VERSION
             && manifest.fingerprint == plan.fingerprint
             && manifest.representations == plan.representations.len()
             && manifest.pieces == pieces
@@ -2063,6 +2206,43 @@ mod tests {
     }
 
     #[test]
+    fn sidx_rejects_hostile_box_sizes_without_overflow_or_stalling() {
+        let range = ByteRange { start: 0, end: 15 };
+        for size in [0, 4, u32::MAX] {
+            let mut index = Vec::new();
+            index.extend_from_slice(&size.to_be_bytes());
+            index.extend_from_slice(b"sidx");
+            index.extend_from_slice(&[0; 8]);
+            assert!(
+                parse_sidx_segments(&index, range).is_err(),
+                "32-bit box size {size} must be rejected"
+            );
+        }
+
+        for large_size in [0, 15, u64::MAX] {
+            let mut index = Vec::new();
+            index.extend_from_slice(&1u32.to_be_bytes());
+            index.extend_from_slice(b"sidx");
+            index.extend_from_slice(&large_size.to_be_bytes());
+            assert!(
+                parse_sidx_segments(&index, range).is_err(),
+                "large box size {large_size} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sidx_type_one_reference_fails_closed_with_typed_error() {
+        let sidx = sidx_box(&[0x8000_0014], 0);
+        let range = ByteRange { start: 0, end: sidx.len() as u64 - 1 };
+        let result = parse_sidx_segments(&sidx, range);
+        assert!(
+            matches!(result, Err(DownloadError::Fatal(ref message)) if message == ERR_DASH_HIERARCHICAL_SIDX),
+            "hierarchical indexes must not degrade to partial media output"
+        );
+    }
+
+    #[test]
     fn session_dir_is_per_download() {
         assert_eq!(dash_session_dirname(7), "dash-7.falcondm-temp");
         assert!(dash_session_dir(7).ends_with("downloads_temp/dash-7.falcondm-temp"));
@@ -2271,6 +2451,60 @@ mod tests {
             plan_fingerprint(&[fingerprint_representation("v1", 1000, range, 2, "tok=A")]),
             "segment count matters"
         );
+
+        let mut changed_url = fingerprint_representation("v1", 1000, range, 3, "tok=A");
+        changed_url.segments[1].url =
+            Url::parse("https://cdn.example.com/changed-seg1.m4s?tok=A").unwrap();
+        assert_ne!(base, plan_fingerprint(&[changed_url]), "every segment URL matters");
+
+        let mut reordered = fingerprint_representation("v1", 1000, range, 3, "tok=A");
+        reordered.segments.swap(0, 1);
+        assert_ne!(base, plan_fingerprint(&[reordered]), "segment order matters");
+
+        let mut changed_range = fingerprint_representation("v1", 1000, range, 3, "tok=A");
+        changed_range.segments[0].range = Some(ByteRange { start: 10, end: 20 });
+        assert_ne!(base, plan_fingerprint(&[changed_range]), "segment byte ranges matter");
+    }
+
+    fn test_plan(representation: RepresentationPlan) -> Plan {
+        let source = Url::parse("https://manifest.example.com/index.mpd").unwrap();
+        let representations = vec![representation];
+        let fingerprint = plan_fingerprint(&representations);
+        Plan {
+            source: source.clone(),
+            manifest_url: source,
+            representations,
+            primary: 0,
+            estimated_bytes: None,
+            period_seconds: Some(3.0),
+            fingerprint,
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_segment_urls_invalidate_the_resume_cache() {
+        let range = Some(ByteRange { start: 0, end: 99 });
+        let before = test_plan(fingerprint_representation("same-id", 1000, range, 3, "tok=A"));
+        let mut changed = fingerprint_representation("same-id", 1000, range, 3, "tok=A");
+        changed.segments[1].url =
+            Url::parse("https://cdn.example.com/new-segment-1.m4s?tok=A").unwrap();
+        let after = test_plan(changed);
+        assert_ne!(before.fingerprint, after.fingerprint);
+
+        let dir = fresh_dir("cache-fingerprint");
+        write_manifest(&dir, &before, piece_keys(&before).len()).await.unwrap();
+        let key = PieceKey { representation: 0, kind: PieceKind::Media(0) };
+        let name = piece_name(key);
+        tokio::fs::write(dir.join(&name), b"cached").await.unwrap();
+        tokio::fs::write(dir.join(format!("{name}.len")), b"6").await.unwrap();
+
+        validate_cache(&dir, &after, piece_keys(&after).len()).await.unwrap();
+        assert!(!dir.join(&name).exists(), "a changed segment plan must not reuse cached bytes");
+        let cached: CacheManifest =
+            serde_json::from_slice(&tokio::fs::read(manifest_path(&dir)).await.unwrap()).unwrap();
+        assert_eq!(cached.version, CACHE_FORMAT_VERSION);
+        assert_eq!(cached.fingerprint, after.fingerprint);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -2316,10 +2550,60 @@ mod tests {
         assert!(audio.segments[1].url.as_str().ends_with("/root/cdn/p/a/aud-5000.m4s"));
     }
 
+    #[test]
+    fn mux_codec_matrix_matches_the_mp4_merger() {
+        for codec in ["avc1.64001f", "hev1.1.6.L93.B0", "hvc1", "av01", "vp09.00.10.08"] {
+            assert!(mux_mp4_compatible_codecs(codec, MediaKind::Video), "{codec}");
+        }
+        assert!(mux_mp4_compatible_codecs("avc1.64001f,mp4a.40.2", MediaKind::Video));
+        assert!(mux_mp4_compatible_codecs("mp4a.40.2", MediaKind::Audio));
+        assert!(!mux_mp4_compatible_codecs("mp4a.6b", MediaKind::Audio));
+        assert!(!mux_mp4_compatible_codecs("opus", MediaKind::Audio));
+        assert!(!mux_mp4_compatible_codecs("avc1.64001f,opus", MediaKind::Video));
+        assert!(!mux_mp4_compatible_codecs("vp8", MediaKind::Video));
+    }
+
+    #[tokio::test]
+    async fn mux_filter_prefers_lower_bitrate_aac_over_opus() {
+        let mpd = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+          <Period duration="PT2S"><AdaptationSet contentType="audio" mimeType="audio/mp4">
+            <SegmentTemplate timescale="1000" duration="1000" startNumber="1" media="a$Number$.m4s" initialization="ainit.mp4"/>
+            <Representation id="opus-high" bandwidth="128000" codecs="opus"/>
+            <Representation id="aac-low" bandwidth="64000" codecs="mp4a.40.2"/>
+          </AdaptationSet></Period></MPD>"#;
+        let fixture = serve(one_file_manifest(mpd), Vec::new()).await;
+        let (ctx, _tx) = JobContext::for_tests(70);
+        let _g = crate::util::allow_loopback_for_tests();
+        let plan =
+            resolve_plan(&ctx, &format!("{}/index.mpd", fixture.base), &headers(1)).await.unwrap();
+        assert_eq!(plan.representations.len(), 1);
+        assert_eq!(plan.representations[0].id, "aac-low");
+        assert_eq!(plan.representations[0].bandwidth, 64_000);
+    }
+
+    #[tokio::test]
+    async fn mux_filter_rejects_when_no_compatible_codec_names_available_codecs() {
+        let mpd = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+          <Period duration="PT2S"><AdaptationSet contentType="audio" mimeType="audio/mp4">
+            <SegmentTemplate timescale="1000" duration="1000" startNumber="1" media="a$Number$.m4s"/>
+            <Representation id="opus-only" bandwidth="128000" codecs="opus"/>
+          </AdaptationSet></Period></MPD>"#;
+        let fixture = serve(one_file_manifest(mpd), Vec::new()).await;
+        let (ctx, _tx) = JobContext::for_tests(71);
+        let _g = crate::util::allow_loopback_for_tests();
+        let result = resolve_plan(&ctx, &format!("{}/index.mpd", fixture.base), &headers(1)).await;
+        let Err(DownloadError::Fatal(message)) = result else {
+            panic!("unsupported-only audio must fail before download");
+        };
+        assert!(message.starts_with(ERR_DASH_NO_MUX_COMPATIBLE), "{message}");
+        assert!(message.contains("opus"), "{message}");
+        assert!(message.contains("mp4a/AAC"), "{message}");
+    }
+
     #[tokio::test]
     async fn segment_list_supports_initialization_media_and_byte_ranges() {
         let mpd = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
-          <Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4">
+          <Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.64001f">
             <Representation id="v" bandwidth="1000"><BaseURL>media/</BaseURL>
               <SegmentList timescale="1000">
                 <Initialization sourceURL="init.mp4" range="2-9"/>
@@ -2446,7 +2730,7 @@ mod tests {
     #[tokio::test]
     async fn resume_skips_complete_pieces_and_retries_transient_failures() {
         let mpd = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT3S">
-          <Period duration="PT3S"><AdaptationSet contentType="video" mimeType="video/mp4">
+          <Period duration="PT3S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.64001f">
             <SegmentTemplate timescale="1000" duration="1000" startNumber="1" media="v$Number$.m4s" initialization="vinit.mp4"/>
             <Representation id="v" bandwidth="1000"/>
           </AdaptationSet></Period></MPD>"#;
@@ -2510,7 +2794,7 @@ mod tests {
     async fn segment_base_downloads_indexed_byte_ranges_and_finalizes_concat() {
         let (media, index_range, media_ranges, expected) = segment_base_media();
         let mpd = format!(
-            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S"><Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v" bandwidth="1000"><BaseURL>single.mp4</BaseURL><SegmentBase indexRange="{}-{}"><Initialization range="0-23"/></SegmentBase></Representation></AdaptationSet></Period></MPD>"#,
+            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S"><Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.64001f"><Representation id="v" bandwidth="1000"><BaseURL>single.mp4</BaseURL><SegmentBase indexRange="{}-{}"><Initialization range="0-23"/></SegmentBase></Representation></AdaptationSet></Period></MPD>"#,
             index_range.start, index_range.end
         );
         let mut files = one_file_manifest(&mpd);
@@ -2558,13 +2842,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn longest_period_is_selected_in_multi_period_manifest() {
+    async fn multiple_media_periods_fail_with_typed_error() {
         let mpd = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT12S">
           <Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><BaseURL>short/</BaseURL><SegmentTemplate timescale="1000" duration="1000" media="s$Number$.m4s"/><Representation id="v" bandwidth="1"/></AdaptationSet></Period>
           <Period duration="PT10S"><AdaptationSet contentType="video" mimeType="video/mp4"><BaseURL>long/</BaseURL><SegmentTemplate timescale="1000" duration="1000" media="s$Number$.m4s"/><Representation id="v" bandwidth="1"/></AdaptationSet></Period>
         </MPD>"#;
         let fixture = serve(one_file_manifest(mpd), Vec::new()).await;
         let (ctx, _tx) = JobContext::for_tests(7);
+        let _g = crate::util::allow_loopback_for_tests();
+        let result = resolve_plan(&ctx, &format!("{}/index.mpd", fixture.base), &headers(1)).await;
+        assert!(
+            matches!(result, Err(DownloadError::Fatal(ref message)) if message == ERR_DASH_MULTIPERIOD)
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_periods_do_not_count_as_media_content() {
+        let mpd = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT12S">
+          <Period duration="PT2S"/>
+          <Period duration="PT10S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.64001f"><BaseURL>long/</BaseURL><SegmentTemplate timescale="1000" duration="1000" media="s$Number$.m4s"/><Representation id="v" bandwidth="1"/></AdaptationSet></Period>
+        </MPD>"#;
+        let fixture = serve(one_file_manifest(mpd), Vec::new()).await;
+        let (ctx, _tx) = JobContext::for_tests(8);
         let _g = crate::util::allow_loopback_for_tests();
         let plan =
             resolve_plan(&ctx, &format!("{}/index.mpd", fixture.base), &headers(1)).await.unwrap();
