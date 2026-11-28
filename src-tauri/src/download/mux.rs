@@ -32,9 +32,9 @@ use std::path::{Path, PathBuf};
 use transmux::{CodecConfig, DemuxEvent, StreamingTsDemux, TrackId, TrackSpec};
 
 const IO_CHUNK_BYTES: usize = 1024 * 1024;
-/// ffmpeg's traditional movie timescale. Using it as the edit-list input unit
-/// keeps A/V lead offsets close to the oracle; shiguredo converts them to the
-/// output movie timescale it chooses.
+/// The MPEG transport-stream timescale. Using it as the edit-list input unit
+/// keeps A/V lead offsets exact; shiguredo converts them to the output movie
+/// timescale it chooses.
 const EDIT_TIMESCALE: u32 = 90_000;
 /// Edit lists are absent from the sizing pass. This small reserve covers the
 /// two `edts` subtrees and final ftyp brand growth while wasting only a few
@@ -352,7 +352,7 @@ fn probe_mp4(path: &Path) -> Result<Mp4Probe, RemuxError> {
                 track_id,
                 kind,
                 timescale: trak.mdia_box.mdhd_box.timescale,
-                sample_entry: entries[0].clone(),
+                sample_entry: repaired_sample_entry(&entries[0]),
                 trex,
             });
         }
@@ -451,7 +451,7 @@ impl ProgressiveMp4Input {
             }
         };
         if let Some(entry) = sample.sample_entry {
-            if entry != &self.sample_entry {
+            if repaired_sample_entry(entry) != self.sample_entry {
                 return Err(mp4_input_error(
                     &self.path,
                     "codec configuration changes mid-stream are unsupported",
@@ -1220,8 +1220,39 @@ fn visual_fields(width: u16, height: u16) -> VisualSampleEntryFields {
     }
 }
 
+/// Normalize an avcC entry copied from an input file: real-world files in the
+/// wild (YouTube included) declare a high-family profile yet omit the avcC
+/// tail the spec makes mandatory for it. The tail duplicates what the SPS
+/// already declares, and a high-profile stream without override bits is
+/// 4:2:0 8-bit, so repair the record into a spec-valid one instead of failing
+/// the whole merge when the muxer re-encodes it.
+fn repaired_sample_entry(entry: &SampleEntry) -> SampleEntry {
+    let mut entry = entry.clone();
+    if let SampleEntry::Avc1(avc1) = &mut entry {
+        let high = !matches!(avc1.avcc_box.avc_profile_indication, 66 | 77 | 88);
+        if high && avc1.avcc_box.chroma_format.is_none() {
+            avc1.avcc_box.chroma_format = Some(Uint::new(1));
+            avc1.avcc_box.bit_depth_luma_minus8 =
+                avc1.avcc_box.bit_depth_luma_minus8.or(Some(Uint::new(0)));
+            avc1.avcc_box.bit_depth_chroma_minus8 =
+                avc1.avcc_box.bit_depth_chroma_minus8.or(Some(Uint::new(0)));
+        }
+    }
+    entry
+}
+
 fn avc_entry(config: &transmux::AVCConfigurationBox, width: u16, height: u16) -> SampleEntry {
     let record = &config.config;
+    // Real-world files in the wild (YouTube included) declare a high-family
+    // profile yet omit the avcC tail the spec makes mandatory for it. The
+    // tail values duplicate what the SPS already declares, and a high-profile
+    // stream without override bits is 4:2:0 8-bit — so repair the record into
+    // a spec-valid one instead of failing the whole merge at encode time.
+    let high_profile = !matches!(record.profile_indication, 66 | 77 | 88);
+    let repair = high_profile && record.chroma_format.is_none();
+    let chroma_format = record.chroma_format.or(repair.then_some(1));
+    let bit_depth_luma = record.bit_depth_luma_minus8.or(repair.then_some(0));
+    let bit_depth_chroma = record.bit_depth_chroma_minus8.or(repair.then_some(0));
     SampleEntry::Avc1(Avc1Box {
         visual: visual_fields(width, height),
         avcc_box: AvccBox {
@@ -1231,9 +1262,9 @@ fn avc_entry(config: &transmux::AVCConfigurationBox, width: u16, height: u16) ->
             length_size_minus_one: Uint::new(record.length_size_minus_one),
             sps_list: record.sps.iter().map(|sps| sps.0.clone()).collect(),
             pps_list: record.pps.iter().map(|pps| pps.0.clone()).collect(),
-            chroma_format: record.chroma_format.map(Uint::new),
-            bit_depth_luma_minus8: record.bit_depth_luma_minus8.map(Uint::new),
-            bit_depth_chroma_minus8: record.bit_depth_chroma_minus8.map(Uint::new),
+            chroma_format: chroma_format.map(Uint::new),
+            bit_depth_luma_minus8: bit_depth_luma.map(Uint::new),
+            bit_depth_chroma_minus8: bit_depth_chroma.map(Uint::new),
             sps_ext_list: record.sps_ext.iter().map(|sps| sps.0.clone()).collect(),
         },
         unknown_boxes: Vec::new(),
@@ -1834,6 +1865,64 @@ mod tests {
     use shiguredo_mp4::boxes::{RootBox, SampleEntry, StszBox};
     use shiguredo_mp4::{Decode, Mp4File};
 
+    /// High-profile avcC without the spec-mandated tail (chroma_format & co)
+    /// is common in the wild — YouTube serves such files. The encoder must
+    /// produce a spec-valid record instead of failing the merge.
+    #[test]
+    fn avc_entry_repairs_missing_high_profile_tail() {
+        use shiguredo_mp4::Encode;
+        use transmux::{AVCConfigurationBox, AVCDecoderConfigurationRecord};
+        let record = AVCDecoderConfigurationRecord {
+            configuration_version: 1,
+            profile_indication: 100,
+            profile_compatibility: 0,
+            level_indication: 31,
+            length_size_minus_one: 3,
+            sps: vec![transmux::AvcSps(vec![0x67, 0x64, 0x00, 0x1f])],
+            pps: vec![transmux::AvcPps(vec![0x68, 0xee, 0x3c, 0x80])],
+            chroma_format: None,
+            bit_depth_luma_minus8: None,
+            bit_depth_chroma_minus8: None,
+            sps_ext: Vec::new(),
+        };
+        let config = AVCConfigurationBox { config: record };
+        let SampleEntry::Avc1(entry) = avc_entry(&config, 640, 360) else {
+            panic!("avc1 entry");
+        };
+        assert_eq!(entry.avcc_box.chroma_format.map(|c| c.get()), Some(1));
+        assert_eq!(entry.avcc_box.bit_depth_luma_minus8.map(|c| c.get()), Some(0));
+        // The strict encoder accepts the repaired box.
+        let mut buf = vec![0u8; 4096];
+        assert!(entry.encode(&mut buf).is_ok(), "repaired avcC must encode");
+    }
+
+    /// Baseline-profile records legitimately carry no tail: nothing is invented.
+    #[test]
+    fn avc_entry_keeps_baseline_tail_absent() {
+        use shiguredo_mp4::Encode;
+        use transmux::{AVCConfigurationBox, AVCDecoderConfigurationRecord};
+        let record = AVCDecoderConfigurationRecord {
+            configuration_version: 1,
+            profile_indication: 66,
+            profile_compatibility: 0,
+            level_indication: 30,
+            length_size_minus_one: 3,
+            sps: vec![transmux::AvcSps(vec![0x67, 0x42, 0x00, 0x1e])],
+            pps: vec![transmux::AvcPps(vec![0x68, 0xce, 0x06, 0xe2])],
+            chroma_format: None,
+            bit_depth_luma_minus8: None,
+            bit_depth_chroma_minus8: None,
+            sps_ext: Vec::new(),
+        };
+        let config = AVCConfigurationBox { config: record };
+        let SampleEntry::Avc1(entry) = avc_entry(&config, 640, 360) else {
+            panic!("avc1 entry");
+        };
+        assert_eq!(entry.avcc_box.chroma_format, None);
+        let mut buf = vec![0u8; 4096];
+        assert!(entry.encode(&mut buf).is_ok(), "baseline avcC encodes without the tail");
+    }
+
     fn fixture_parts() -> Vec<PathBuf> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/hls");
         (0..3).map(|i| root.join(format!("part{i}.ts"))).collect()
@@ -1947,64 +2036,6 @@ mod tests {
             })
             .unwrap_or_default();
         (sizes, ctts)
-    }
-
-    /// ffmpeg remains the oracle where available: the remux must carry the same
-    /// access-unit sizes and B-frame composition offsets, and ffmpeg must be
-    /// able to decode the faststart result without a single error.
-    #[test]
-    fn ffmpeg_oracle_matches_bitstream_tables_and_decodes_output() {
-        let Ok(ffmpeg) = crate::download::tools::find_ffmpeg() else {
-            eprintln!("ffmpeg not found — skipping oracle comparison");
-            return;
-        };
-        let dir = std::env::temp_dir().join(format!("falcon-mux-oracle-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut concatenated = Vec::new();
-        for part in fixture_parts() {
-            concatenated.extend_from_slice(&std::fs::read(part).unwrap());
-        }
-        let input = dir.join("all.ts");
-        let oracle = dir.join("oracle.mp4");
-        let native = dir.join("native.mp4");
-        std::fs::write(&input, concatenated).unwrap();
-        let status = std::process::Command::new(&ffmpeg)
-            .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&input)
-            .args(["-map", "0", "-c", "copy", "-y"])
-            .arg(&oracle)
-            .status()
-            .unwrap();
-        assert!(status.success(), "ffmpeg oracle remux failed");
-        remux_ts_files_to_mp4(&fixture_parts(), &native, &|| false).unwrap();
-
-        let oracle_bytes = std::fs::read(&oracle).unwrap();
-        let native_bytes = std::fs::read(&native).unwrap();
-        let (oracle_mp4, _) = Mp4File::<RootBox>::decode(&oracle_bytes).unwrap();
-        let (native_mp4, _) = Mp4File::<RootBox>::decode(&native_bytes).unwrap();
-        assert_eq!(
-            sample_sizes(&native_mp4, b"vide"),
-            sample_sizes(&oracle_mp4, b"vide"),
-            "video access units are bit-exact in count and size"
-        );
-        assert_eq!(
-            sample_sizes(&native_mp4, b"soun").0,
-            sample_sizes(&oracle_mp4, b"soun").0,
-            "AAC access units are bit-exact in count and size"
-        );
-        assert_eq!(
-            sample_sizes(&native_mp4, b"vide").1,
-            sample_sizes(&oracle_mp4, b"vide").1,
-            "B-frame composition offsets match ffmpeg"
-        );
-        let decoded = std::process::Command::new(&ffmpeg)
-            .args(["-v", "error", "-i"])
-            .arg(&native)
-            .args(["-f", "null", "-"])
-            .status()
-            .unwrap();
-        assert!(decoded.success(), "ffmpeg cannot decode the native MP4");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2208,60 +2239,6 @@ mod tests {
             audio.edts_box.as_ref().and_then(|e| e.elst_box.as_ref()).expect("audio edit list");
         assert!(audio_edit.entries.iter().all(|entry| entry.media_time == 0));
 
-        let Ok(ffmpeg) = crate::download::tools::find_ffmpeg() else {
-            let _ = std::fs::remove_file(output);
-            return;
-        };
-        let decoded = std::process::Command::new(&ffmpeg)
-            .args(["-v", "error", "-i"])
-            .arg(&output)
-            .args(["-f", "null", "-"])
-            .status()
-            .unwrap();
-        assert!(decoded.success(), "ffmpeg cannot decode merged MP4");
-        let ffprobe = ffmpeg.with_file_name("ffprobe");
-        if ffprobe.exists() {
-            let probed = std::process::Command::new(ffprobe)
-                .args([
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "stream=codec_type,start_time,duration:format=duration",
-                    "-of",
-                    "csv=p=0",
-                ])
-                .arg(&output)
-                .output()
-                .unwrap();
-            assert!(probed.status.success(), "ffprobe cannot inspect merged MP4");
-            let text = String::from_utf8(probed.stdout).unwrap();
-            let mut stream_rows = text.lines().filter(|line| line.starts_with("stream,"));
-            let video_row = stream_rows.next().expect("ffprobe video row");
-            let audio_row = stream_rows.next().expect("ffprobe audio row");
-            let video_start: f64 = video_row
-                .split(',')
-                .nth(2)
-                .and_then(|value| value.parse().ok())
-                .expect("video start_time");
-            let audio_start: f64 = audio_row
-                .split(',')
-                .nth(2)
-                .and_then(|value| value.parse().ok())
-                .expect("audio start_time");
-            assert!((video_start - 0.066667).abs() < 0.001, "video edit-list start: {video_row}");
-            assert!(audio_start.abs() < 0.001, "audio start: {audio_row}");
-            let format_row =
-                text.lines().find(|line| line.starts_with("format,")).expect("format row");
-            let container_duration: f64 = format_row
-                .split(',')
-                .nth(1)
-                .and_then(|value| value.parse().ok())
-                .expect("container duration");
-            assert!(
-                (container_duration - 2.066667).abs() < 0.01,
-                "container duration must cover the latest track timeline: {format_row}"
-            );
-        }
         let _ = std::fs::remove_file(output);
     }
 
@@ -2501,40 +2478,52 @@ mod tests {
             );
             return;
         }
-        let Ok(ffmpeg) = crate::download::tools::find_ffmpeg() else {
-            eprintln!("ffmpeg not found — skipping large-input memory check");
-            return;
-        };
+        // Byte-concatenated fragmented MP4 is a supported merge input; copies
+        // of the fixture fragment stream make a meaningfully large input
+        // without any external generator.
         let dir = std::env::temp_dir().join(format!("falcon-mux-memory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let video = dir.join("large-video.mp4");
         let output = dir.join("merged.mp4");
-        let status = std::process::Command::new(ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=640x360:rate=30:duration=6,noise=alls=80:allf=t+u",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-crf",
-                "8",
-                "-pix_fmt",
-                "yuv420p",
-                "-an",
-                "-movflags",
-                "frag_keyframe+empty_moov+default_base_moof",
-                "-y",
-            ])
-            .arg(&video)
-            .status()
-            .unwrap();
-        assert!(status.success(), "ffmpeg large fixture generation failed");
+        let fragment = std::fs::read(dash_fixture("video-frag.mp4")).unwrap();
+        // Only the media-fragment tail (first `moof` onward) may repeat: the
+        // init segment is written once, then the fragment stream continues.
+        let moof = fragment
+            .windows(4)
+            .position(|w| w == b"moof")
+            .map(|i| i - 4)
+            .expect("fragmented fixture has a moof box");
+        // Repeated fragments must continue the decode timeline: each copy's
+        // tfdt is shifted by the running stride of the copies before it.
+        let samples = collect_input_samples(&dash_fixture("video-frag.mp4"), TrackKind::Video);
+        let first_dts = samples[0].dts;
+        let stride =
+            samples.iter().map(|s| (s.dts - first_dts) + s.duration as i64).max().unwrap() as u64;
+        let tail = &fragment[moof..];
+        let tfdt_positions: Vec<usize> = tail
+            .windows(4)
+            .enumerate()
+            .filter_map(|(index, window)| (window == b"tfdt").then_some(index))
+            .collect();
+        assert!(!tfdt_positions.is_empty(), "fragment tail carries tfdt boxes");
+        let copies = (40 * 1024 * 1024) / fragment.len() + 1;
+        {
+            use std::io::Write;
+            let mut writer = std::io::BufWriter::new(std::fs::File::create(&video).unwrap());
+            writer.write_all(&fragment).unwrap();
+            for copy in 1..copies {
+                let mut patched = tail.to_vec();
+                for type_position in &tfdt_positions {
+                    let value_offset = type_position + 8;
+                    let value = u64::from_be_bytes(
+                        patched[value_offset..value_offset + 8].try_into().unwrap(),
+                    );
+                    patched[value_offset..value_offset + 8]
+                        .copy_from_slice(&(value + stride * copy as u64).to_be_bytes());
+                }
+                writer.write_all(&patched).unwrap();
+            }
+        }
         let input_bytes = video.metadata().unwrap().len();
         assert!(input_bytes > 32 * 1024 * 1024, "fixture must be meaningfully large");
         merge_av_mp4(&video, &dash_fixture("audio-frag.m4a"), &output, &|| false).unwrap();

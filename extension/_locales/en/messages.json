@@ -48,7 +48,7 @@
     "message": "Queued in Falcon DM"
   },
   "youtubeHint": {
-    "message": "YouTube: Falcon captures the signed CDN link from this tab. Pick Video+Audio for sound."
+    "message": "Native YouTube download"
   },
   "videoOnlyHint": {
     "message": "This source has no audio. Pick a Video+Audio card if you want sound."

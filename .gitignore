@@ -12,8 +12,6 @@ lerna-debug.log*
 src-tauri/target/
 # Cargo.lock shouldn't be ignored for a binary app, so we keep it.
 
-# Exclude dynamically linked binaries from repo (users should provide static binaries)
-src-tauri/binaries/*
 
 # Logs and databases
 *.log

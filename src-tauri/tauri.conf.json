@@ -38,9 +38,6 @@
   },
   "bundle": {
     "active": true,
-    "externalBin": [
-      "binaries/ffmpeg"
-    ],
     "targets": [
       "app",
       "dmg"

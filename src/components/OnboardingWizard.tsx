@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CheckCircle2, Film, Gauge, Puzzle, AlertTriangle } from 'lucide-react';
+import { Film, Gauge, Puzzle } from 'lucide-react';
 import { Sheet } from './Sheet';
-import * as api from '../api/commands';
 import { useAppStore } from '../store/app';
-import type { ToolStatus } from '../types';
 
 export const ONBOARDING_KEY = 'onboarding_complete';
 
@@ -13,16 +11,11 @@ export function OnboardingWizard({ onClose }: { onClose: () => void }) {
   const [step, setStep] = useState(0);
   const extension = useAppStore((s) => s.extension);
   const refreshExtension = useAppStore((s) => s.refreshExtension);
-  const [tools, setTools] = useState<ToolStatus | null>(null);
   const paired = (extension?.approved_extension_ids.length ?? 0) > 0;
   const pending = (extension?.pending.length ?? 0) > 0;
 
   useEffect(() => {
     void refreshExtension();
-    api
-      .getToolStatus()
-      .then(setTools)
-      .catch(() => setTools(null));
   }, [refreshExtension]);
 
   const finish = () => {
@@ -30,7 +23,7 @@ export function OnboardingWizard({ onClose }: { onClose: () => void }) {
     onClose();
   };
 
-  const steps = 3;
+  const steps = 2;
   return (
     <Sheet
       label={t('onboarding.title')}
@@ -123,39 +116,6 @@ export function OnboardingWizard({ onClose }: { onClose: () => void }) {
                   : pending
                     ? t('onboarding.ext_pending')
                     : t('onboarding.ext_waiting')}
-              </span>
-            </div>
-          </>
-        )}
-        {step === 2 && (
-          <>
-            <div className="onboard-hero">
-              <h2>{t('onboarding.tools_title')}</h2>
-              <p>{t('onboarding.tools_desc')}</p>
-            </div>
-            <div className="status-card">
-              {tools?.ytdlp_path ? (
-                <CheckCircle2 size={16} color="var(--green)" aria-hidden={true} />
-              ) : (
-                <AlertTriangle size={16} color="var(--orange)" aria-hidden={true} />
-              )}
-              <span className="grow">
-                {tools?.ytdlp_path
-                  ? t('onboarding.ytdlp_ok', { version: tools.ytdlp_version ?? '' })
-                  : t('onboarding.ytdlp_missing')}
-              </span>
-              {!tools?.ytdlp_path && (
-                <code className="code-chip selectable">brew install yt-dlp</code>
-              )}
-            </div>
-            <div className="status-card">
-              {tools?.ffmpeg_path ? (
-                <CheckCircle2 size={16} color="var(--green)" aria-hidden={true} />
-              ) : (
-                <AlertTriangle size={16} color="var(--orange)" aria-hidden={true} />
-              )}
-              <span className="grow">
-                {tools?.ffmpeg_path ? t('onboarding.ffmpeg_ok') : t('onboarding.ffmpeg_missing')}
               </span>
             </div>
           </>

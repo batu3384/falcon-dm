@@ -40,11 +40,6 @@ fn loopback_exception_active() -> bool {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn loopback_exception_active_for_tests() -> bool {
-    loopback_exception_active()
-}
-
 pub fn is_hls_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
@@ -142,11 +137,6 @@ pub(crate) fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
     is_blocked_ip_inner(ip, loopback_exception_active())
 }
 
-#[cfg(test)]
-pub(crate) fn is_blocked_ip_with_loopback(ip: std::net::IpAddr, allow_loopback: bool) -> bool {
-    is_blocked_ip_inner(ip, allow_loopback)
-}
-
 /// Literal host check: blocks "localhost" and any IP literal in a private range.
 fn is_blocked_download_host_inner(host: &str, allow_loopback: bool) -> bool {
     let h = host.trim().trim_matches('[').trim_matches(']').to_lowercase();
@@ -161,11 +151,6 @@ fn is_blocked_download_host_inner(host: &str, allow_loopback: bool) -> bool {
 
 pub(crate) fn is_blocked_download_host(host: &str) -> bool {
     is_blocked_download_host_inner(host, loopback_exception_active())
-}
-
-#[cfg(test)]
-pub(crate) fn is_blocked_download_host_with_loopback(host: &str, allow_loopback: bool) -> bool {
-    is_blocked_download_host_inner(host, allow_loopback)
 }
 
 /// Resolve a download host once and retain only public addresses.
@@ -435,7 +420,7 @@ pub fn is_youtube_direct_cdn_url(url: &str) -> bool {
     parsed.query_pairs().any(|(k, v)| k == "itag" && !v.is_empty())
 }
 
-/// Internal wire: `#falconfmt=<urlencoded yt-dlp -f>`. Prefer API field `format` — this fragment is storage/compat only.
+/// Internal wire: `#falconfmt=<urlencoded format selector>`. Prefer API field `format` — this fragment is storage/compat only.
 pub fn split_falcon_format(url: &str) -> (String, Option<String>) {
     if let Some((base, frag)) = url.rsplit_once('#') {
         if let Some(enc) = frag.strip_prefix("falconfmt=") {
@@ -443,7 +428,7 @@ pub fn split_falcon_format(url: &str) -> (String, Option<String>) {
                 .next()
                 .map(|(_, v)| v.into_owned())
                 .unwrap_or_else(|| enc.to_string());
-            if let Some(clean) = sanitize_ytdlp_format(&decoded) {
+            if let Some(clean) = sanitize_format_selector(&decoded) {
                 return (base.to_string(), Some(clean));
             }
             return (base.to_string(), None);
@@ -452,8 +437,8 @@ pub fn split_falcon_format(url: &str) -> (String, Option<String>) {
     (url.to_string(), None)
 }
 
-/// yt-dlp `-f` comes from the extension. Keep it a selector, never extra argv.
-pub fn sanitize_ytdlp_format(fmt: &str) -> Option<String> {
+/// The selector comes from the extension. Keep it a selector, never extra argv.
+pub fn sanitize_format_selector(fmt: &str) -> Option<String> {
     let s = fmt.trim();
     if s.is_empty() || s.len() > 200 || s.starts_with('-') || s.contains("--") {
         return None;
@@ -485,10 +470,10 @@ pub fn sanitize_ytdlp_format(fmt: &str) -> Option<String> {
     Some(s.to_string())
 }
 
-/// Attach or replace yt-dlp format selector. `format` wins over existing fragment.
+/// Attach or replace the format selector. `format` wins over an existing fragment.
 pub fn attach_falcon_format(url: &str, format: Option<&str>) -> String {
     let (base, existing) = split_falcon_format(url);
-    let fmt = format.and_then(sanitize_ytdlp_format).or(existing);
+    let fmt = format.and_then(sanitize_format_selector).or(existing);
     match fmt {
         Some(f) => {
             let enc: String = url::form_urlencoded::byte_serialize(f.as_bytes()).collect();
@@ -503,7 +488,7 @@ fn looks_like_youtube_video_id(id: &str) -> bool {
     id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// Prefer canonical watch URL for yt-dlp (CDN links 403 outside browser).
+/// Prefer the canonical watch URL (CDN links 403 outside the browser).
 pub fn youtube_page_url_for_download(url: &str, referrer: Option<&str>) -> Option<String> {
     let (clean, selected_format) = split_falcon_format(url);
     if is_youtube_watch_url(&clean) {
@@ -538,18 +523,6 @@ pub fn youtube_page_url_for_download(url: &str, referrer: Option<&str>) -> Optio
                 return Some(attach_falcon_format(&referrer_clean, format));
             }
         }
-    }
-    None
-}
-
-/// Resolve the URL passed to yt-dlp (watch page, DASH manifest, or None).
-pub fn ytdlp_source_url_for_download(url: &str, referrer: Option<&str>) -> Option<String> {
-    if let Some(watch) = youtube_page_url_for_download(url, referrer) {
-        return Some(watch);
-    }
-    let (clean, selected_format) = split_falcon_format(url);
-    if is_dash_url(&clean) {
-        return Some(attach_falcon_format(&clean, selected_format.as_deref()));
     }
     None
 }
@@ -814,13 +787,6 @@ mod tests {
     }
 
     #[test]
-    fn ytdlp_source_url_accepts_dash_manifest() {
-        let mpd = "https://cdn.example.com/stream/index.mpd?token=1";
-        let source = ytdlp_source_url_for_download(mpd, None).unwrap();
-        assert_eq!(source, mpd);
-    }
-
-    #[test]
     fn test_youtube_page_url_from_googlevideo_id() {
         let cdn =
             "https://rr1---sn-abc.googlevideo.com/videoplayback?id=5-u7nkMiwtQ&mime=video%2Fmp4";
@@ -877,12 +843,11 @@ mod tests {
             attach_falcon_format("https://x.com/a", Some("best --exec calc")),
             "https://x.com/a"
         );
-        assert!(sanitize_ytdlp_format("best[height<=720]").is_some());
-        assert!(
-            sanitize_ytdlp_format("bestvideo[height<=1080][ext=mp4]+bestaudio/bv*+ba/b").is_some()
-        );
-        assert!(sanitize_ytdlp_format("-o /tmp/x").is_none());
-        assert!(sanitize_ytdlp_format("best;calc").is_none());
+        assert!(sanitize_format_selector("best[height<=720]").is_some());
+        assert!(sanitize_format_selector("bestvideo[height<=1080][ext=mp4]+bestaudio/bv*+ba/b")
+            .is_some());
+        assert!(sanitize_format_selector("-o /tmp/x").is_none());
+        assert!(sanitize_format_selector("best;calc").is_none());
     }
 
     #[test]

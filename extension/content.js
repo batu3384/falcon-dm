@@ -617,7 +617,7 @@
 
     const isYtWatch = !!(FM.isYoutubeWatchUrl && FM.isYoutubeWatchUrl(location.href));
 
-    // YouTube watch uses yt-dlp cards, but caption metadata still has to come
+    // YouTube watch uses selector cards, but caption metadata still has to come
     // from the MAIN-world player response through the service worker.
     if (isYtWatch) {
       let captions = null;

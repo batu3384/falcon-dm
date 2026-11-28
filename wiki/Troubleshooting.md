@@ -49,16 +49,12 @@ Falcon refuses live or upcoming streams instead of saving a few seconds and call
 
 ## YouTube failures
 
-- Install `yt-dlp`: `brew install yt-dlp`
-- yt-dlp older than 2023.07.06 is refused for security; upgrade with `brew upgrade yt-dlp`
-- Set a custom path in Settings if it is not on PATH
+- Extraction and download are fully native; nothing needs installing. Failures carry a stable `ERR_YT_*` code (bot check, sign-in required, private, age-restricted, no formats)
 - Use a watch URL, not a CDN URL
-- If login-required content: try **Let yt-dlp use your Chrome sign-in** (opt-in)
-- Global proxy/speed limit from Settings apply to yt-dlp
+- If login-required or age-restricted content: capture the video again from a browser signed in to the site — the row carries those cookies into extraction
+- A 720p choice never falls back to a higher resolution; when nothing at or below the cap exists the download fails with `ERR_YT_FORMAT_UNAVAILABLE` rather than surprising you
+- Global proxy/speed limit from Settings apply to YouTube downloads too
 
-## yt-dlp / ffmpeg missing
-
-Run `./scripts/provision-sidecars.sh` or install via Homebrew. Falcon searches PATH plus common Homebrew, pip-user and python.org locations.
 
 ## Completion action did not run
 

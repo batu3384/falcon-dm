@@ -19,10 +19,10 @@ Known residual risk: another process already running on the same user account ca
 ## Download/network hardening
 
 - URLs are limited to HTTP(S); private, loopback, link-local, multicast, CGNAT and other non-public targets are rejected.
-- Falcon's own HTTP/HLS clients revalidate redirect hops and pin public DNS results to reduce rebinding risk. yt-dlp's initial URL is validated before launch; redirects and media fetches inside yt-dlp are performed by that external tool.
+- Every engine — HTTP, HLS, DASH and the YouTube extraction/media clients — revalidates redirect hops and pins public DNS results to reduce rebinding risk. There are no external tools in any download path.
 - Resume uses strong entity validators; validator-less or changed remote content restarts rather than mixing partial bytes.
 - Cookies are stored only in backend-controlled storage, encrypted at rest where persisted, withheld from frontend payloads, and cleared on terminal states. Link refresh keeps them only for the same HTTPS origin or the allowed YouTube→googlevideo case.
-- `yt-dlp` input is validated before launch, known releases older than 2023.07.06 are refused, capture cookies are host-scoped in a temporary Netscape file, and cancellation kills the process group. Browser cookies are an opt-in setting.
+- YouTube media downloads go out with the canonical watch referrer and the row's capture cookies; the extraction client identity stays consistent between the player API and CDN requests.
 
 ## Local file/process hardening
 
@@ -33,7 +33,7 @@ Known residual risk: another process already running on the same user account ca
 ## In scope
 
 - Remote exploitation or command injection through downloads, playlists, filenames or extension input
-- SSRF/private-network access through URLs, redirects or yt-dlp invocation
+- SSRF/private-network access through URLs, redirects or extraction requests
 - Local API authentication, pairing, rate-limit or Origin validation bypass
 - Cookie/token disclosure or persistence failures
 - Arbitrary local file overwrite, execution through Open/Reveal, or shell injection through completion actions
@@ -43,4 +43,4 @@ Known residual risk: another process already running on the same user account ca
 - Malware already running with the user's full privileges
 - Attacks requiring physical access
 - Content downloaded intentionally by the user
-- Issues in third-party tools (`yt-dlp`, `ffmpeg`) unless Falcon DM invokes them unsafely
+- Issues in third-party tools; Falcon DM invokes none (all engines are in-process Rust)

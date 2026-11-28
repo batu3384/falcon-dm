@@ -1,5 +1,5 @@
-# ponytail: release pipeline — triggered by a `v*` tag. Provisions the ffmpeg
-# sidecar for both macOS architectures, builds a signed + notarized .dmg, and
+# ponytail: release pipeline — triggered by a `v*` tag. Builds a signed +
+# notarized .dmg for both macOS architectures and
 # uploads it to the GitHub Release. Falls back to an unsigned build if Apple signing
 # secrets are absent (so forks/dev can still cut builds).
 name: Release
@@ -38,16 +38,6 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: "src-tauri -> target"
-
-      # ponytail: provision the ffmpeg sidecar for THIS architecture (arm64 from
-      # Homebrew on the runner, x86_64 from a pinned static build).
-      - name: Provision sidecars (${{ matrix.arch }})
-        run: ./scripts/provision-sidecars.sh
-        env:
-          ARCH: ${{ matrix.arch }}
-          RELEASE_MODE: "1"
-          FFMPEG_URL: ${{ vars.FFMPEG_URL }}
-          FFMPEG_SHA256: ${{ vars.FFMPEG_SHA256 }}
 
       - run: npm ci
 
@@ -123,7 +113,6 @@ jobs:
       - name: Compute checksum
         run: |
           set -euo pipefail
-          test -x "src-tauri/binaries/ffmpeg-${{ matrix.target }}"
           : > "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
           bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
           dmg_count="$(find "$bundle" -type f -name "*.dmg" | wc -l | tr -d ' ')"
@@ -134,9 +123,6 @@ jobs:
             ditto -c -k --sequesterRsrc --keepParent "$app" "$app.zip"
             shasum -a 256 "$app.zip" >> "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
           done < <(find "$bundle" -type d -name "*.app" -print)
-          find src-tauri/binaries -type f -name "*-${{ matrix.target }}" \
-            -exec shasum -a 256 {} \; \
-            >> "$GITHUB_WORKSPACE/checksums-${{ matrix.arch }}.txt"
 
       - name: Upload checksum artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

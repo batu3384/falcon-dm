@@ -59,7 +59,7 @@ The fallback is inherently weaker than Chrome capture: Firefox may write some by
 ## Other Firefox differences
 
 - The first `falcondm://wake` launch can show Firefox's per-origin external-protocol permission prompt. After approval, waking the app behaves like Chromium.
-- Capture cookies come from the browser cookie jar at request time and are sent only to the local app. Separately, Falcon DM's optional yt-dlp browser-cookie setting currently invokes `--cookies-from-browser chrome`; it is Chrome-specific even when the extension is installed in Firefox. Firefox users normally rely on the cookies already supplied by the extension capture path.
+- Capture cookies come from the browser cookie jar at request time and are sent only to the local app, where the extraction and media downloads use them.
 
 ## Permissions
 

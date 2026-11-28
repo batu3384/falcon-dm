@@ -106,7 +106,7 @@ fn cleanup_stale_hls_dirs(root: &std::path::Path, keep: &HashSet<i64>) {
     }
 }
 
-/// Delete orphaned partial files and yt-dlp work dirs under the download
+/// Delete orphaned partial files and stream work dirs under the download
 /// folders. Only names this app generates are touched.
 fn cleanup_stale_download_temps(roots: &[std::path::PathBuf], keep: &HashSet<i64>) {
     let mut pending: Vec<(std::path::PathBuf, usize)> =
@@ -123,9 +123,9 @@ fn cleanup_stale_download_temps(roots: &[std::path::PathBuf], keep: &HashSet<i64
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            if let Some(id) = crate::download::ytdlp::parse_run_dir_name(&name) {
-                // Old builds used `-<uuid>` suffixed dirs that nothing can resume.
-                let current = name == format!(".falcon-dm-ytdlp-{id}");
+            if let Some(id) = crate::download::youtube_job::parse_run_dir_name(&name) {
+                // Legacy yt-dlp builds used `-<uuid>` suffixed dirs nothing can resume.
+                let current = name == format!(".falcon-dm-yt-{id}");
                 if is_dir && (!current || !keep.contains(&id)) {
                     let _ = std::fs::remove_dir_all(&path);
                 }
@@ -689,7 +689,6 @@ pub fn run() {
             crate::commands::approve_extension_pair,
             crate::commands::reject_extension_pair,
             crate::commands::revoke_extension,
-            crate::commands::get_tool_status,
             crate::commands::get_logs,
             crate::commands::clear_logs,
             crate::commands::get_stats,
@@ -912,16 +911,20 @@ mod tests {
         for file in [&kept_part, &kept_state, &stale_part, &user_file, &user_hidden] {
             std::fs::write(file, b"x").unwrap();
         }
-        let kept_run = root.join(".falcon-dm-ytdlp-7");
-        let stale_run = root.join(".falcon-dm-ytdlp-3");
-        let legacy_run = root.join(".falcon-dm-ytdlp-7-123e4567-e89b-12d3-a456-426614174000");
-        for dir in [&kept_run, &stale_run, &legacy_run] {
+        let kept_run = root.join(".falcon-dm-yt-7");
+        let stale_run = root.join(".falcon-dm-yt-3");
+        // Legacy yt-dlp generations are never resumable by the native engine —
+        // their child layout differs — so cleanup removes them even for live ids.
+        let legacy_run = root.join(".falcon-dm-ytdlp-7");
+        let legacy_uuid_run = root.join(".falcon-dm-ytdlp-7-123e4567-e89b-12d3-a456-426614174000");
+        for dir in [&kept_run, &stale_run, &legacy_run, &legacy_uuid_run] {
             std::fs::create_dir_all(dir).unwrap();
         }
 
         cleanup_stale_download_temps(std::slice::from_ref(&root), &keep);
         assert!(kept_part.exists() && kept_state.exists() && kept_run.exists());
         assert!(!stale_part.exists() && !stale_run.exists() && !legacy_run.exists());
+        assert!(!legacy_uuid_run.exists(), "legacy run dirs are always stale");
         assert!(user_file.exists() && user_hidden.exists(), "foreign files are never touched");
 
         let data = root.join("data");

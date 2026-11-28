@@ -108,12 +108,6 @@ pub struct Settings {
     /// Chrome/Edge extension IDs allowed to call the local API.
     #[serde(default)]
     pub allowed_extension_ids: Vec<String>,
-    /// Optional absolute path to yt-dlp binary (empty = PATH + common locations).
-    #[serde(default)]
-    pub ytdlp_path: String,
-    /// When true, yt-dlp reads Chrome cookies (`--cookies-from-browser`). Off by default.
-    #[serde(default)]
-    pub ytdlp_use_browser_cookies: bool,
     /// ponytail: per-site download profiles. Empty by default. When a download
     /// URL matches a profile's `url_pattern`, that profile's UA/referer/cookies/
     /// subdir override the request defaults.
@@ -145,8 +139,6 @@ impl Default for Settings {
             completion_action: default_completion_action(),
             completion_script: String::new(),
             allowed_extension_ids: Vec::new(),
-            ytdlp_path: String::new(),
-            ytdlp_use_browser_cookies: false,
             download_profiles: Vec::new(),
             load_corrupt: false,
         }

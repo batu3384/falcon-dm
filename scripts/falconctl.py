@@ -246,7 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
     add = subparsers.add_parser("add", parents=[wake_parent], help="add a URL")
     add.add_argument("url")
     add.add_argument("--name", help="override the output filename")
-    add.add_argument("--format", dest="format_selector", help="yt-dlp format selector")
+    add.add_argument("--format", dest="format_selector", help="format selector (e.g. bestvideo[height<=1080]+bestaudio/best)")
 
     list_cmd = subparsers.add_parser("list", parents=[wake_parent], help="list downloads")
     list_cmd.add_argument("--status", help="status filter (queued, downloading, paused, ...)")

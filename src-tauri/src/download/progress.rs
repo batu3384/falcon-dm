@@ -82,7 +82,7 @@ impl Progress {
         }
     }
 
-    /// Live traffic that does not map 1:1 to file bytes (yt-dlp reports totals).
+    /// Live traffic that does not map 1:1 to file bytes (aggregate engines).
     pub fn add_transferred(&self, bytes: u64) {
         self.inner.transferred.fetch_add(bytes, Ordering::Relaxed);
     }

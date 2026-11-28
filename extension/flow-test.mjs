@@ -181,14 +181,14 @@ const watchJob = FM.overlayEnqueuePayload('https://www.youtube.com/watch?v=dQw4w
   height: 720,
 });
 assert(watchJob.url.includes('watch?v='), 'watch overlay enqueues page URL');
-assert(watchJob.format && watchJob.format.includes('height<=720'), 'watch overlay sends yt-dlp format');
+assert(watchJob.format && watchJob.format.includes('height<=720'), 'watch overlay sends the format selector');
 
 const homeJob = FM.overlayEnqueuePayload('https://www.youtube.com/', {
   url: 'https://cdn.example.com/preview.mp4',
   height: 720,
 });
 assert(homeJob.url === 'https://cdn.example.com/preview.mp4', 'home overlay keeps media URL');
-assert(homeJob.format === null, 'home overlay does not force yt-dlp format');
+assert(homeJob.format === null, 'home overlay does not force a format');
 
 const shortsJob = FM.overlayEnqueuePayload('https://www.youtube.com/shorts/abc123', {
   url: 'https://example.com/x.mp4',
@@ -202,14 +202,14 @@ const spoofShorts = FM.overlayEnqueuePayload('https://evil.com/shorts/abc', {
   height: 1080,
 });
 assert(spoofShorts.url === 'https://cdn.example.com/a.mp4', 'non-youtube /shorts/ keeps media URL');
-assert(spoofShorts.format === null, 'non-youtube /shorts/ does not force yt-dlp');
+assert(spoofShorts.format === null, 'non-youtube /shorts/ does not force a format');
 
 const blobJob = FM.overlayEnqueuePayload('https://www.youtube.com/watch?v=abc', {
   url: 'blob:https://www.youtube.com/uuid',
   isBlob: true,
 });
 assert(blobJob.url.startsWith('blob:'), 'blob on watch stays blob');
-assert(blobJob.format === null, 'blob skip yt-dlp format');
+assert(blobJob.format === null, 'blob skips the format selector');
 assert(!FM.isJunkUrl('https://www.youtube.com/watch?v=abc'), 'watch URL is not junk');
 
 const audioJob = FM.overlayEnqueuePayload('https://www.youtube.com/watch?v=abc', {

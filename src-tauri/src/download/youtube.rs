@@ -27,7 +27,7 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 /// One Innertube client definition.
 ///
-/// Update procedure: compare this table with yt-dlp's current
+/// Update procedure: compare this table with the current
 /// `yt_dlp/extractor/youtube/_base.py::INNERTUBE_CLIENTS`, copy the exact
 /// context values and numeric client id, then run a real one-off extraction of
 /// a public video before changing the default order. YouTube rotates these
@@ -1341,7 +1341,7 @@ pub async fn extract(
     })
 }
 
-fn codec_rank(format: &YoutubeFormat) -> u32 {
+pub(crate) fn codec_rank(format: &YoutubeFormat) -> u32 {
     match format.codec_family {
         CodecFamily::H264 => 4,
         CodecFamily::Av1 => 3,
@@ -1350,7 +1350,7 @@ fn codec_rank(format: &YoutubeFormat) -> u32 {
     }
 }
 
-fn video_rank(format: &YoutubeFormat) -> (u32, u32, u64, u32) {
+pub(crate) fn video_rank(format: &YoutubeFormat) -> (u32, u32, u64, u32) {
     (
         format.height.unwrap_or(0),
         codec_rank(format),
@@ -1359,7 +1359,7 @@ fn video_rank(format: &YoutubeFormat) -> (u32, u32, u64, u32) {
     )
 }
 
-fn audio_rank(format: &YoutubeFormat) -> (u64, u32, u64) {
+pub(crate) fn audio_rank(format: &YoutubeFormat) -> (u64, u32, u64) {
     (
         format.bitrate.unwrap_or(0),
         match format.codec_family {
@@ -1384,7 +1384,7 @@ fn best_audio<'a>(formats: impl Iterator<Item = &'a YoutubeFormat>) -> Option<Yo
 ///
 /// The first preference is video-only MP4 at or below `max_height` plus MP4/AAC
 /// audio. Within a height H.264 wins over AV1/VP9; resolution still wins over
-/// codec because that is what the yt-dlp selector means. The tuple audio entry
+/// codec because that is what the selector means. The tuple audio entry
 /// is `None` for progressive (already muxed) media or when no separate audio
 /// stream exists.
 pub fn pick(
@@ -1949,7 +1949,7 @@ var decoder=function(x){return x.sig||zsig(x)};
     }
 
     #[test]
-    fn pick_falls_back_like_the_ytdlp_selector() {
+    fn pick_falls_back_like_the_default_selector() {
         let opus_only = vec![
             video_format(137, 1080, "mp4", CodecFamily::H264, 4_300_000),
             audio_format(251, "webm", CodecFamily::Opus, 160_000),

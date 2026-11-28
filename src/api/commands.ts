@@ -7,7 +7,6 @@ import {
   LogArraySchema,
   ScheduleSchema,
   SettingsSchema,
-  ToolStatusSchema,
 } from '../lib/schema';
 import type {
   DownloadModel,
@@ -16,7 +15,6 @@ import type {
   LogEntry,
   ScheduleModel,
   SettingsModel,
-  ToolStatus,
 } from '../types';
 
 // ponytail: centralized Tauri command layer. Every invoke() in the app used to
@@ -43,11 +41,28 @@ export function extractTauriError(e: unknown): string {
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
+const YT_ERROR_KEYS: Record<string, string> = {
+  ERR_YT_INVALID_VIDEO_ID: 'errors.invalid_url',
+  ERR_YT_NETWORK: 'errors.yt_network',
+  ERR_YT_HTTP: 'errors.yt_http',
+  ERR_YT_MALFORMED_RESPONSE: 'errors.yt_malformed_response',
+  ERR_YT_AGE_RESTRICTED: 'errors.yt_age_restricted',
+  ERR_YT_LOGIN_REQUIRED: 'errors.login_required',
+  ERR_YT_PRIVATE: 'errors.video_private',
+  ERR_YT_BOT_CHECK: 'errors.yt_bot_check',
+  ERR_YT_LIVE_OR_PREMIERE: 'errors.hls_live',
+  ERR_YT_UNAVAILABLE: 'errors.video_unavailable',
+  ERR_YT_NO_FORMATS: 'errors.yt_no_formats',
+  ERR_YT_CIPHER_UNSUPPORTED: 'errors.yt_cipher_unsupported',
+  ERR_YT_CIPHER_FAILED: 'errors.yt_cipher_unsupported',
+  ERR_YT_FORMAT_INVALID: 'errors.yt_format_invalid',
+  ERR_YT_FORMAT_UNAVAILABLE: 'errors.yt_format_unavailable',
+  ERR_YT_MERGE_UNSUPPORTED: 'errors.yt_merge_unsupported',
+};
+
 const ERROR_CODES: Record<string, string> = {
   ERR_UNSUPPORTED_MAGNET: 'errors.unsupported_magnet',
   ERR_DISK_FULL: 'errors.disk_full',
-  ERR_FFMPEG_MISSING: 'errors.ffmpeg_missing',
-  ERR_YTDLP_MISSING: 'errors.ytdlp_missing',
   ERR_HLS_LIVE: 'errors.hls_live',
   ERR_HLS_DRM: 'errors.hls_drm',
   ERR_DASH_LIVE: 'errors.dash_live',
@@ -58,9 +73,6 @@ const ERROR_CODES: Record<string, string> = {
   ERR_CONTENT_ENCODING: 'errors.content_encoding',
   ERR_CHECKSUM_MISMATCH: 'errors.checksum_mismatch',
   ERR_CHECKSUM_INVALID: 'errors.checksum_invalid',
-  ERR_VIDEO_UNAVAILABLE: 'errors.video_unavailable',
-  ERR_VIDEO_PRIVATE: 'errors.video_private',
-  ERR_LOGIN_REQUIRED: 'errors.login_required',
   'invalid url': 'errors.invalid_url',
   'not a real media url': 'errors.junk_media_url',
   'Server returned an error page instead of a file': 'errors.error_page',
@@ -73,7 +85,13 @@ export function localizeDownloadError(message: string, t: Translate): string {
   const trimmed = message.trim();
   const key = ERROR_CODES[trimmed];
   if (key) return t(key);
-  if (trimmed.startsWith('ERR_YTDLP_PATH_INVALID')) return t('errors.ytdlp_path_invalid');
+  // Native YouTube extraction/orchestration failures prefix a stable ERR_YT_*
+  // code; the detail after it is diagnostic, not part of the message.
+  const yt = /^(ERR_YT_[A-Z_]+)/.exec(trimmed);
+  if (yt) {
+    const ytKey = YT_ERROR_KEYS[yt[1]];
+    if (ytKey) return t(ytKey);
+  }
   const http = /^HTTP (\d{3})$/.exec(trimmed);
   if (http) {
     const code = Number(http[1]);
@@ -86,7 +104,6 @@ export function localizeDownloadError(message: string, t: Translate): string {
   const lower = trimmed.toLowerCase();
   if (lower.startsWith('unsupported url scheme: magnet')) return t('errors.unsupported_magnet');
   if (lower.includes('private/loopback')) return t('errors.private_host');
-  if (lower.startsWith('yt-dlp: ')) return trimmed.slice('yt-dlp: '.length);
   return trimmed;
 }
 
@@ -121,7 +138,7 @@ export interface AddDownloadParams {
   userAgent?: string;
   cookies?: string;
   cookieUrl?: string;
-  /** yt-dlp format selector (YouTube quality). */
+  /** Format selector (YouTube quality). */
   format?: string;
   /** Lenient checksum input; canonicalized before send, verified on completion. */
   expectedHash?: string;
@@ -203,10 +220,6 @@ export async function rejectExtensionPair(extensionId: string): Promise<void> {
 
 export async function revokeExtension(extensionId: string): Promise<void> {
   await invoke('revoke_extension', { extensionId });
-}
-
-export async function getToolStatus(): Promise<ToolStatus> {
-  return ToolStatusSchema.parse(await invoke<unknown>('get_tool_status'));
 }
 
 export async function getLogs(level?: string): Promise<LogEntry[]> {

@@ -27,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # ponytail: trim tokio feature set — "full" bloats binary/build time. We need
 # rt-multi-thread+macros (runtime), time (intervals), sync (watch/mutex helpers),
-# net (tcp listener), fs (hls writes), process (yt-dlp, ffmpeg), io-util.
+# net (tcp listener), fs (hls writes), io-util.
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",

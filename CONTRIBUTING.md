@@ -10,7 +10,6 @@ setup and the standards a contribution must meet before merge.
 - **Node.js** 22+ and npm (matches CI)
 - **Rust** stable toolchain (`rustup`)
 - **macOS** (Falcon DM desktop target is macOS-only for now)
-- **Homebrew** dependencies: `brew install ffmpeg yt-dlp`
 - **Chrome/Edge** to load the `extension/` folder unpacked
 
 ### First run
@@ -18,9 +17,6 @@ setup and the standards a contribution must meet before merge.
 ```bash
 git clone https://github.com/batu3384/falcon-dm.git
 cd falcon-dm
-
-# Provision the ffmpeg sidecar for your architecture
-./scripts/provision-sidecars.sh
 
 npm install
 npm run tauri dev
@@ -55,9 +51,6 @@ node extension/flow-test.mjs    # popup/pairing/overlay flows, mocked chrome API
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-
-# Release helper
-bash scripts/provision-sidecars.test.sh
 ```
 
 Format everything with `npm run format` and `cargo fmt` as needed.
@@ -70,8 +63,9 @@ Format everything with `npm run format` and `cargo fmt` as needed.
 
 ## Architecture Pointers
 
-- **Backend** (`src-tauri/src/`): `download/` (http, hls, ytdlp engines, queue,
-  progress, limiter, job, tools), `pairing.rs` + `local_api.rs` (extension code
+- **Backend** (`src-tauri/src/`): `download/` (native http, hls, dash and
+  YouTube engines plus the MP4 muxer, queue, progress, limiter, job),
+  `pairing.rs` + `local_api.rs` (extension code
   pairing and the localhost HTTP API), `storage/` (SQLite via r2d2 pool +
   versioned migrations), `util/` (security helpers: SSRF, path traversal,
   DNS pinning, cookie encryption), `lib.rs` (Tauri commands).

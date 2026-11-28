@@ -8,7 +8,6 @@ export type {
   ScheduleModel,
   PairRequest,
   ExtensionStatus,
-  ToolStatus,
   LogEntry,
   DownloadStats,
 } from './lib/schema';

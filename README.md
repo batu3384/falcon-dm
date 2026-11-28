@@ -28,7 +28,7 @@
       <p>The mascot reflects what the stack actually does:</p>
       <ul>
         <li><strong>Speed:</strong> DNS-pinned HTTP streaming with bounded redirects.</li>
-        <li><strong>Precision:</strong> validated resume, HLS segment assembly, <code>ffmpeg</code> merge.</li>
+        <li><strong>Precision:</strong> validated resume, HLS segment assembly, native MP4 muxing.</li>
         <li><strong>Capture:</strong> Chrome/Edge MV3 extension → authenticated localhost API.</li>
       </ul>
     </td>
@@ -42,12 +42,12 @@
 | Area | What you get |
 |------|----------------|
 | **HTTP(S)** | Multi-connection range downloads, byte-exact resume after pause/crash/restart, validator-checked remote changes, DNS-pinned streaming, global and per-download speed limits, proxy |
-| **HLS (m3u8)** | Parallel MPEG-TS segments with safe resume, playlist fingerprinting, proxy/speed limit, ffmpeg mux; complex playlists use yt-dlp; live streams are rejected |
-| **YouTube / DASH** | Watch URLs and quality selection (including audio-only M4A) through `yt-dlp`, real progress, resumable work directories, optional browser cookies, custom binary path |
+| **HLS (m3u8)** | Parallel MPEG-TS segments with safe resume, playlist fingerprinting, proxy/speed limit, native MP4 muxing including split audio; live streams are rejected |
+| **YouTube / DASH** | Fully native: watch URLs, adaptive quality selection (including audio-only M4A), format-selector fallback chains, MP4 muxing, subtitle export — no external tools needed anywhere |
 | **Browser extension** | Automatic capture by file type, per-site never-capture rules, video picker, link grabber (batch ≤100), controllable offline fallback |
 | **Queue** | Concurrent queue with priorities and position badges, weekly schedule windows, completion actions (sleep or script), automatic retries, keep-awake while active |
 | **Desktop UI** | macOS-native shell, batch paste/import, expired-link refresh, optional SHA-256/MD5 verification, inspector, keyboard shortcuts, EN/TR i18n, decimal Finder-style units, release update check |
-| **Security** | One-shot 6-digit pairing, token + Origin allowlist, SSRF/DNS-pinning guards, restricted file opening, hardened yt-dlp invocation |
+| **Security** | One-shot 6-digit pairing, token + Origin allowlist, SSRF/DNS-pinning guards, restricted file opening, zero external tools |
 
 ## Core architecture
 
@@ -59,8 +59,9 @@ Resume is deliberately conservative. The state stores a strong ETag or Last-Modi
 
 ### Stream pipeline (HLS + YouTube)
 
-- **HLS:** Rust downloads plain MPEG-TS segments concurrently (proxy + speed limit from Settings). Each segment is written to `*.tmp`, renamed only when complete, and trusted across restarts only with a matching byte-length sidecar. A playlist fingerprint invalidates stale cache when the cut changes while allowing signed-query rotation. `ffmpeg` remuxes to MP4. Encrypted, fMP4, byte-range, discontinuity and split-audio playlists are handed to yt-dlp; live playlists fail with `ERR_HLS_LIVE` instead of producing a short partial file.
-- **YouTube / DASH / complex HLS:** CDN (<code>googlevideo</code>) URLs are rewritten to watch URLs where possible; <code>yt-dlp</code> runs as an external tool (PATH or **Settings → Network → yt-dlp location**). Global **proxy** and **speed limit** apply. Browser cookies are **opt-in** (**Settings → Network → Let yt-dlp use your Chrome sign-in**); cookies captured for one download are written to an exact-host Netscape cookie file instead of forwarded as a raw header. yt-dlp older than 2023.07.06 is refused. Not bundled.
+- **HLS:** Rust downloads plain MPEG-TS segments concurrently (proxy + speed limit from Settings). Each segment is written to `*.tmp`, renamed only when complete, and trusted across restarts only with a matching byte-length sidecar. A playlist fingerprint invalidates stale cache when the cut changes while allowing signed-query rotation. fMP4, byte-range, discontinuity and split-audio variants are remuxed to MP4 natively; live playlists fail with `ERR_HLS_LIVE` instead of producing a short partial file.
+- **YouTube:** CDN (<code>googlevideo</code>) URLs are rewritten to watch URLs where possible. Extraction (Innertube player API), format selection, multi-connection media download, adaptive audio/video muxing and subtitle export all run in Rust — there is no external tool in the path. The selector understands the `bestvideo`/`bestaudio`/`best`/`bv*`/`ba` grammar with `[height≤N]`/`[ext=…]` filters, `+` merge pairing and `/` fallback chains; an explicit height cap is strict chain-wide, so a 720p choice never comes back as 1080p. Merges are MP4-only: a pair that can only resolve to WebM/Opus input falls through to the next chain entry (typically progressive MP4) instead of failing. Signed media URLs are re-extracted once per run when the CDN rejects them mid-download. Global **proxy** and **speed limit** apply; cookies captured by the browser extension are forwarded to the extraction and the CDN.
+- **DASH (mpd):** native manifest parsing, representation selection and parallel segment download with the same resume rules as HLS.
 
 ### Queue, schedule and completion
 
@@ -97,38 +98,16 @@ Extension requests require `X-Falcon-Token` and a paired `chrome-extension://` o
 - **Node.js 22+** (matches CI; Node 24 can break Vitest/jsdom on GitHub Actions)
 - **Rust** stable (`rustup`)
 - **Tauri CLI:** `npm install` (devDependency) or `cargo install tauri-cli`
-- **Homebrew:** `brew install ffmpeg yt-dlp`
 
 ## Compilation & bootstrapping
 
-Sidecars are **not** committed (`.gitignore`). Local provisioning is explicitly unsigned/unverified unless hashes are supplied:
+The app is fully self-contained: every download engine is Rust, there are no
+sidecar binaries to provision and no external tools to install.
 
-```bash
-./scripts/provision-sidecars.sh
-```
-
-Copies `ffmpeg` (Homebrew on arm64, pinned static build on Intel) into
-`src-tauri/binaries/` as `ffmpeg-<triple>`. Idempotent. Remote provisioning
-requires `FFMPEG_SHA256` and verifies the extracted binary before installation:
-
-```bash
-ARCH=x86_64 \
-FFMPEG_URL='https://example.invalid/immutable-ffmpeg.zip' \
-FFMPEG_SHA256='<64-hex SHA-256 of extracted ffmpeg>' \
-./scripts/provision-sidecars.sh
-```
-
-Release workflows set `RELEASE_MODE=1` and require an immutable `FFMPEG_URL`
-and `FFMPEG_SHA256`; missing values fail before any binary is used.
-Signed releases also import the Apple certificate into an ephemeral runner
-keychain before Tauri build. If no signing secrets are configured, the workflow
-selects the explicit unsigned fallback.
-
-Never use an unpinned remote URL in release automation. Release jobs also
-publish architecture-specific checksums for the app and its sidecar.
-Configure repository variables `FFMPEG_URL` and `FFMPEG_SHA256` before creating
-an Intel release; missing values intentionally fail the release instead of
-installing an unverifiable remote binary.
+Signed releases import the Apple certificate into an ephemeral runner keychain
+before the Tauri build. If no signing secrets are configured, the workflow
+refuses to publish rather than shipping an unsigned release. Release jobs
+publish architecture-specific checksums for the app bundles.
 
 ```bash
 npm install
@@ -142,9 +121,8 @@ npm run tauri build    # .app / .dmg (see release.yml for signed builds)
 2. Click the extension icon. It shows a 6-digit code and Falcon DM asks to connect.
 3. Check that Falcon DM shows the same code and click **Approve**. Connected extensions are listed (and can be disconnected) in **Settings → Extension**.
 4. Extension popup: the **Send browser downloads to Falcon DM** switch controls capture. Options control captured file types, never-captured sites, success notifications, and **Let Chrome download when Falcon DM is closed**. By default a captured download is blocked when the app cannot take it.
-5. YouTube: install `yt-dlp`; optional custom binary path and cookie opt-in in Settings
-6. **Updates:** Settings → **Check for Updates** compares against GitHub Releases (opens release page when newer)
-7. **Wake deep link:** `falcondm://wake` only (no download params — avoids token-in-url leaks). Extension wakes app then uses HTTP API. `tauri dev` may not register the URL scheme.
+5. **Updates:** Settings → **Check for Updates** compares against GitHub Releases (opens release page when newer)
+6. **Wake deep link:** `falcondm://wake` only (no download params — avoids token-in-url leaks). Extension wakes app then uses HTTP API. `tauri dev` may not register the URL scheme.
 
 ## Development & contributing
 
@@ -166,10 +144,9 @@ CI on `main` (protected branch) runs: Frontend lint/test/build, Rust fmt/clippy/
 ## Security posture
 
 - **Extension trust:** the user compares a 6-digit code shown in the extension and in the app and approves it. Approval permits one token handoff; a later token loss, rotation or re-pairing requires approval again. Declined codes stay declined for ten minutes; disconnecting an extension rotates the token. Captured downloads are **blocked by default** when Falcon cannot take them; the browser fallback is opt-in in the extension options.
-- **Network boundary:** download URLs are restricted to HTTP(S) and non-public IP/loopback targets are blocked. Falcon's own HTTP/HLS redirect hops are revalidated and pinned to public DNS results; yt-dlp's initial URL is validated before launch, while subsequent fetching is performed by yt-dlp. The local API binds `127.0.0.1` only.
-- **External tools:** `ffmpeg` and `yt-dlp` are started by Rust with fixed argument lists; the URL follows `--`. yt-dlp input is validated before launch, known-vulnerable old releases are refused, and cancellation kills its process group including postprocessors.
+- **Network boundary:** download URLs are restricted to HTTP(S) and non-public IP/loopback targets are blocked. Every engine — HTTP, HLS, DASH, YouTube extraction and media — revalidates each redirect hop and pins public DNS results. The local API binds `127.0.0.1` only.
 - **Local file access:** **Open** and **Show in Finder** are limited to download roots/app data or exact paths recorded in download rows. Completion scripts are validated executables and run without shell interpolation.
-- **Data:** no telemetry. Session cookies stay in backend storage, are encrypted at rest where persisted, are never serialized into frontend download payloads, and are cleared on terminal download states. yt-dlp uses browser cookies only when explicitly enabled in Settings.
+- **Data:** no telemetry. Session cookies stay in backend storage, are encrypted at rest where persisted, are never serialized into frontend download payloads, and are cleared on terminal download states.
 - **Deep links:** `falcondm://wake` only — enqueue happens over authenticated HTTP, not query strings.
 
 ## License

@@ -15,6 +15,7 @@ Product direction for **Falcon DM**. This page tracks milestones — not a relea
 
 | Item | Notes |
 |------|-------|
+| Native YouTube pipeline | Innertube extraction, selector subset parser (strict height caps, MP4-only merges), adaptive muxing and subtitle export in Rust — yt-dlp and ffmpeg removed entirely |
 | Parallel HTTP (range, speed limit, byte verify) | CA-001 closed |
 | Byte-exact HTTP resume | Offset writes + `.falcon.state` segment bitmap; crash/restart continue every connection in parallel |
 | Resume validator enforcement | Strong ETag/Last-Modified required; validator-less or changed content restarts from zero |

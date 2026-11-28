@@ -51,16 +51,6 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: "src-tauri -> target"
-      - name: Sidecar checksum helper test
-        run: |
-          bash scripts/provision-sidecars.test.sh
-          bash -n scripts/provision-sidecars.sh
-      - name: Install sidecar deps (Homebrew)
-        run: brew install ffmpeg
-      - name: Provision sidecars (aarch64)
-        run: ./scripts/provision-sidecars.sh
-        env:
-          ARCH: aarch64
       - name: Format check
         working-directory: src-tauri
         run: cargo fmt --all --check

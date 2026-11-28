@@ -48,7 +48,7 @@
     "message": "Falcon DM kuyruğuna eklendi"
   },
   "youtubeHint": {
-    "message": "YouTube: Falcon bu sekmeden imzalı CDN adresini alır. Ses için Video+Ses seç."
+    "message": "Yerel YouTube indirmesi"
   },
   "videoOnlyHint": {
     "message": "Bu kaynakta ses yok. Ses istiyorsan Video+Ses kartını seç."

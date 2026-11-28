@@ -9,7 +9,7 @@
 //!
 //! EXT-X-DISCONTINUITY does not change the VOD byte plan: pieces are fetched in
 //! playlist order and concatenated across the boundary. That is the same byte
-//! sequence ffmpeg's HLS concat path produces; players and the TS demuxer see
+//! sequence a typical HLS concat path produces; players and the TS demuxer see
 //! the timestamp reset. DISCONTINUITY-SEQUENCE is a live-window indexing fact
 //! and needs no special handling for a finite download.
 
@@ -915,10 +915,8 @@ async fn decrypt_file_cbc(
             continue;
         }
         let mut head: Vec<u8> = pending.drain(..process_len).collect();
-        for chunk in head.chunks_exact_mut(AES_BLOCK_BYTES) {
-            let block: &mut Block<aes::Aes128> =
-                chunk.try_into().expect("chunks_exact_mut yields AES-block-sized chunks");
-            decryptor.decrypt_block(block);
+        for chunk in head.as_chunks_mut::<AES_BLOCK_BYTES>().0 {
+            decryptor.decrypt_block(chunk.into());
         }
         output
             .write_all(&head)
@@ -1609,8 +1607,7 @@ fn fmp4_ordered_inputs(
     let media = &plan.renditions[rendition];
     let mut inputs = Vec::new();
     let mut active_init = None;
-    for index in 0..media.segments.len() {
-        let segment = &media.segments[index];
+    for (index, segment) in media.segments.iter().enumerate() {
         if segment.init != active_init {
             if let Some(init) = segment.init {
                 inputs.push(
@@ -1663,7 +1660,7 @@ async fn render_rendition_to_mp4(
 /// The download/cache layer intentionally ends here with two complete MP4
 /// renderings: `video` (the main rendition) and `audio` (the selected
 /// EXT-X-MEDIA rendition). `mux::merge_av_mp4` is wired at this single seam;
-/// split audio never falls back to yt-dlp.
+/// split audio is fully native.
 async fn merge_split_audio_mp4(
     ctx: &JobContext,
     video: &Path,
@@ -2332,7 +2329,7 @@ mod tests {
         assert!(result.is_ok(), "discontinuity playlists stay native");
     }
 
-    /// ffmpeg `-f hls` output of a few seconds, or None when ffmpeg is missing.
+    /// Copies the pre-generated HLS fixture parts (a few seconds of MPEG-TS).
     fn make_hls_parts(src: &Path) -> Option<usize> {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/hls");
         for name in ["index.m3u8", "part0.ts", "part1.ts", "part2.ts"] {
@@ -2615,7 +2612,7 @@ mod tests {
         remove_artifacts(id);
     }
 
-    /// A `.m3u8` output name is corrected to the container ffmpeg produced.
+    /// A `.m3u8` output name is corrected to the produced container.
     #[tokio::test]
     async fn m3u8_destination_is_renamed_to_the_container() {
         let src = std::env::temp_dir().join(format!("falcon-hls-src-{}", uuid::Uuid::new_v4()));
@@ -2749,9 +2746,8 @@ mod tests {
         let mut data = plaintext.to_vec();
         data.extend(std::iter::repeat_n(padding as u8, padding));
         let mut enc = cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into());
-        for chunk in data.chunks_exact_mut(AES_BLOCK_BYTES) {
-            let block: &mut Block<aes::Aes128> = chunk.try_into().unwrap();
-            enc.encrypt_block(block);
+        for chunk in data.as_chunks_mut::<AES_BLOCK_BYTES>().0 {
+            enc.encrypt_block(chunk.into());
         }
         data
     }

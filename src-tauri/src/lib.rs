@@ -184,7 +184,7 @@ pub(crate) fn remove_download_artifacts(save_path: &str, filename: &str, id: i64
     download::http::remove_artifacts(save_path, filename, id);
     download::hls::remove_artifacts(id);
     download::dash::remove_artifacts(id);
-    download::ytdlp::remove_artifacts(save_path, id);
+    download::youtube_job::remove_artifacts(save_path, id);
 }
 
 pub struct AppState {
@@ -231,7 +231,7 @@ pub(crate) struct ExternalDownloadPayload {
     pub cookies: Option<String>,
     pub cookie_url: Option<String>,
     pub title: Option<String>,
-    /// yt-dlp `-f` selector (preferred over `#falconfmt=` fragment).
+    /// Format selector (preferred over the `#falconfmt=` fragment).
     pub format: Option<String>,
     pub save_path: Option<String>,
     /// Lenient checksum input (bare hex or `algo:`-prefixed); canonicalized
@@ -290,7 +290,7 @@ pub(crate) async fn enqueue_download(
     // One spelling everywhere: dedupe, resume state and routing compare strings.
     let base = canonical_store_url(&base);
     let format = payload.format.as_deref().or(if watch_url.is_some() {
-        Some(download::ytdlp::DEFAULT_VIDEO_FORMAT)
+        Some(download::ytselect::DEFAULT_VIDEO_FORMAT)
     } else {
         None
     });
@@ -302,14 +302,14 @@ pub(crate) async fn enqueue_download(
         payload.title.as_deref(),
         force_hls,
     );
-    // yt-dlp decides the container. Give the row the extension it will end up with.
-    let via_ytdlp = download::queue::route_queued_download(&url, payload.referrer.as_deref())
-        == download::queue::DownloadRoute::YtDlp;
-    if via_ytdlp {
+    // The native pipeline decides the container. Give the row the extension it will end up with.
+    let via_youtube = download::queue::route_queued_download(&url, payload.referrer.as_deref())
+        == download::queue::DownloadRoute::Youtube;
+    if via_youtube {
         let (_, selector) = util::split_falcon_format(&url);
         let audio = selector.as_deref().is_some_and(is_audio_only_format);
         let current = filename.rsplit('.').next().unwrap_or("");
-        if audio && !download::ytdlp::is_audio_extension(current) {
+        if audio && !download::ytselect::is_audio_extension(current) {
             filename = with_extension(&filename, "m4a");
         } else if !audio && !filename.to_lowercase().ends_with(".mp4") {
             filename = with_extension(&filename, "mp4");
@@ -735,7 +735,7 @@ mod tests {
         assert!(is_audio_only_format("bestaudio[ext=m4a]/bestaudio"));
         assert!(is_audio_only_format("ba"));
         assert!(!is_audio_only_format("bestvideo[height<=720]+bestaudio/best[height<=720]"));
-        assert!(!is_audio_only_format(download::ytdlp::DEFAULT_VIDEO_FORMAT));
+        assert!(!is_audio_only_format(download::ytselect::DEFAULT_VIDEO_FORMAT));
         assert!(!is_audio_only_format("bestaudio/best"));
         assert!(!is_audio_only_format(""));
         assert_eq!(with_extension("My Song.webm", "m4a"), "My Song.m4a");
@@ -798,7 +798,7 @@ mod tests {
         let state = download::http::state_path_for(&save, "a.bin", id).unwrap();
         std::fs::write(&part, b"partial").unwrap();
         std::fs::write(&state, b"{}").unwrap();
-        let run_dir = download::ytdlp::run_dir_for(&save, id);
+        let run_dir = download::youtube_job::run_dir_for(&save, id);
         std::fs::create_dir_all(&run_dir).unwrap();
         std::fs::write(run_dir.join("output.f140.m4a.part"), b"x").unwrap();
         let user_file = dir.join("a.bin");

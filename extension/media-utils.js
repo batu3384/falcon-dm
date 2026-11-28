@@ -311,7 +311,7 @@
     return true;
   }
 
-  /** Align hijacked browser downloads with overlay/yt-dlp routing. */
+  /** Align hijacked browser downloads with overlay/queue routing. */
   function hijackPayloadForFalcon(downloadUrl, pageUrl) {
     const raw = String(downloadUrl || '').trim();
     const page = String(pageUrl || '').split('#')[0];
@@ -330,7 +330,7 @@
   }
 
   // ponytail: same selector as the in-app sheet (src/lib/ytFormats.ts) — m4a is
-  // YouTube's native audio container, so yt-dlp downloads it without re-encoding.
+  // YouTube's native audio container, so the download needs no re-encoding.
   const AUDIO_ONLY_FORMAT = 'bestaudio[ext=m4a]/bestaudio';
 
   function overlayEnqueuePayload(pageUrl, selected) {
@@ -607,7 +607,7 @@
     return 'bin';
   }
 
-  /** yt-dlp tiers when CDN capture is empty (modern YouTube uses SABR/cipher). */
+  /** Selector tiers when CDN capture is empty (modern YouTube uses SABR/cipher). */
   function youtubeFallbackSources(pageUrl) {
     const watch = String(pageUrl || '').split('#')[0];
     if (!isYoutubeWatchUrl(watch)) return [];
@@ -617,7 +617,7 @@
       { height: 720, label: '720' },
       { height: 1080, label: '1080' },
     ];
-    const hint = _i18n('youtubeHint', 'YouTube via yt-dlp');
+    const hint = _i18n('youtubeHint', 'Native YouTube download');
     const cards = tiers.map(({ height, label }) => ({
       url: watch,
       title: `${height}p · MP4 · ${_i18n('kindVideoAudio', 'Video+Audio')}`,

@@ -2,7 +2,7 @@
 
 ## Is Falcon DM IDM for macOS?
 
-It targets similar jobs (multi-connection HTTP, browser capture, queue) but is a smaller local-first app — not full IDM feature parity. Recent gaps closed: byte-exact parallel HTTP resume, weekly scheduling, completion actions, expired-link refresh, batch URL import, HLS/yt-dlp proxy and speed limits, capture rules, code pairing, and larger link grabber batches.
+It targets similar jobs (multi-connection HTTP, browser capture, queue) but is a smaller local-first app — not full IDM feature parity. Recent gaps closed: byte-exact parallel HTTP resume, weekly scheduling, completion actions, expired-link refresh, batch URL import, HLS/YouTube proxy and speed limits, capture rules, code pairing, and larger link grabber batches.
 
 ## Does it phone home?
 
@@ -43,7 +43,7 @@ Yes. For a single manually added link, open **Request options** in **New Downloa
 
 ## A signed CDN link expired. Can I keep the partial file?
 
-Yes. Select the failed or paused row → **Refresh Link…** and paste a fresh URL for the same content. HTTP downloads resume byte-exactly when their validator still matches and restart if the entity changed. HLS reuse depends on the playlist fingerprint; yt-dlp reuse depends on matching partial files in its work directory. Cookies survive only for the same HTTPS origin (or the allowed YouTube→googlevideo case) and are dropped otherwise.
+Yes. Select the failed or paused row → **Refresh Link…** and paste a fresh URL for the same content. HTTP downloads resume byte-exactly when their validator still matches and restart if the entity changed. HLS reuse depends on the playlist fingerprint; YouTube reuse depends on matching partial files in its work directory. Cookies survive only for the same HTTPS origin (or the allowed YouTube→googlevideo case) and are dropped otherwise.
 
 ## Can the scheduler run only on some days?
 
@@ -71,6 +71,6 @@ Yes. Select the row and set **Speed limit** in the Inspector (decimal KB/s). Emp
 - **From source:** pull latest `main` and rebuild.
 - **Signed auto-install inside the app** is not shipped yet ([Roadmap](Roadmap)).
 
-## Are browser cookies sent to yt-dlp?
+## Do YouTube downloads use my browser sign-in?
 
-Only if you enable **Settings → Network → Let yt-dlp use your Chrome sign-in**. Off by default. Cookies captured for a specific download are instead written to a host-only Netscape cookie file for that yt-dlp run and deleted afterward.
+Capture cookies come from the browser cookie jar at request time and travel with the download row: the YouTube extraction and the googlevideo media requests both use them, never leaving the local machine. Age-restricted or members-only videos therefore work when captured from a signed-in browser.

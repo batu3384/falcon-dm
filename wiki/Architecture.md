@@ -6,7 +6,7 @@
 |-------|---------|-------|
 | HTTP(S) | Rust engine | Multi-connection range downloads when the server proves range support with a valid `206 Content-Range`; every connection writes at its own offset in one hidden `.falcon.part` file and per-range progress persists in a `.falcon.state` sidecar. Pause, crash, retry and restart resume byte-exactly when the saved strong ETag or Last-Modified validator still matches. A server without such a validator, or a changed entity, restarts from zero rather than mixing versions. Malformed partial responses and compressed (`Content-Encoding` other than `identity`) responses are rejected. Servers without range support use one connection and cannot resume. |
 | HLS (`.m3u8`) | Rust segments + native mux | Parallel MPEG-TS/fMP4 piece fetch with proxy and speed limit. AES-128 CBC segments, `EXT-X-MAP` init sections, byte ranges, discontinuities and split audio renditions are native. The per-download cache `hls-{id}.falcondm-temp` reuses only complete plaintext pieces with matching length sidecars; a rendition/key-aware playlist fingerprint detects a re-cut playlist and drops stale cache while ignoring signed-query rotation. Expired segment credentials (`401`, `403`, `410`) cause one playlist re-resolution per run. SAMPLE-AES/DRM is refused with `ERR_HLS_DRM`; live playlists are refused with `ERR_HLS_LIVE`. |
-| YouTube / DASH / complex HLS | yt-dlp | Watch URL + optional `format` field; global proxy and speed limit; real progress from output templates; stable `.falcon-dm-ytdlp-{id}` work dir for pause/resume. Input URLs are validated against private and loopback targets, yt-dlp older than 2023.07.06 is refused, browser cookies are opt-in, and cancellation kills the yt-dlp process group (including ffmpeg postprocessors). Without a configured user proxy, yt-dlp is launched through Falcon's validating loopback egress proxy and child processes inherit proxy variables, so redirects, extractor requests and media fetches are rechecked before egress. |
+| YouTube | Native extraction + engines | Watch URL + optional `format` selector; Innertube extraction, adaptive MP4 muxing and subtitle export are all Rust. Media downloads use the HTTP engine with the canonical watch referrer and the row cookies. Signed media URLs are re-extracted once per run when the CDN answers 401/403/410. Adaptive pairs download into a stable `.falcon-dm-yt-{id}` work dir so pause/resume keeps finished streams. |
 
 Before any engine moves a finished file into place, the shared finalizer validates its content and can enforce an optional SHA-256 or MD5 checksum. The New Download sheet accepts bare hex or `sha256:`/`sha-256:`/`md5:` input for a single link, stores canonical lowercase `algo:hex`, verifies the finished temp file in streaming reads, and deletes that temp file on mismatch so the retry starts cleanly.
 
@@ -52,20 +52,18 @@ Enqueue uses an immediate SQLite transaction. If the same canonical URL is alrea
 
 ## Refresh link
 
-**Refresh Link…** is available on failed and paused rows. The replacement URL goes through the same public-URL validation and canonicalization as a new enqueue. For HTTP rows, the `.falcon.state` file's URL is rewritten without touching progress or the validator, so an expired signed URL can continue byte-exactly; if the new URL serves a different entity, the resume validator discards the partial data and starts over. HLS reuse is governed by the playlist fingerprint, and yt-dlp reuse by the partial files in its stable work directory, so the intended use is a fresh URL for the same content. Cookies are kept only when the refreshed target is the same HTTPS origin or the allowed YouTube→googlevideo case; other cross-host refreshes drop them. A failed row requeues after refresh; a paused row stays paused.
+**Refresh Link…** is available on failed and paused rows. The replacement URL goes through the same public-URL validation and canonicalization as a new enqueue. For HTTP rows, the `.falcon.state` file's URL is rewritten without touching progress or the validator, so an expired signed URL can continue byte-exactly; if the new URL serves a different entity, the resume validator discards the partial data and starts over. HLS reuse is governed by the playlist fingerprint, and YouTube reuse by the partial files in its stable work directory, so the intended use is a fresh URL for the same content. Cookies are kept only when the refreshed target is the same HTTPS origin or the allowed YouTube→googlevideo case; other cross-host refreshes drop them. A failed row requeues after refresh; a paused row stays paused.
 
 ## Settings that affect downloads
 
 | Setting | Effect |
 |---------|--------|
 | **Max concurrent downloads** | Queue slot count (1–32) |
-| **Connections per file** | HTTP range segments and HLS segment concurrency (1–16, default 8; yt-dlp receives at most 8) |
-| **Speed limit (KB/s)** | Decimal units (1 KB/s = 1000 B/s). One global token bucket covers HTTP and HLS and applies to running jobs; yt-dlp receives a divided `--limit-rate`. Toolbar/Settings remember the last non-zero value in webview storage, while the tray keeps a backend `speed_limit_last_kbps` mirror updated by Settings saves |
-| **Proxy** | HTTP, HLS, yt-dlp. A configured proxy takes precedence for yt-dlp; when empty, yt-dlp egress instead uses Falcon's validating loopback proxy |
+| **Connections per file** | HTTP range segments and HLS segment concurrency (1–16, default 8) |
+| **Speed limit (KB/s)** | Decimal units (1 KB/s = 1000 B/s). One global token bucket covers every engine and applies to running jobs. Toolbar/Settings remember the last non-zero value in webview storage, while the tray keeps a backend `speed_limit_last_kbps` mirror updated by Settings saves |
+| **Proxy** | HTTP, HLS, DASH, YouTube extraction and media downloads |
 | **Scheduler days and times** | Weekly active window for new work |
 | **Completion action/script** | One-shot action when the queue drains |
-| **yt-dlp path** | Custom binary; empty = PATH + common install locations |
-| **Let yt-dlp use your Chrome sign-in** | Off by default; uses `--cookies-from-browser chrome` only when no exact-host download cookies apply |
 | **Download profiles** | Per-site UA, referrer, cookies (HTTPS only, encrypted at rest), save subdir |
 
 ## Browser capture rules

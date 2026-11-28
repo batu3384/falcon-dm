@@ -91,8 +91,6 @@ export const SettingsSchema = z.object({
   speed_limit_kbps: z.number().optional(),
   category_paths: z.record(z.string(), z.string()).optional(),
   allowed_extension_ids: z.array(z.string()).optional(),
-  ytdlp_path: z.string().optional(),
-  ytdlp_use_browser_cookies: z.boolean().optional(),
   schedule_active: z.boolean().optional(),
   schedule_start: z.string().nullable().optional(),
   schedule_stop: z.string().nullable().optional(),
@@ -125,13 +123,6 @@ export const PairRequestSchema = z.object({
 export const ExtensionStatusSchema = z.object({
   approved_extension_ids: z.array(z.string()),
   pending: z.array(PairRequestSchema).max(16),
-});
-
-export const ToolStatusSchema = z.object({
-  ytdlp_path: z.string().nullable(),
-  ytdlp_version: z.string().nullable(),
-  ytdlp_error: z.string().nullable(),
-  ffmpeg_path: z.string().nullable(),
 });
 
 export const LogEntrySchema = z.object({
@@ -171,6 +162,5 @@ export type SettingsModel = z.infer<typeof SettingsSchema>;
 export type ScheduleModel = z.infer<typeof ScheduleSchema>;
 export type PairRequest = z.infer<typeof PairRequestSchema>;
 export type ExtensionStatus = z.infer<typeof ExtensionStatusSchema>;
-export type ToolStatus = z.infer<typeof ToolStatusSchema>;
 export type LogEntry = z.infer<typeof LogEntrySchema>;
 export type DownloadStats = z.infer<typeof DownloadStatsSchema>;

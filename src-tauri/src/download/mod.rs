@@ -1,6 +1,5 @@
 pub mod checksum;
 pub mod dash;
-pub mod egress_proxy;
 pub mod hls;
 pub mod http;
 pub mod http_client;
@@ -10,9 +9,9 @@ pub mod mux;
 pub mod progress;
 pub mod queue;
 pub mod subtitles;
-pub mod tools;
 pub mod youtube;
-pub mod ytdlp;
+pub mod youtube_job;
+pub mod ytselect;
 
 /// Why a worker stopped. The queue decides between pause, retry and failure from this.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,8 +22,6 @@ pub enum DownloadError {
     Transient(String),
     /// Retrying will not help (404, invalid URL, disk full).
     Fatal(String),
-    /// HLS playlist uses features the native path does not implement.
-    NeedsYtDlp,
 }
 
 impl DownloadError {
@@ -32,7 +29,6 @@ impl DownloadError {
         match self {
             Self::Cancelled => "Cancelled".into(),
             Self::Transient(msg) | Self::Fatal(msg) => msg.clone(),
-            Self::NeedsYtDlp => "ERR_NEEDS_YTDLP".into(),
         }
     }
 

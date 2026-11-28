@@ -1,4 +1,4 @@
-//! Per-download context handed to every worker (HTTP, HLS, yt-dlp).
+//! Per-download context handed to every worker (HTTP, HLS, DASH, YouTube).
 
 use crate::download::limiter::CompositeRateLimiter;
 #[cfg(test)]
@@ -116,7 +116,7 @@ impl JobContext {
         self.check_cancel()?;
         let reserved = dest.parent().map(|dir| self.reserved_names(dir)).unwrap_or_default();
         // The expectation lives on the row, not in the job setup, so every
-        // engine (HTTP, HLS, yt-dlp) is covered without queue plumbing. Read
+        // engine (HTTP, HLS, YouTube) is covered without queue plumbing. Read
         // it fresh: nothing about verification depends on the worker's start.
         let expected_hash = self
             .db

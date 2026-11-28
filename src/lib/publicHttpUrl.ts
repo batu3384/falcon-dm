@@ -167,8 +167,9 @@ export function dashDownloadUrl(url: string): boolean {
 }
 
 /** Which engine the queue will use for this URL (mirrors `route_queued_download`). */
-export function downloadEngine(url: string): 'yt-dlp' | 'HLS' | 'HTTP' {
-  if (youtubeDownloadHost(url) || dashDownloadUrl(url)) return 'yt-dlp';
+export function downloadEngine(url: string): 'YouTube' | 'DASH' | 'HLS' | 'HTTP' {
+  if (youtubeDownloadHost(url)) return 'YouTube';
+  if (dashDownloadUrl(url)) return 'DASH';
   if (hlsDownloadUrl(url)) return 'HLS';
   return 'HTTP';
 }

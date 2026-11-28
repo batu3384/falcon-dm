@@ -19,7 +19,6 @@ vi.mock('../../api/commands', async (importOriginal) => {
     saveSettings: vi.fn(),
     setSchedule: vi.fn(),
     getExtensionStatus: vi.fn(),
-    getToolStatus: vi.fn(),
     checkForUpdates: vi.fn(),
   };
 });
@@ -51,12 +50,6 @@ describe('SettingsSheet', () => {
     vi.mocked(api.getExtensionStatus).mockResolvedValue({
       approved_extension_ids: [],
       pending: [],
-    });
-    vi.mocked(api.getToolStatus).mockResolvedValue({
-      ytdlp_path: null,
-      ytdlp_version: null,
-      ytdlp_error: 'ERR_YTDLP_MISSING',
-      ffmpeg_path: null,
     });
   });
 
@@ -148,11 +141,5 @@ describe('SettingsSheet', () => {
     expect(saved.schedule_days).toEqual([true, false, true, true, true, true, true]);
     expect(saved.completion_action).toBe('script');
     expect(saved.completion_script).toBe('/tmp/done.sh');
-  });
-
-  it('explains how to install a missing yt-dlp', async () => {
-    render(<SettingsSheet initialTab="network" onClose={vi.fn()} />);
-    expect(await screen.findByText(/yt-dlp is not installed/)).toBeInTheDocument();
-    expect(screen.getByText('brew install yt-dlp')).toBeInTheDocument();
   });
 });

@@ -1,7 +1,7 @@
 use crate::download::http_client::HttpHeaders;
 use crate::download::job::JobContext;
 use crate::download::limiter::{CompositeRateLimiter, RateLimiter};
-use crate::download::ytdlp::YtDlpOptions;
+use crate::download::youtube_job::YoutubeJobOptions;
 use crate::download::DownloadError;
 use crate::settings::{Settings, ALL_SCHEDULE_DAYS};
 use crate::storage::{
@@ -10,7 +10,7 @@ use crate::storage::{
 };
 use crate::util::{
     is_dash_url, is_googlevideo_url, is_hls_url, is_youtube_watch_url, lock_or_recover,
-    split_falcon_format, youtube_page_url_for_download, ytdlp_source_url_for_download,
+    split_falcon_format, youtube_page_url_for_download,
 };
 use chrono::{Datelike, Local, NaiveTime, Weekday};
 use serde::{Deserialize, Serialize};
@@ -103,7 +103,7 @@ pub(crate) fn outside_schedule(
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DownloadRoute {
-    YtDlp,
+    Youtube,
     Hls,
     Dash,
     Http,
@@ -111,12 +111,12 @@ pub(crate) enum DownloadRoute {
 
 pub(crate) fn route_queued_download(url: &str, referrer: Option<&str>) -> DownloadRoute {
     let (clean, _) = split_falcon_format(url);
-    // googlevideo tickets 403 outside the browser — always yt-dlp via watch/referrer.
+    // googlevideo tickets 403 outside the browser — always resolve via watch/referrer.
     if is_googlevideo_url(&clean) {
-        return DownloadRoute::YtDlp;
+        return DownloadRoute::Youtube;
     }
     if is_youtube_watch_url(&clean) || youtube_page_url_for_download(url, referrer).is_some() {
-        return DownloadRoute::YtDlp;
+        return DownloadRoute::Youtube;
     }
     if is_dash_url(url) {
         return DownloadRoute::Dash;
@@ -125,21 +125,6 @@ pub(crate) fn route_queued_download(url: &str, referrer: Option<&str>) -> Downlo
         DownloadRoute::Hls
     } else {
         DownloadRoute::Http
-    }
-}
-
-fn ytdlp_speed_limit_kbps(global: u32, active_downloads: usize, per_download: u32) -> u32 {
-    // yt-dlp cannot join the byte-counted bucket, so its process gets the
-    // stricter of its own cap and this row's share of the global cap.
-    let global_share = if global == 0 {
-        0
-    } else {
-        (u64::from(global) / active_downloads.max(1) as u64).max(1) as u32
-    };
-    match (global_share, per_download) {
-        (0, per) => per,
-        (global, 0) => global,
-        (global, per) => global.min(per),
     }
 }
 
@@ -179,8 +164,6 @@ type SharedSlots = Arc<Mutex<QueueSlots>>;
 #[derive(Clone, Default)]
 struct QueueOptions {
     proxy: Option<String>,
-    ytdlp_path: Option<String>,
-    ytdlp_use_browser_cookies: bool,
 }
 
 pub struct QueueManager {
@@ -245,11 +228,8 @@ impl QueueManager {
             let value = value.trim();
             (!value.is_empty()).then(|| value.to_string())
         };
-        *lock_or_recover(&self.options) = QueueOptions {
-            proxy: settings.proxy.as_deref().and_then(trimmed),
-            ytdlp_path: trimmed(&settings.ytdlp_path),
-            ytdlp_use_browser_cookies: settings.ytdlp_use_browser_cookies,
-        };
+        *lock_or_recover(&self.options) =
+            QueueOptions { proxy: settings.proxy.as_deref().and_then(trimmed) };
     }
 
     pub fn max_concurrent(&self) -> usize {
@@ -478,8 +458,6 @@ impl QueueManager {
         let max_connections = self.max_connections.load(Ordering::SeqCst);
         let per_download_limit = row.speed_limit_kbps.unwrap_or(0);
         let download_limiter = Arc::new(RateLimiter::new(per_download_limit));
-        // Approximation: yt-dlp cannot join the byte-counted bucket, so split the cap across live rows.
-        let active_downloads = self.active_ids().len() + 1;
         let headers = HttpHeaders {
             cookies: row.cookies.clone(),
             referrer: row.referrer.clone(),
@@ -487,36 +465,26 @@ impl QueueManager {
             proxy: options.proxy.clone(),
             max_connections,
         };
-        let ytdlp = |format: Option<String>| YtDlpOptions {
-            cookies: row.cookies.clone(),
-            user_agent: row.user_agent.clone(),
-            referrer: row.referrer.clone(),
-            format,
-            proxy: options.proxy.clone(),
-            speed_limit_kbps: ytdlp_speed_limit_kbps(
-                self.limiter.kbps(),
-                active_downloads,
-                per_download_limit,
-            ),
-            ytdlp_path: options.ytdlp_path.clone(),
-            use_browser_cookies: options.ytdlp_use_browser_cookies,
-            max_connections,
-        };
         let kind = match route_queued_download(&row.url, row.referrer.as_deref()) {
-            DownloadRoute::YtDlp => {
-                let Some(source) = ytdlp_source_url_for_download(&row.url, row.referrer.as_deref())
+            DownloadRoute::Youtube => {
+                let Some(source) = youtube_page_url_for_download(&row.url, row.referrer.as_deref())
                 else {
                     // Leaving it Queued would block the head of the queue forever.
                     Self::fail_queued(db, app, id, "not a real media url");
                     return false;
                 };
-                let (url, format) = split_falcon_format(&source);
-                let format = format.or_else(|| is_dash_url(&url).then(|| "best".to_string()));
-                JobKind::YtDlp { url, options: ytdlp(format) }
+                JobKind::Youtube {
+                    url: source,
+                    options: YoutubeJobOptions {
+                        cookies: row.cookies.clone(),
+                        referrer: row.referrer.clone(),
+                        proxy: options.proxy.clone(),
+                        max_connections,
+                        subtitle_tracks: row.subtitle_tracks.clone(),
+                    },
+                }
             }
-            DownloadRoute::Hls => {
-                JobKind::Hls { url: row.url.clone(), headers, fallback: ytdlp(None) }
-            }
+            DownloadRoute::Hls => JobKind::Hls { url: row.url.clone(), headers },
             DownloadRoute::Dash => {
                 let (url, _) = split_falcon_format(&row.url);
                 JobKind::Dash { url, headers }
@@ -554,8 +522,8 @@ impl QueueManager {
 }
 
 enum JobKind {
-    YtDlp { url: String, options: YtDlpOptions },
-    Hls { url: String, headers: HttpHeaders, fallback: YtDlpOptions },
+    Youtube { url: String, options: YoutubeJobOptions },
+    Hls { url: String, headers: HttpHeaders },
     Dash { url: String, headers: HttpHeaders },
     Http { url: String, headers: HttpHeaders },
 }
@@ -625,7 +593,6 @@ pub(crate) fn outcome_for(
             }
         }
         DownloadError::Fatal(message) => Outcome::Fail(message),
-        DownloadError::NeedsYtDlp => Outcome::Fail("ERR_YTDLP_MISSING".into()),
     }
 }
 
@@ -642,19 +609,14 @@ async fn run_job(
         JobKind::Http { url, headers } => {
             crate::download::http::process_http(&ctx, &url, &out, headers).await
         }
-        JobKind::YtDlp { url, options } => {
-            crate::download::ytdlp::process_ytdlp(&ctx, &url, &out, options).await
+        JobKind::Youtube { url, options } => {
+            crate::download::youtube_job::process_youtube(&ctx, &url, &out, options).await
         }
         JobKind::Dash { url, headers } => {
             crate::download::dash::process_dash_stream(&ctx, &url, &out, headers).await
         }
-        JobKind::Hls { url, headers, fallback } => {
-            match crate::download::hls::process_hls_stream(&ctx, &url, &out, headers).await {
-                Err(DownloadError::NeedsYtDlp) => {
-                    crate::download::ytdlp::process_ytdlp(&ctx, &url, &out, fallback).await
-                }
-                other => other,
-            }
+        JobKind::Hls { url, headers } => {
+            crate::download::hls::process_hls_stream(&ctx, &url, &out, headers).await
         }
     };
 
@@ -847,7 +809,6 @@ mod tests {
             max_connections_per_server: 0,
             speed_limit_kbps: 512,
             proxy: Some("  ".into()),
-            ytdlp_path: " /opt/homebrew/bin/yt-dlp ".into(),
             ..Default::default()
         };
         qm.apply_settings(&settings);
@@ -856,7 +817,6 @@ mod tests {
         assert_eq!(qm.speed_limit_kbps(), 512);
         let options = lock_or_recover(&qm.options).clone();
         assert_eq!(options.proxy, None);
-        assert_eq!(options.ytdlp_path.as_deref(), Some("/opt/homebrew/bin/yt-dlp"));
     }
 
     #[test]
@@ -1004,21 +964,6 @@ mod tests {
     }
 
     #[test]
-    fn ytdlp_limit_composes_per_download_and_split_global_caps() {
-        assert_eq!(ytdlp_speed_limit_kbps(0, 4, 0), 0);
-        assert_eq!(ytdlp_speed_limit_kbps(1000, 1, 0), 1000);
-        assert_eq!(ytdlp_speed_limit_kbps(1000, 4, 0), 250);
-        assert_eq!(
-            ytdlp_speed_limit_kbps(3, 4, 0),
-            1,
-            "a configured limit must remain enforceable"
-        );
-        assert_eq!(ytdlp_speed_limit_kbps(0, 4, 512), 512);
-        assert_eq!(ytdlp_speed_limit_kbps(1000, 4, 100), 100, "the stricter cap wins");
-        assert_eq!(ytdlp_speed_limit_kbps(1000, 4, 500), 250, "the global share still applies");
-    }
-
-    #[test]
     fn outcomes_follow_stop_reason_and_retry_budget() {
         use DownloadError::*;
         assert_eq!(outcome_for(Cancelled, Some(StopReason::Pause), 0, 0), Outcome::Leave);
@@ -1137,19 +1082,19 @@ mod tests {
         );
         assert_eq!(
             route_queued_download("https://www.youtube.com/watch?v=abc", None),
-            DownloadRoute::YtDlp
+            DownloadRoute::Youtube
         );
         assert_eq!(
             route_queued_download(
                 "https://rr3---sn-abc.googlevideo.com/videoplayback?itag=18&id=xyz",
                 Some("https://www.youtube.com/watch?v=abc"),
             ),
-            DownloadRoute::YtDlp
+            DownloadRoute::Youtube
         );
         let opaque = "https://rr5---sn.googlevideo.com/videoplayback?sabr=1&id=o-APsuIA4T4oPiiO6f7-MNbOU-LO0MDxOui5B37OAnUHZZ";
-        assert_eq!(route_queued_download(opaque, None), DownloadRoute::YtDlp);
+        assert_eq!(route_queued_download(opaque, None), DownloadRoute::Youtube);
         assert!(
-            ytdlp_source_url_for_download(opaque, None).is_none(),
+            youtube_page_url_for_download(opaque, None).is_none(),
             "opaque googlevideo without watch page must fail, not stay queued"
         );
     }

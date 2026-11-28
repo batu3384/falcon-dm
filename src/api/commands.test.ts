@@ -40,9 +40,10 @@ describe('localizeDownloadError', () => {
     expect(localizeDownloadError('invalid url', t)).toBe('errors.invalid_url');
     expect(localizeDownloadError('not a real media url', t)).toBe('errors.junk_media_url');
     expect(localizeDownloadError('ERR_DISK_FULL', t)).toBe('errors.disk_full');
-    expect(localizeDownloadError('ERR_YTDLP_MISSING', t)).toBe('errors.ytdlp_missing');
-    expect(localizeDownloadError('ERR_YTDLP_PATH_INVALID: /bad/path', t)).toBe(
-      'errors.ytdlp_path_invalid',
+    expect(localizeDownloadError('ERR_YT_PRIVATE: sign in', t)).toBe('errors.video_private');
+    expect(localizeDownloadError('ERR_YT_BOT_CHECK: captcha', t)).toBe('errors.yt_bot_check');
+    expect(localizeDownloadError('ERR_YT_FORMAT_UNAVAILABLE: x', t)).toBe(
+      'errors.yt_format_unavailable',
     );
     expect(localizeDownloadError('ERR_HLS_LIVE', t)).toBe('errors.hls_live');
     expect(localizeDownloadError('ERR_HLS_DRM', t)).toBe('errors.hls_drm');
@@ -50,9 +51,10 @@ describe('localizeDownloadError', () => {
     expect(localizeDownloadError('ERR_DASH_DRM', t)).toBe('errors.dash_drm');
     expect(localizeDownloadError('ERR_PARTIAL_RESPONSE', t)).toBe('errors.partial_response');
     expect(localizeDownloadError('ERR_CONTENT_ENCODING', t)).toBe('errors.content_encoding');
-    expect(localizeDownloadError('ERR_VIDEO_UNAVAILABLE', t)).toBe('errors.video_unavailable');
-    expect(localizeDownloadError('ERR_VIDEO_PRIVATE', t)).toBe('errors.video_private');
-    expect(localizeDownloadError('ERR_LOGIN_REQUIRED', t)).toBe('errors.login_required');
+    expect(localizeDownloadError('ERR_YT_UNAVAILABLE: VIDEO_CHECK: no', t)).toBe(
+      'errors.video_unavailable',
+    );
+    expect(localizeDownloadError('ERR_YT_LOGIN_REQUIRED: signin', t)).toBe('errors.login_required');
     expect(localizeDownloadError('ERR_CHECKSUM_MISMATCH', t)).toBe('errors.checksum_mismatch');
     expect(localizeDownloadError('ERR_CHECKSUM_INVALID', t)).toBe('errors.checksum_invalid');
   });
@@ -65,8 +67,7 @@ describe('localizeDownloadError', () => {
     expect(localizeDownloadError('HTTP 418', t)).toBe('errors.http_other:418');
   });
 
-  it('strips the yt-dlp prefix and keeps unknown text', () => {
-    expect(localizeDownloadError('yt-dlp: Private video', t)).toBe('Private video');
+  it('keeps unknown text as it is', () => {
     expect(localizeDownloadError('something odd', t)).toBe('something odd');
   });
 });

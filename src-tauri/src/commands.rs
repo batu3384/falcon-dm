@@ -344,7 +344,7 @@ pub(crate) fn update_download_speed_limit(
 }
 
 /// Set one download's cap in decimal KB/s; zero means the global cap. Native
-/// HTTP/HLS workers pick this up live through their shared row bucket. yt-dlp's
+/// HTTP/HLS workers pick this up live through their shared row bucket. The
 /// `--limit-rate` is fixed when its child process starts, so there it applies
 /// to the next start or retry.
 #[tauri::command]
@@ -438,56 +438,6 @@ pub fn revoke_extension(extension_id: String, state: State<'_, AppState>) -> Res
     *lock_or_recover(&state.api_token) = settings.api_token.clone();
     *lock_or_recover(&state.settings) = settings;
     Ok(())
-}
-
-/// Which external tools the engines will use. Shown in Settings and onboarding.
-#[derive(serde::Serialize)]
-pub(crate) struct ToolStatus {
-    ytdlp_path: Option<String>,
-    ytdlp_version: Option<String>,
-    /// Error code when yt-dlp is unusable (`ERR_YTDLP_MISSING`, `ERR_YTDLP_PATH_INVALID: …`).
-    ytdlp_error: Option<String>,
-    ffmpeg_path: Option<String>,
-}
-
-#[tauri::command]
-pub async fn get_tool_status(state: State<'_, AppState>) -> Result<ToolStatus, String> {
-    use crate::download::tools::{augmented_path, find_ffmpeg, find_ytdlp};
-    let preferred = lock_or_recover(&state.settings).ytdlp_path.clone();
-    let (ytdlp, ffmpeg) =
-        tokio::task::spawn_blocking(move || (find_ytdlp(Some(&preferred)), find_ffmpeg()))
-            .await
-            .map_err(|e| e.to_string())?;
-    let mut status = ToolStatus {
-        ytdlp_path: None,
-        ytdlp_version: None,
-        ytdlp_error: None,
-        ffmpeg_path: ffmpeg.ok().map(|p| p.to_string_lossy().to_string()),
-    };
-    match ytdlp {
-        Ok(path) => {
-            let version = tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                tokio::process::Command::new(&path)
-                    .arg("--version")
-                    .env("PATH", augmented_path())
-                    .stdin(std::process::Stdio::null())
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await;
-            if let Ok(Ok(output)) = version {
-                if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    status.ytdlp_version =
-                        (!text.is_empty()).then(|| text.chars().take(40).collect());
-                }
-            }
-            status.ytdlp_path = Some(path.to_string_lossy().to_string());
-        }
-        Err(error) => status.ytdlp_error = Some(error),
-    }
-    Ok(status)
 }
 
 /// ponytail: surface the in-memory log ring buffer to the frontend "Logs" panel.

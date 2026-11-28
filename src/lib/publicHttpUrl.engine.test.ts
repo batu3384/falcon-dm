@@ -18,8 +18,8 @@ describe('youtubeDownloadHost', () => {
 
 describe('downloadEngine', () => {
   it('mirrors the backend routing', () => {
-    expect(downloadEngine('https://www.youtube.com/watch?v=abc')).toBe('yt-dlp');
-    expect(downloadEngine('https://cdn.example.com/stream.mpd')).toBe('yt-dlp');
+    expect(downloadEngine('https://www.youtube.com/watch?v=abc')).toBe('YouTube');
+    expect(downloadEngine('https://cdn.example.com/stream.mpd')).toBe('DASH');
     expect(downloadEngine('https://cdn.example.com/live/index.m3u8')).toBe('HLS');
     expect(downloadEngine('https://cdn.example.com/file.mp4?x=.m3u8')).toBe('HTTP');
     expect(hlsDownloadUrl('https://cdn.example.com/a.m3u8/b')).toBe(true);
