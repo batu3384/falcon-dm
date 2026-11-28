@@ -2652,6 +2652,10 @@ mod tests {
         assert!(logical_input_bytes > 128 * 1024 * 1024);
 
         let output = dir.join("large-ts-memory.mp4");
+        // ru_maxrss is monotonic, but sampling the peak BEFORE the remux still
+        // captures harness+fixture memory; the growth across the remux is what
+        // must stay payload-independent.
+        let baseline_rss = max_rss_bytes();
         remux_ts_files_to_mp4(&inputs, &output, &|| false).unwrap();
         let output_bytes = output.metadata().unwrap().len();
         assert!(
@@ -2659,18 +2663,23 @@ mod tests {
             "large synthetic payloads were not carried into the MP4 ({output_bytes} output bytes from {logical_input_bytes} input bytes)"
         );
         let peak = max_rss_bytes();
+        let growth = peak.saturating_sub(baseline_rss);
         let _ = std::fs::remove_dir_all(dir);
         eprintln!(
-            "large TS remux peak RSS: {peak} bytes for {logical_input_bytes} input bytes ({output_bytes} output bytes)"
+            "large TS remux peak RSS: {peak} bytes (baseline {baseline_rss}, growth {growth}) for {logical_input_bytes} input bytes ({output_bytes} output bytes)"
         );
-        // Whole-payload buffering anywhere in the demux/mux chain would cross
-        // this quarter-input budget immediately. The remaining memory is the
-        // small MP4 sample tables, bounded parser state, one access unit, and
-        // the 1 MiB I/O chunk — none of which scales with total media payload bytes.
+        // ru_maxrss is a monotonic process-wide peak, so CI runners with a
+        // bigger baseline (dyld, harness, fonts) fail a fixed-input fraction
+        // even when nothing scales with the payload. What proves streaming is
+        // the GROWTH over the pre-remux baseline: whole-payload buffering
+        // anywhere in the demux/mux chain would push it past a quarter of the
+        // input immediately. The remaining growth is the small MP4 sample
+        // tables, bounded parser state, one access unit, and the 1 MiB I/O
+        // chunk — none of which scales with total media payload bytes.
         let budget = logical_input_bytes / 4;
         assert!(
-            peak < budget,
-            "peak RSS {peak} bytes scaled with a {logical_input_bytes}-byte TS input (budget {budget})"
+            growth < budget,
+            "RSS growth {growth} bytes (baseline {baseline_rss}, peak {peak}) scaled with a {logical_input_bytes}-byte TS input (budget {budget})"
         );
     }
 
