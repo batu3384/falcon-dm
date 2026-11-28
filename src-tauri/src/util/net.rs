@@ -424,10 +424,13 @@ pub fn is_youtube_direct_cdn_url(url: &str) -> bool {
 pub fn split_falcon_format(url: &str) -> (String, Option<String>) {
     if let Some((base, frag)) = url.rsplit_once('#') {
         if let Some(enc) = frag.strip_prefix("falconfmt=") {
-            let decoded = url::form_urlencoded::parse(format!("x={enc}").as_bytes())
-                .next()
-                .map(|(_, v)| v.into_owned())
-                .unwrap_or_else(|| enc.to_string());
+            // Percent-decode only: fragments are not form bodies, and writers
+            // (byte_serialize) encode spaces as %20 — so a literal `+` is a plus
+            // sign in both raw user input and percent-encoded form, never a space.
+            let decoded = percent_encoding::percent_decode_str(enc)
+                .decode_utf8()
+                .map(|v| v.into_owned())
+                .unwrap_or_else(|_| enc.to_string());
             if let Some(clean) = sanitize_format_selector(&decoded) {
                 return (base.to_string(), Some(clean));
             }
@@ -807,6 +810,29 @@ mod tests {
     fn youtube_watch_url_accepts_embed() {
         assert!(is_youtube_watch_url("https://www.youtube.com/embed/dQw4w9WgXcQ"));
         assert!(is_youtube_watch_url("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn split_falcon_format_preserves_plus_in_both_input_forms() {
+        // Users type raw selectors (yt-dlp style) with a literal `+`; the extension
+        // writes percent-encoded `%2B`. Both must decode to the same `+` — a raw
+        // plus must NOT collapse into a space (form-urlencoded semantics are wrong
+        // for fragments, where byte_serialize encodes spaces as %20 only).
+        let (_b1, raw) = split_falcon_format(
+            "https://www.youtube.com/watch?v=abc#falconfmt=bestvideo[height<=360]+bestaudio",
+        );
+        assert_eq!(raw.as_deref(), Some("bestvideo[height<=360]+bestaudio"));
+        let (_b2, encoded) = split_falcon_format(
+            "https://www.youtube.com/watch?v=abc#falconfmt=bestvideo%5Bheight%3C%3D360%5D%2Bbestaudio",
+        );
+        assert_eq!(encoded.as_deref(), Some("bestvideo[height<=360]+bestaudio"));
+        // Round-trip through attach stays stable.
+        let attached = attach_falcon_format(
+            "https://www.youtube.com/watch?v=abc",
+            Some("bestvideo[height<=360]+bestaudio"),
+        );
+        let (_b3, rt) = split_falcon_format(&attached);
+        assert_eq!(rt.as_deref(), Some("bestvideo[height<=360]+bestaudio"));
     }
 
     #[test]
