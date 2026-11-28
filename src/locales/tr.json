@@ -426,6 +426,9 @@
     "yt_cipher_unsupported": "Bu video, Falcon DM'nin henüz çözemediği bir akış koruması kullanıyor.",
     "yt_format_invalid": "Bu indirme için kalite seçici geçerli değil.",
     "yt_format_unavailable": "İstenen kalite bu video için kullanılamıyor.",
-    "yt_merge_unsupported": "Bu videonun akışları MP4 dosyasında birleştirilemez."
+    "yt_merge_unsupported": "Bu videonun akışları MP4 dosyasında birleştirilemez.",
+    "dash_hierarchical_sidx": "Bu DASH yayını desteklenmeyen hiyerarşik segment indeksleri kullanıyor.",
+    "dash_multiperiod": "Bu DASH yayını birden çok periyottan oluşuyor (ör. eklenmiş reklamlar) ve tek dosya olarak indirilemez.",
+    "dash_no_mux_compatible": "Mevcut formatların hiçbiri MP4'e yazılamıyor (H.264/H.265 video veya AAC ses yok)."
   }
 }

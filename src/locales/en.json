@@ -426,6 +426,9 @@
     "yt_cipher_unsupported": "This video uses a stream protection Falcon DM cannot decode yet.",
     "yt_format_invalid": "The quality selector for this download is not valid.",
     "yt_format_unavailable": "The requested quality is not available for this video.",
-    "yt_merge_unsupported": "This video's streams cannot be combined into an MP4 file."
+    "yt_merge_unsupported": "This video's streams cannot be combined into an MP4 file.",
+    "dash_hierarchical_sidx": "This DASH stream uses hierarchical segment indexes, which are not supported.",
+    "dash_multiperiod": "This DASH stream has multiple periods (e.g. stitched ads) and cannot be downloaded as a single file.",
+    "dash_no_mux_compatible": "None of the available formats can be written to MP4 (no H.264/H.265 video or AAC audio)."
   }
 }
