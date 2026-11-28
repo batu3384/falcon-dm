@@ -4,7 +4,7 @@
 
 | Boundary | Control |
 |----------|---------|
-| Download URLs | Only HTTP(S); loopback, private, link-local, multicast, CGNAT and other non-public IP targets are blocked. Enqueue checks literal hosts without DNS so offline links can queue. Every engine — HTTP, HLS, DASH and the YouTube extraction/media clients — revalidates each redirect hop and pins public DNS results. |
+| Download URLs | Only HTTP(S); loopback, private, link-local, multicast, CGNAT and other non-public IP targets are blocked. Enqueue checks literal hosts without DNS so offline links can queue. Every engine — HTTP, HLS, DASH and the YouTube extraction/media clients — revalidates each redirect hop and pins public DNS results. Exception: with a user-configured upstream proxy the proxy itself resolves and connects to the target — DNS pinning cannot constrain the remote side, so a configured proxy is a trusted component of the egress policy. |
 | Local API | `127.0.0.1` only; per-install UUID token compared in constant time; paired extension Origin allowlist. Non-health requests are rate-limited, with a stricter separate bucket for uploads. |
 | Extension pairing | User compares a 6-digit code and approves it in the app. Approval hands the token to that exact extension/code pair once only; token loss or rotation requires a fresh approval, never silent reissue. Declined codes stay declined for ten minutes. |
 | Extension data | Popup rows omit URLs, paths and headers. Session cookies are not exposed to the frontend and are cleared on terminal download states. Cookies stored in profiles/rows are encrypted at rest. |
