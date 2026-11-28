@@ -77,7 +77,7 @@ percent-encoding = "2"
 # sha2 + md-5: streaming checksum verification of finished files. Both stay on
 # the digest-0.10 line so one generic hasher covers SHA-256 and MD5.
 sha2 = "0.10"
-md-5 = "0.10"
+md-5 = "0.11"
 transmux = "0.33.0"
 dash-mpd-core = "0.1.0"
 rquickjs = { version = "0.15.0", default-features = false, features = ["std"] }
