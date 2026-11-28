@@ -71,6 +71,16 @@ Yes. Select the row and set **Speed limit** in the Inspector (decimal KB/s). Emp
 - **From source:** pull latest `main` and rebuild.
 - **Signed auto-install inside the app** is not shipped yet ([Roadmap](Roadmap)).
 
+## Which YouTube videos can Falcon not download?
+
+The pipeline is fully native (no yt-dlp), and some YouTube shapes are hard product boundaries rather than missing features — they fail with a clear typed error, never a corrupt file:
+
+- **Live, upcoming or post-live-DVR streams** — wait for the published replay (`ERR_YT_LIVE_OR_PREMIERE`).
+- **DRM-protected content** (rentals, purchases) — refused outright.
+- **Videos that require a PO token or only offer SABR streaming** — a small and shifting minority; Falcon uses direct-stream clients and honest failure instead of a broken file (`ERR_YT_NO_FORMATS`/`ERR_YT_BOT_CHECK`). Opening the video once in the signed-in browser often makes it downloadable.
+- **New cipher shapes YouTube has not used before** — the bounded cipher engine covers classic and common helper-object programs and deliberately rejects anything dynamic instead of mis-deciphering it (`ERR_YT_CIPHER_UNSUPPORTED`); support catches up in updates.
+- **Format pairs that cannot go into MP4** (e.g. VP9/AV1 video or Opus audio when no H.264/AAC alternative exists) — the selector defaults already prefer MP4-compatible streams (`ERR_YT_MERGE_UNSUPPORTED`).
+
 ## Do YouTube downloads use my browser sign-in?
 
 Capture cookies come from the browser cookie jar at request time and travel with the download row: the YouTube extraction and the googlevideo media requests both use them, never leaving the local machine. Age-restricted or members-only videos therefore work when captured from a signed-in browser.
