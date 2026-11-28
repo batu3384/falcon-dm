@@ -17,6 +17,9 @@ use crate::download::http_client::{open, parse_content_range, HttpHeaders, Opene
 use crate::download::job::JobContext;
 use crate::download::limiter::{cancelled, sleep_or_cancel};
 use crate::download::mux::{self, MergeError, RemuxError};
+use crate::download::subtitles::{
+    hls_subtitle_renditions, write_hls_subtitle_rendition, HlsSubtitleRendition,
+};
 use crate::download::DownloadError;
 use crate::util::validate_fetch_url_async;
 use aes::cipher::{
@@ -464,6 +467,35 @@ struct Plan {
     /// Signed-URL rotation must not invalidate cache, while a re-cut or
     /// re-laddered playlist (different paths or addressing) must.
     fingerprint: String,
+    /// Subtitle renditions selected from the master playlist, written next to
+    /// the video after it finalizes. `None` for plain media playlists and for
+    /// masters without a subtitle selection.
+    subtitles: Option<SubtitlePlan>,
+}
+
+#[derive(Clone, Debug)]
+struct SubtitlePlan {
+    /// Final (post-redirect) master-playlist URL the rendition URIs resolve
+    /// against and segment fetches pin to.
+    master_url: Url,
+    renditions: Vec<HlsSubtitleRendition>,
+}
+
+/// Product selection: the DEFAULT=YES rendition when one exists, else the
+/// first AUTOSELECT=YES, else nothing — plus every FORCED=YES rendition.
+/// Output stays in master-playlist order and never duplicates a rendition
+/// that is both default/autoselected and forced.
+fn select_subtitle_renditions(renditions: &[HlsSubtitleRendition]) -> Vec<HlsSubtitleRendition> {
+    let primary = renditions
+        .iter()
+        .position(|rendition| rendition.is_default)
+        .or_else(|| renditions.iter().position(|rendition| rendition.is_autoselect));
+    renditions
+        .iter()
+        .enumerate()
+        .filter(|(index, rendition)| Some(*index) == primary || rendition.is_forced)
+        .map(|(_, rendition)| rendition.clone())
+        .collect()
 }
 
 #[derive(Default)]
@@ -744,6 +776,7 @@ async fn resolve_plan(
     let (bytes, base) = fetch_playlist(ctx, &source, &source, headers).await?;
     let mut registry = KeyRegistry::default();
     let mut renditions = Vec::new();
+    let mut subtitles = None;
     if playlist_is_master(&bytes) {
         let master = m3u8_rs::parse_master_playlist_res(&bytes)
             .map_err(|_| DownloadError::fatal("Failed to parse m3u8 playlist"))?;
@@ -771,6 +804,16 @@ async fn resolve_plan(
                 fetch_media_playlist(ctx, &source, &audio_url, headers).await?;
             renditions.push(build_media_plan(&audio_media, &audio_base, None, &mut registry)?);
         }
+
+        // Subtitle renditions are owned copies, so the master playlist can be
+        // dropped here; the segments themselves are fetched after finalize.
+        let selected = select_subtitle_renditions(&hls_subtitle_renditions(
+            &master,
+            variant.subtitles.as_deref(),
+        ));
+        if !selected.is_empty() {
+            subtitles = Some(SubtitlePlan { master_url: base.clone(), renditions: selected });
+        }
     } else {
         let media = parse_hls_media(&bytes)?;
         renditions.push(build_media_plan(&media, &base, None, &mut registry)?);
@@ -781,7 +824,7 @@ async fn resolve_plan(
         .iter()
         .try_fold(0u64, |total, rendition| total.checked_add(rendition.estimated_bytes?));
     let fingerprint = plan_fingerprint(&renditions, &keys);
-    Ok(Plan { source, keys, renditions, estimated_bytes, fingerprint })
+    Ok(Plan { source, keys, renditions, estimated_bytes, fingerprint, subtitles })
 }
 
 type HostClient = Option<(String, Client)>;
@@ -1707,6 +1750,45 @@ async fn assemble_output(
     merge_split_audio_mp4(ctx, &video_render, &audio_render, output).await
 }
 
+/// Post-finalize subtitle writes. Every rendition failure is logged and never
+/// reclassifies the already completed video as a failure.
+async fn write_hls_subtitles(ctx: &JobContext, plan: &Plan, headers: &HttpHeaders, landed: &Path) {
+    let Some(subtitles) = &plan.subtitles else {
+        return;
+    };
+    let Some(save_dir) = landed.parent() else {
+        return;
+    };
+    let stem = landed.file_stem().and_then(|stem| stem.to_str()).unwrap_or("download");
+    for rendition in &subtitles.renditions {
+        match write_hls_subtitle_rendition(
+            ctx,
+            &plan.source,
+            &subtitles.master_url,
+            rendition,
+            headers,
+            save_dir,
+            stem,
+        )
+        .await
+        {
+            Ok(paths) if !paths.is_empty() => log::info!(
+                "download {}: wrote {} subtitle file(s) for rendition '{}'",
+                ctx.id,
+                paths.len(),
+                rendition.name
+            ),
+            Ok(_) => {}
+            Err(error) => log::warn!(
+                "download {}: subtitle rendition '{}' failed: {}",
+                ctx.id,
+                rendition.name,
+                error.message()
+            ),
+        }
+    }
+}
+
 /// Download an HLS stream to `out_path`. Returns where the file landed.
 pub async fn process_hls_stream(
     ctx: &JobContext,
@@ -1748,6 +1830,7 @@ pub async fn process_hls_stream(
     }
     let landed = ctx.finalize(&output, &dest).await?;
     let _ = tokio::fs::remove_dir_all(&dir).await;
+    write_hls_subtitles(ctx, &plan, &headers, &landed).await;
     Ok(landed)
 }
 
@@ -1992,9 +2075,19 @@ mod tests {
     /// Static file server. `fail_first` paths answer 503 once. Honors exact
     /// byte ranges so HLS EXT-X-BYTERANGE fixtures exercise 206 validation.
     async fn serve(files: HashMap<String, Vec<u8>>, fail_first: Vec<String>) -> Fixture {
+        serve_full(files, fail_first, Vec::new()).await
+    }
+
+    /// `serve` plus `fail_always` paths answering 500 on every hit.
+    async fn serve_full(
+        files: HashMap<String, Vec<u8>>,
+        fail_first: Vec<String>,
+        fail_always: Vec<String>,
+    ) -> Fixture {
         use tokio::io::AsyncReadExt;
         let files = Arc::new(files);
         let fail_first = Arc::new(fail_first);
+        let fail_always = Arc::new(fail_always);
         let hits = Arc::new(std::sync::Mutex::new(HashMap::<String, usize>::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2004,7 +2097,8 @@ mod tests {
                 let Ok((mut sock, _)) = listener.accept().await else {
                     break;
                 };
-                let (files, fail_first, hits) = (files.clone(), fail_first.clone(), hits_c.clone());
+                let (files, fail_first, fail_always, hits) =
+                    (files.clone(), fail_first.clone(), fail_always.clone(), hits_c.clone());
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 8192];
                     let Ok(n) = sock.read(&mut buf).await else {
@@ -2026,6 +2120,10 @@ mod tests {
                         *entry += 1;
                         *entry
                     };
+                    if fail_always.contains(&path) {
+                        let _ = sock.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                        return;
+                    }
                     if seen == 1 && fail_first.contains(&path) {
                         let _ = sock.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
                         return;
@@ -2753,8 +2851,12 @@ mod tests {
     }
 
     fn test_out(tag: &str) -> (PathBuf, i64) {
+        // Unique per test within the process: two tags of equal string length
+        // must never share an HLS session dir through identical ids.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let out = fresh_dir(tag);
-        let id = 950_000 + i64::from(std::process::id()) + out.as_os_str().len() as i64;
+        let id =
+            950_000 + i64::from(std::process::id()) + NEXT.fetch_add(1, Ordering::Relaxed) as i64;
         (out, id)
     }
 
@@ -3071,6 +3173,173 @@ video.m3u8
         .await
         .unwrap();
         assert_eq!(&std::fs::read(&landed).unwrap()[4..8], b"ftyp");
+        remove_artifacts(id);
+        let _ = std::fs::remove_dir_all(out_dir);
+    }
+
+    fn rendition(
+        name: &str,
+        lang: Option<&str>,
+        default: bool,
+        autoselect: bool,
+        forced: bool,
+    ) -> HlsSubtitleRendition {
+        HlsSubtitleRendition {
+            group_id: "subs".into(),
+            language: lang.map(str::to_string),
+            name: name.into(),
+            uri: format!("subs/{name}.m3u8"),
+            is_default: default,
+            is_autoselect: autoselect,
+            is_forced: forced,
+        }
+    }
+
+    #[test]
+    fn subtitle_selection_prefers_default_then_autoselect_and_always_keeps_forced() {
+        let en = rendition("en", Some("en"), true, true, false);
+        let tr = rendition("tr", Some("tr"), false, true, false);
+        let fr = rendition("fr", Some("fr"), false, false, false);
+        // DEFAULT=YES wins over AUTOSELECT.
+        let picked = select_subtitle_renditions(&[en.clone(), tr.clone()]);
+        assert_eq!(picked, vec![en.clone()]);
+        // Without a default the first AUTOSELECT=YES is the pick.
+        let picked = select_subtitle_renditions(&[fr.clone(), tr.clone()]);
+        assert_eq!(picked, vec![tr.clone()]);
+        // Neither default nor autoselect selects nothing.
+        assert_eq!(select_subtitle_renditions(std::slice::from_ref(&fr)), Vec::new());
+        // FORCED=YES renditions always ride along, in master order.
+        let forced = rendition("forced", Some("fr"), false, false, true);
+        let picked = select_subtitle_renditions(&[forced.clone(), tr.clone()]);
+        assert_eq!(picked, vec![forced.clone(), tr.clone()]);
+        // A rendition that is both default and forced is not duplicated.
+        let both = rendition("both", Some("en"), true, true, true);
+        assert_eq!(select_subtitle_renditions(std::slice::from_ref(&both)), vec![both]);
+    }
+
+    /// Master playlist with a TYPE=SUBTITLES group plus the media playlists of
+    /// three renditions: en is DEFAULT, tr is plain, fr is FORCED.
+    fn subtitle_stream_files() -> HashMap<String, Vec<u8>> {
+        let mut files = HashMap::new();
+        files.insert(
+            "/master.m3u8".to_string(),
+            br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="en",NAME="English",DEFAULT=YES,AUTOSELECT=YES,URI="subs/en.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="tr",NAME="Turkish",AUTOSELECT=YES,URI="subs/tr.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="fr",NAME="French Forced",FORCED=YES,URI="subs/fr.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=800000,SUBTITLES="subs"
+video.m3u8
+"#
+            .to_vec(),
+        );
+        files.insert(
+            "/video.m3u8".to_string(),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\npart0.ts\n#EXTINF:2,\npart1.ts\n#EXTINF:2,\npart2.ts\n#EXT-X-ENDLIST\n".to_vec(),
+        );
+        let sub_playlist = |stem: &str| {
+            format!(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\n{stem}0.vtt\n#EXTINF:2.000,\n{stem}1.vtt\n#EXT-X-ENDLIST\n"
+            )
+        };
+        let cue = |mpegts: u64, text: &str| {
+            format!(
+                "WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:{mpegts}\n\n00:00:00.000 --> 00:00:01.000\n{text}\n"
+            )
+        };
+        for (lang, first, second) in
+            [("en", "one", "two"), ("tr", "bir", "iki"), ("fr", "un", "deux")]
+        {
+            files.insert(format!("/subs/{lang}.m3u8"), sub_playlist(lang).into_bytes());
+            files.insert(format!("/subs/{lang}0.vtt"), cue(900_000, first).into_bytes());
+            files.insert(format!("/subs/{lang}1.vtt"), cue(1_080_000, second).into_bytes());
+        }
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures/hls");
+        for i in 0..3 {
+            files.insert(
+                format!("/part{i}.ts"),
+                std::fs::read(fixture.join(format!("part{i}.ts"))).unwrap(),
+            );
+        }
+        files
+    }
+
+    /// DEFAULT and FORCED renditions land as corrected .vtt/.srt pairs next to
+    /// the finished video; the plain AUTOSELECT-only rendition stays unfetched.
+    #[tokio::test]
+    async fn master_subtitles_land_next_to_the_video_with_mapped_timestamps() {
+        let fixture = serve(subtitle_stream_files(), Vec::new()).await;
+        let (out_dir, id) = test_out("subs-out");
+        remove_artifacts(id);
+        let dest = out_dir.join("clip.mp4");
+        let (ctx, _tx) = JobContext::for_tests(id);
+        let _g = crate::util::allow_loopback_for_tests();
+        let landed = process_hls_stream(
+            &ctx,
+            &format!("{}/master.m3u8", fixture.base),
+            dest.to_str().unwrap(),
+            headers(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(landed.file_name().and_then(|n| n.to_str()), Some("clip.mp4"));
+        assert_eq!(&std::fs::read(&landed).unwrap()[4..8], b"ftyp");
+
+        // X-TIMESTAMP-MAP correction: the second segment's MPEGTS clock puts
+        // its cue at 2–3 s in the concatenated timeline.
+        let vtt = std::fs::read_to_string(out_dir.join("clip.en.vtt")).unwrap();
+        assert!(vtt.starts_with("WEBVTT"), "{vtt}");
+        assert!(vtt.contains("00:00:00.000 --> 00:00:01.000\none"), "{vtt}");
+        assert!(vtt.contains("00:00:02.000 --> 00:00:03.000\ntwo"), "{vtt}");
+        assert!(!vtt.contains("X-TIMESTAMP-MAP"), "{vtt}");
+        let srt = std::fs::read_to_string(out_dir.join("clip.en.srt")).unwrap();
+        assert!(srt.contains("00:00:00,000 --> 00:00:01,000\none"), "{srt}");
+        assert!(srt.contains("00:00:02,000 --> 00:00:03,000\ntwo"), "{srt}");
+
+        // FORCED=YES is always included even without DEFAULT/AUTOSELECT.
+        assert!(out_dir.join("clip.fr.vtt").exists());
+        assert!(out_dir.join("clip.fr.srt").exists());
+        let forced = std::fs::read_to_string(out_dir.join("clip.fr.vtt")).unwrap();
+        assert!(forced.contains("un"), "{forced}");
+
+        // tr is neither DEFAULT nor the first AUTOSELECT nor FORCED.
+        assert!(!out_dir.join("clip.tr.vtt").exists());
+        assert!(!out_dir.join("clip.tr.srt").exists());
+        let hits = fixture.hits.lock().unwrap();
+        assert_eq!(hits.get("/subs/tr.m3u8"), None, "unselected rendition is never fetched");
+        assert_eq!(hits["/subs/en.m3u8"], 1);
+        assert_eq!(hits["/subs/fr.m3u8"], 1);
+        drop(hits);
+        remove_artifacts(id);
+        let _ = std::fs::remove_dir_all(out_dir);
+    }
+
+    /// A subtitle server that 500s every request must not turn the completed
+    /// video into a failure: the media lands and no subtitle file appears.
+    #[tokio::test]
+    async fn failing_subtitle_server_still_completes_the_video() {
+        let fixture =
+            serve_full(subtitle_stream_files(), Vec::new(), vec!["/subs/en.m3u8".into()]).await;
+        let (out_dir, id) = test_out("subs-fail-out");
+        remove_artifacts(id);
+        let dest = out_dir.join("clip.mp4");
+        let (ctx, _tx) = JobContext::for_tests(id);
+        let _g = crate::util::allow_loopback_for_tests();
+        let landed = process_hls_stream(
+            &ctx,
+            &format!("{}/master.m3u8", fixture.base),
+            dest.to_str().unwrap(),
+            headers(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&std::fs::read(&landed).unwrap()[4..8], b"ftyp", "video still completes");
+        assert!(!out_dir.join("clip.en.vtt").exists());
+        assert!(!out_dir.join("clip.en.srt").exists());
+        // The FORCED rendition is independent of the broken one and still lands.
+        assert!(out_dir.join("clip.fr.vtt").exists());
+        let hits = fixture.hits.lock().unwrap();
+        assert!(hits["/subs/en.m3u8"] >= 1, "the failing playlist was attempted");
+        drop(hits);
         remove_artifacts(id);
         let _ = std::fs::remove_dir_all(out_dir);
     }
