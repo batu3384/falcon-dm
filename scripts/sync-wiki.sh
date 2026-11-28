@@ -17,8 +17,20 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
-TOKEN="$(gh auth token)"
-URL="https://x-access-token:${TOKEN}@github.com/${REPO}.wiki.git"
+# Credentials never travel in the remote URL or process arguments: a
+# temporary GIT_ASKPASS helper answers git's credential prompt instead,
+# so the token cannot leak into argv, error messages, or git config.
+ASKPASS="$TMP/askpass.sh"
+cat >"$ASKPASS" <<'ASKPASS_EOF'
+#!/bin/sh
+case "$1" in
+  *sername*) echo x-access-token ;;
+  *) gh auth token ;;
+esac
+ASKPASS_EOF
+chmod 700 "$ASKPASS"
+export GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0
+URL="https://github.com/${REPO}.wiki.git"
 
 if ! git clone "$URL" "$TMP/repo" 2>"$TMP/clone.err"; then
   cat >&2 <<EOF
